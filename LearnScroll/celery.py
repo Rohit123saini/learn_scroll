@@ -49,10 +49,20 @@ from celery import Celery
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "LearnScroll.settings")
 
-app = Celery("LearnScroll")
+# P-C3: task_cls = default retry policy for transient errors (LearnScroll/celery_base.py).
+app = Celery("LearnScroll", task_cls="LearnScroll.celery_base:RetryingTask")
 # Reads every CELERY_* setting from Django's settings.py (namespace="CELERY"
 # means e.g. CELERY_BROKER_URL maps to Celery's `broker_url`).
 app.config_from_object("django.conf:settings", namespace="CELERY")
 # Auto-discovers a `tasks.py` in every INSTALLED_APPS app (tuitionclass/tasks.py
 # included) — no manual task registration needed.
 app.autodiscover_tasks()
+
+# P-C3 -- ops signals: failed-task alert (celery_ops.py) and the single-beat guard (beat_guard.py).
+from celery.signals import beat_embedded_init, beat_init, task_failure  # noqa: E402
+
+from . import beat_guard as _beat_guard, celery_ops as _celery_ops  # noqa: E402
+
+task_failure.connect(_celery_ops.on_task_failure, weak=False)
+beat_init.connect(_beat_guard.on_beat_start, weak=False)
+beat_embedded_init.connect(_beat_guard.on_beat_start, weak=False)

@@ -231,10 +231,15 @@ def clamp_directory_limit(raw):
 
 def search_people(user, query, limit=DIRECTORY_DEFAULT_LIMIT):
     """
-    Followers / following / mutual users jinka naam ya username `query`
-    se match kare. Returns (users_list, has_more). Har user pe 3 annotated
-    attribute hote hain: `i_follow`, `follows_me`, `is_mutual` (serializer
-    inhi se `relation` banata hai) — koi per-row extra query nahi.
+    Followers / following / mutual users AUR friends-of-friends jinka naam
+    ya username `query` se match kare. Returns (users_list, has_more). Har
+    user pe annotated attributes hote hain: `i_follow`, `follows_me`,
+    `is_mutual`, `is_friend_of_friend` (serializer inhi se `relation`
+    banata hai) — koi per-row extra query nahi.
+
+    Friend-of-friend = koi aisa user jiska MERE kisi (accepted) connection
+    se accepted follow-relation hai (kisi bhi direction me). Ye sirf tab
+    aata hai jab mera apna koi direct follow-relation us se na ho.
 
     Rules:
       - Sirf ACCEPTED follow count hota hai (PENDING request = follow nahi).
@@ -249,7 +254,7 @@ def search_people(user, query, limit=DIRECTORY_DEFAULT_LIMIT):
     # Local import — message app module-load time pe user_profile pe depend
     # na kare (circular-import safe).
     from django.contrib.auth import get_user_model
-    from user_profile.models import BlockUser, Follow
+    from user_profile.models import BlockUser, Follow, PrivacySettings
     from .models import BlockedUser
 
     User = get_user_model()
@@ -269,25 +274,48 @@ def search_people(user, query, limit=DIRECTORY_DEFAULT_LIMIT):
         | Q(blocker_id=OuterRef('pk'), blocked_id=user.id)
     ))
 
+    # Friends-of-friends: mere connections (jinko main follow karta hoon YA
+    # jo mujhe follow karte hain) ke accepted connections. Sab kuch DB me
+    # subquery se — koi bada Python set / IN-list nahi banta.
+    my_following_ids = accepted.filter(follower_id=user.id).values('following_id')
+    my_follower_ids = accepted.filter(following_id=user.id).values('follower_id')
+    fof_a = Exists(accepted.filter(
+        Q(follower_id__in=my_following_ids) | Q(follower_id__in=my_follower_ids),
+        following_id=OuterRef('pk'),
+    ))
+    fof_b = Exists(accepted.filter(
+        Q(following_id__in=my_following_ids) | Q(following_id__in=my_follower_ids),
+        follower_id=OuterRef('pk'),
+    ))
+
     qs = (
         User.objects.filter(is_active=True)
         .exclude(pk=user.pk)
         .annotate(
             i_follow=i_follow,
             follows_me=follows_me,
+            _fof_a=fof_a,
+            _fof_b=fof_b,
             _blocked_a=blocked_user_table,
             _blocked_b=blocked_chat_table,
             _full_name=Concat('first_name', Value(' '), 'last_name'),
         )
-        .filter(Q(i_follow=True) | Q(follows_me=True))
+        .filter(Q(i_follow=True) | Q(follows_me=True) | Q(_fof_a=True) | Q(_fof_b=True))
+        # Private account tabhi dikhta hai jab main usko (accepted) follow
+        # karta hoon — friend-of-friend ke liye bhi yehi rule (leak nahi).
         .filter(Q(is_private=False) | Q(i_follow=True))
         .filter(_blocked_a=False, _blocked_b=False)
         .filter(Q(username__icontains=q) | Q(_full_name__icontains=q))
+        # S4: "hide me from search" -- still found by people I follow / who follow me (i_follow / follows_me),
+        # not by friends-of-friends.
+        .exclude(Q(pk__in=PrivacySettings.objects.filter(hide_from_search=True).values('user_id')), i_follow=False, follows_me=False)
         .annotate(
             _relation_rank=Case(
                 When(i_follow=True, follows_me=True, then=Value(0)),
                 When(i_follow=True, then=Value(1)),
-                default=Value(2),
+                When(follows_me=True, then=Value(2)),
+                default=Value(3),  # friend-of-friend
+
                 output_field=IntegerField(),
             ),
             _prefix_rank=Case(
@@ -302,11 +330,17 @@ def search_people(user, query, limit=DIRECTORY_DEFAULT_LIMIT):
         .order_by('_relation_rank', '_prefix_rank', 'username', 'pk')
     )
 
+    # P-F16 -- a friend-of-friend who is under 18 is not surfaced to a non-minor (direct connections stay findable).
+    from common import minor_policy
+
+    qs = minor_policy.exclude_minors_for_stranger(qs, user, feature=minor_policy.SEARCH, id_field='pk')
+
     rows = list(qs[:limit + 1])
     has_more = len(rows) > limit
     rows = rows[:limit]
     for u in rows:
         u.is_mutual = bool(u.i_follow and u.follows_me)
+        u.is_friend_of_friend = not (u.i_follow or u.follows_me)
     return rows, has_more
 
 

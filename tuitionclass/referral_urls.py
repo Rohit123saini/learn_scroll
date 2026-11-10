@@ -19,7 +19,8 @@
 #
 #   GET  /referrals/                        same as /tuitionclass/referrals/
 #   GET  /referrals/my-code/                same as /tuitionclass/referrals/my-code/
-#   POST /referrals/redeem/                 same as /tuitionclass/referrals/redeem/
+#   POST /referrals/redeem/                 CLOSED (410 Gone) - refer & earn is URL-only, creator opt-in
+#   GET  /referrals/earnable/               classes / test series with a commission % + share URL (?ref=<code>)
 #   GET  /referrals/class-referral-summary/ same as /tuitionclass/referrals/class-referral-summary/
 #
 # This is a second door onto the same room, not a move: tuitionclass/urls.py

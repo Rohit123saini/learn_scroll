@@ -1,0 +1,38 @@
+<!-- P-I - merge into ios/Runner/Info.plist. Strings are what App Review reads: say WHY, concretely.
+     Plugins found in lib/: camera, image_picker, photo_manager/gal, record, speech_to_text, flutter_webrtc/livekit,
+     mobile_scanner (QR), geolocator, permission_handler, flutter_callkit_incoming. Delete keys for features you cut. -->
+<key>NSCameraUsageDescription</key>
+<string>LearnScroll uses the camera to record reels and stories, scan QR codes and join video classes.</string>
+<key>NSMicrophoneUsageDescription</key>
+<string>LearnScroll uses the microphone for voice/video calls, live classes and recording videos.</string>
+<key>NSPhotoLibraryUsageDescription</key>
+<string>Choose photos and videos from your library to post, or to set as your profile picture.</string>
+<key>NSPhotoLibraryAddUsageDescription</key>
+<string>Save edited photos, videos and certificates to your library when you tap Save.</string>
+<key>NSSpeechRecognitionUsageDescription</key>
+<string>Speech recognition lets you dictate doubts and search by voice.</string>
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>Location is used only to show nearby classes and campuses. It is never shared with other users.</string>
+<key>NSUserNotificationsUsageDescription</key>
+<string>Notifications tell you about replies, class reminders and incoming calls.</string>
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>Bluetooth lets calls use your headset.</string>
+
+<key>UIBackgroundModes</key>
+<array>
+    <string>audio</string>              <!-- calls / live classes keep audio running -->
+    <string>voip</string>               <!-- PushKit incoming calls (server: APNS_VOIP_KEY_PATH) -->
+    <string>remote-notification</string><!-- FCM data pushes -->
+    <string>fetch</string>
+</array>
+<key>ITSAppUsesNonExemptEncryption</key><false/>   <!-- HTTPS/standard crypto only: skips the export-compliance prompt -->
+<key>NSAppTransportSecurity</key>
+<dict><key>NSAllowsArbitraryLoads</key><false/></dict>   <!-- never true in a release build -->
+<!-- Add ONLY if easy_audience_network_plus / any ad SDK stays in the app (it does track users): -->
+<!-- <key>NSUserTrackingUsageDescription</key><string>...</string>  + App Tracking Transparency prompt + NSPrivacyTracking=true -->
+
+<!-- Universal links: Runner.entitlements ->
+     com.apple.developer.associated-domains = [ applinks:api.learnscroll.app ]
+     Server serves /.well-known/apple-app-site-association (+ /apple-app-site-association) from common/web_links.py
+     once IOS_APP_ID="<TEAMID>.<bundle id>" is set. Capabilities to enable in Xcode: Push Notifications,
+     Background Modes, Associated Domains. -->

@@ -20,13 +20,22 @@ urlconf gives `core.urls` — see that file):
 
     GET    notifications/                 list, newest first
                                            (?is_read=true/false, ?source=message|tuitionclass,
-                                            ?category=mentions|follows|classroom|tests|other)
+                                            ?category=mentions|follows|classroom|tests|other,
+                                            N4: ?category=classes (= classroom) | money,
+                                            ?q=<search> ?unread=1 ?archived=1 ?group=1,
+                                            ?before=<cursor> keyset paging -> {results, has_more,
+                                            next_before, unread_count}; see core/notification_inbox.py)
+    POST   notifications/bulk/            N4 - {"ids": [..], "action": read|unread|delete|archive|unarchive}
     GET    notifications/{id}/            retrieve one
     DELETE notifications/{id}/            clear one (own only)
     GET    notifications/unread-count/    badge count for the bell icon
                                            (?source=..., ?category=...)
     POST   notifications/{id}/mark-read/  mark one as read
     POST   notifications/mark-all-read/   mark every unread one as read
+    POST   notifications/{id}/snooze/     N6 - {"minutes"?: 10..1440} remind again later (reminder types only)
+    POST   notifications/{id}/unsnooze/   R9 - undo of snooze (cancels the pending re-push)
+    POST   notifications/{id}/turn-off-type/   N6 - push chip off for this row's type (locked types -> 403)
+    POST   notifications/{id}/turn-on-type/    N6 - undo of turn-off-type
     GET/PATCH notification-preferences/me/   always the caller's own row
     POST   notification-mutes/{user_id}/     N6-BE — mute that user's activity
     DELETE notification-mutes/{user_id}/     N6-BE — unmute
@@ -35,6 +44,9 @@ urlconf gives `core.urls` — see that file):
     GET    notice-board/                  Task 12 — home-screen Notice Board
                                            (?limit=&offset=), merges campus
                                            notices + tuition-class notices
+    GET    app-config/                    T1.8 — PUBLIC force-update /
+                                           maintenance config
+                                           (?platform=android|ios&version=1.4.2)
 """
 import logging
 
@@ -42,12 +54,15 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework import mixins, pagination, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from login.models import User
 
+from . import notification_inbox as inbox  # N4
+from .app_config import build_app_config
 from .models import Notification, NotificationMute, NotificationPreference, OnboardingProgress
 from .search import search_everything
 from .serializers import NotificationPreferenceSerializer, NotificationSerializer
@@ -113,7 +128,7 @@ class NotificationViewSet(
     pagination_class = NotificationPagination
 
     def get_queryset(self):
-        qs = Notification.objects.for_user(self.request.user).select_related("classroom", "session")
+        qs = Notification.objects.for_user(self.request.user)  # P-C5: classroom_id/session_id are pk-only reads -> no select_related join
 
         is_read = self.request.query_params.get("is_read")
         if is_read is not None:
@@ -130,7 +145,55 @@ class NotificationViewSet(
         # with it (source AND category).
         qs = Notification.filter_by_category(qs, self.request.query_params.get("category"))
 
+        # N4 - ?q= / ?unread= / ?archived= are LIST-only: retrieve / delete of an archived row must still work,
+        # and the default list hides archived rows.
+        if self.action == "list":
+            qs = inbox.apply_list_filters(qs, self.request.query_params)
+
         return qs
+
+    def _serialize_rows(self, rows, want_group):
+        """N4 - plain rows, or (?group=1) one card per group with merged actors / rebuilt title."""
+        if not want_group:
+            return self.get_serializer(rows, many=True).data
+        plan = inbox.plan_groups(rows)
+        data = list(self.get_serializer([rep for rep, _members, _key in plan], many=True).data)
+        inbox.decorate_groups(plan, data, self.request)
+        return data
+
+    def list(self, request, *args, **kwargs):
+        """Old callers (no ?before= / ?group=) get the unchanged limit/offset response. N4 adds:
+          ?before=<cursor|id|''>  keyset paging: {count: null, unread_count, has_more, next_before, results}
+          ?group=1                collapse same (type, target, day) rows of the page into one card
+        Both can be combined (the app uses both)."""
+        params = request.query_params
+        want_group = inbox.truthy(params.get("group"))
+        use_cursor = inbox.cursor_mode(params)
+        if not want_group and not use_cursor:
+            return super().list(request, *args, **kwargs)
+
+        qs = self.filter_queryset(self.get_queryset())
+        if not use_cursor:
+            page = self.paginate_queryset(qs)
+            return self.get_paginated_response(self._serialize_rows(list(page), True))
+
+        try:
+            qs = inbox.apply_cursor(qs, request.user, params.get("before", ""))
+        except ValueError:
+            return Response({"detail": "Invalid cursor."}, status=status.HTTP_400_BAD_REQUEST)
+        limit = inbox.page_limit(params, NotificationPagination.default_limit, NotificationPagination.max_limit)
+        rows = list(qs[: limit + 1])  # one extra row = "is there another page?" without a COUNT(*)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return Response(
+            {
+                "count": None,
+                "unread_count": Notification.objects.for_user(request.user).unread().count(),
+                "has_more": has_more,
+                "next_before": inbox.encode_cursor(rows[-1].created_at, rows[-1].pk) if has_more and rows else None,
+                "results": self._serialize_rows(rows, want_group),
+            }
+        )
 
     @staticmethod
     def _filter_by_source(qs, source):
@@ -162,18 +225,211 @@ class NotificationViewSet(
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         notification = self.get_object()
+        was_unread = not notification.is_read
         notification.mark_read()
+        if was_unread:
+            # N7 - the push "Mark as read" button calls this endpoint: the iOS app icon number has to follow.
+            self._sync_ios_badge(request.user.id)
         return Response(NotificationSerializer(notification, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=["post"], url_path="opened")
+    def opened(self, request, pk=None):
+        """N10 - the app reports "the user opened this notification" (tap on the push, on the in-app banner, or on the
+        bell row). POST {"surface": "push"|"banner"|"list"} -> {"recorded": bool}. Own rows only (get_object), counted
+        ONCE per row (a second tap on the same row is `recorded: false`) so the open rate cannot exceed delivered.
+        Pure telemetry: it does not mark the row read (the app calls mark-read separately) and never fails the app."""
+        from django.core.cache import cache
+
+        from . import notification_ops as ops
+
+        row = self.get_object()
+        first = True
+        try:
+            first = bool(cache.add(f"notifops:opened:{row.pk}", 1, 14 * 86400))
+        except Exception:  # cache down: count it (a rare double count beats losing the number)
+            first = True
+        if first:
+            ops.record_opened(row.notif_type, request.data.get("surface") if hasattr(request.data, "get") else "other")
+            # X3 - consent-gated, id-free product counters (notification_opened by type/surface + copy-experiment
+            # variant). Separate from the N10 ops counters above; never raises.
+            try:
+                from . import product_analytics as pa
+
+                surface = request.data.get("surface") if hasattr(request.data, "get") else "other"
+                pa.track(request.user, pa.EV_NOTIF_OPENED, row.notif_type, surface)
+                pa.record_variant_opened(request.user, row.pk)
+            except Exception:  # pragma: no cover
+                pass
+        return Response({"recorded": first})
+
+    # ---- N6 - reminder actions (Snooze / Turn off this type): same calls the push action buttons make ----------
+    @staticmethod
+    def _reminder_error(exc):
+        status_code = status.HTTP_403_FORBIDDEN if exc.code == "locked" else status.HTTP_400_BAD_REQUEST
+        return Response({"detail": str(exc), "code": exc.code}, status=status_code)
+
+    @action(detail=True, methods=["post"], url_path="snooze")
+    def snooze(self, request, pk=None):
+        """N6 - POST {"minutes": 60} (optional, 10..1440, default 60) -> {"snooze_until", "minutes", "id"}.
+        The reminder is pushed again later (same row). Only reminder types; own rows only."""
+        from . import notification_reminders as reminders
+
+        row = self.get_object()
+        try:
+            result = reminders.snooze_reminder(row, request.data.get("minutes"))
+        except reminders.ReminderActionError as exc:
+            return self._reminder_error(exc)
+        return Response({**result, "id": row.id})
+
+    @action(detail=True, methods=["post"], url_path="unsnooze")
+    def unsnooze(self, request, pk=None):
+        """R9 - Undo of snooze (snackbar "Undo" / "Cancel snooze"): the pending snooze of this row is dropped, nothing is
+        pushed later. Idempotent. -> {"cancelled": bool, "id"}"""
+        from . import notification_reminders as reminders
+
+        row = self.get_object()
+        try:
+            result = reminders.unsnooze_reminder(row)
+        except reminders.ReminderActionError as exc:
+            return self._reminder_error(exc)
+        return Response({**result, "id": row.id})
+
+    @action(detail=True, methods=["post"], url_path="turn-off-type")
+    def turn_off_type(self, request, pk=None):
+        """N6 - "Turn off this type": push chip off for this row's type (bell rows keep coming). Locked types -> 403.
+        Idempotent. -> {"notif_type", "push": false}"""
+        from . import notification_reminders as reminders
+
+        row = self.get_object()
+        try:
+            return Response(reminders.turn_off_type(request.user, row.notif_type))
+        except reminders.ReminderActionError as exc:
+            return self._reminder_error(exc)
+
+    @action(detail=True, methods=["post"], url_path="turn-on-type")
+    def turn_on_type(self, request, pk=None):
+        """N6 - Undo of turn-off-type (snackbar "Undo"). -> {"notif_type", "push": true}"""
+        from . import notification_reminders as reminders
+
+        row = self.get_object()
+        return Response(reminders.turn_on_type(request.user, row.notif_type))
+
+    # N1 — upper bound for one mark-read-batch call (client chunks by 100).
+    MARK_READ_BATCH_MAX = 200
+
+    @action(detail=False, methods=["post"], url_path="mark-read-batch")
+    def mark_read_batch(self, request):
+        """N1 — mark a set of the caller's OWN notifications read in one
+        call: POST {"ids": [1, 2, 3]} -> {"marked_read": N}. Ids that are
+        not the caller's, already read, or unknown are silently skipped
+        (idempotent), so a retry or a stale client list is harmless."""
+        raw = request.data.get("ids")
+        if not isinstance(raw, list):
+            return Response({"detail": "ids must be a list."}, status=status.HTTP_400_BAD_REQUEST)
+        ids = set()
+        for value in raw:
+            if isinstance(value, bool):
+                continue
+            try:
+                ids.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        if len(ids) > self.MARK_READ_BATCH_MAX:
+            return Response(
+                {"detail": f"At most {self.MARK_READ_BATCH_MAX} ids per call."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not ids:
+            return Response({"marked_read": 0})
+        updated = (
+            Notification.objects.for_user(request.user)
+            .unread()
+            .filter(pk__in=ids)
+            .update(is_read=True, read_at=timezone.now())
+        )
+        if updated:
+            self._publish_badge(request.user.id)
+        return Response({"marked_read": updated})
+
+    @action(detail=False, methods=["post"], url_path="bulk")
+    def bulk(self, request):
+        """N4 - POST {"ids": [..], "action": "read"|"unread"|"delete"|"archive"|"unarchive"} ->
+        {"action", "affected", "unread_count"}. Own rows only; ids that are not the caller's / already in that
+        state / unknown are skipped (idempotent, retry-safe). Max MARK_READ_BATCH_MAX ids per call."""
+        name = str(request.data.get("action") or "").strip().lower()
+        if name not in inbox.BULK_ACTIONS:
+            return Response(
+                {"detail": f"action must be one of: {', '.join(inbox.BULK_ACTIONS)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            ids = inbox.parse_ids(request.data.get("ids"), self.MARK_READ_BATCH_MAX)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        affected, badge_changed = (0, False) if not ids else inbox.run_bulk(request.user, name, ids)
+        if badge_changed:
+            self._publish_badge(request.user.id)
+        return Response(
+            {
+                "action": name,
+                "affected": affected,
+                "unread_count": Notification.objects.for_user(request.user).unread().count(),
+            }
+        )
 
     @action(detail=False, methods=["post"], url_path="mark-all-read")
     def mark_all_read(self, request):
         # Bulk UPDATE instead of looping + calling .mark_read() per row —
         # a user with hundreds of unread notifications shouldn't cost
         # hundreds of UPDATE statements for one "clear my badge" tap.
-        updated = Notification.objects.for_user(request.user).unread().update(
-            is_read=True, read_at=timezone.now()
-        )
+        #
+        # N1 — honours the same ?source= / ?category= filters as the list
+        # and unread-count (clear-read does too): the bell's "Mark all read"
+        # sends source=tuitionclass so it no longer wipes the unread DMs
+        # that belong to the Chats badge. No params = everything (old
+        # behaviour, unchanged for existing callers).
+        qs = Notification.objects.for_user(request.user).unread()
+        qs = self._filter_by_source(qs, request.query_params.get("source"))
+        qs = Notification.filter_by_category(qs, request.query_params.get("category"))
+        updated = qs.update(is_read=True, read_at=timezone.now())
+        if updated:
+            self._publish_badge(request.user.id)
         return Response({"marked_read": updated})
+
+    @staticmethod
+    def _publish_badge(user_id):
+        """QuerySet.update() skips post_save, so the live `notification_badge`
+        socket event (core/signals.py) must be pushed by hand after a bulk
+        mark-read — otherwise other devices keep the old count."""
+        from .services import publish_unread_badge
+
+        publish_unread_badge(user_id)
+        NotificationViewSet._sync_ios_badge(user_id)  # N7 - app icon number on the user's iPhone(s)
+
+    @staticmethod
+    def _sync_ios_badge(user_id):
+        """N7 - badge-only push to the user's iOS devices after rows were read (no-op without iOS tokens). Never raises:
+        a push problem must not fail the mark-read request."""
+        try:
+            from message.push_utils import send_badge_sync_push
+
+            send_badge_sync_push(user_id)
+        except Exception:  # pragma: no cover - push must never break the action
+            logger.exception("ios badge sync failed (user=%s)", user_id)
+
+    @action(detail=False, methods=["delete"], url_path="clear-read")
+    def clear_read(self, request):
+        """Bulk-delete the caller's ALREADY-READ notifications ("Clear read").
+        Unread rows are never touched, so nothing the user hasn't seen can
+        vanish. Honours the same ?source= / ?category= filters as the list,
+        so a tab can clear just itself. Own rows only (for_user)."""
+        # N4: archived rows are kept on purpose (archive != read-and-forget).
+        qs = Notification.objects.for_user(request.user).filter(is_read=True, archived_at__isnull=True)
+        qs = self._filter_by_source(qs, request.query_params.get("source"))
+        qs = Notification.filter_by_category(qs, request.query_params.get("category"))
+        # .delete() on a filtered queryset = one bulk DELETE (+ cascades).
+        deleted, _ = qs.delete()
+        return Response({"deleted": deleted})
 
 
 class NotificationPreferenceView(APIView):
@@ -183,16 +439,78 @@ class NotificationPreferenceView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    # S2 / R14 -- ETag (`updated_at` se, koi naya column nahi). GET: `If-None-Match` hit => 304. PATCH: `If-Match` stale
+    # => 412 + current preferences (kuch save nahi hota); header na ho (purane clients) => pehle jaisa. Body shape
+    # (bina envelope ke seedha serializer data) pehle jaisi hi rehti hai.
     def get(self, request):
+        from user_profile.pref_etag import if_none_match_hits, make_etag
+
         pref = NotificationPreference.for_user(request.user)
-        return Response(NotificationPreferenceSerializer(pref).data)
+        etag = make_etag(pref)
+        if if_none_match_hits(request.headers.get("If-None-Match"), etag):
+            return Response(status=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+        return Response(NotificationPreferenceSerializer(pref).data, headers={"ETag": etag})
 
     def patch(self, request):
-        pref = NotificationPreference.for_user(request.user)
-        serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
+        from django.db import transaction
+
+        from user_profile.pref_etag import if_match_state, make_etag
+
+        NotificationPreference.for_user(request.user)  # lazy get-or-create (lock se pehle)
+        # Row lock: If-Match check aur save ke beech doosra device ghus na sake.
+        with transaction.atomic():
+            pref = NotificationPreference.objects.select_for_update().get(user=request.user)
+            current_etag = make_etag(pref)
+            if if_match_state(request.headers.get("If-Match"), current_etag) == "stale":
+                return Response(
+                    NotificationPreferenceSerializer(pref).data,
+                    status=status.HTTP_412_PRECONDITION_FAILED,
+                    headers={"ETag": current_etag},
+                )
+            serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+        try:  # X3 - which notification settings people change (field names only, consent-gated)
+            from . import product_analytics as pa
+
+            pa.track_settings_changed(request.user, "notifications", request.data, serializer.fields)
+        except Exception:  # pragma: no cover
+            pass
+        return Response(serializer.data, headers={"ETag": make_etag(serializer.instance)})
+
+
+class NotificationTimezoneSyncView(APIView):
+    """N5 - POST core/notification-preferences/timezone/  {"timezone": "Asia/Kolkata"}
+
+    The app calls this on login and on app open (throttled client-side) so quiet hours / DND / digest hours follow the
+    phone. Auto mode (default) adopts the device zone; manual mode keeps the zone the user picked and answers
+    {applied: false, reason: "manual"}. A name that is not a real IANA zone is a 400. Only ever touches the caller's row."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .notification_delivery import sync_timezone
+
+        name = request.data.get("timezone")
+        result = sync_timezone(request.user, name)
+        if result.get("reason") == "invalid":
+            return Response(
+                {"timezone": ["Unknown timezone (expected an IANA name like 'Asia/Kolkata')."], **result},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(result)
+
+
+class NotificationDigestPreviewView(APIView):
+    """N5 - GET core/notification-preferences/digest-preview/  -> what the daily roll-up and the study digest would say
+    for the caller right now, plus a fixed example (so the preview is never blank). Read-only, own data only."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .notification_delivery import digest_preview
+
+        return Response(digest_preview(request.user))
 
 
 class NotificationMuteView(APIView):
@@ -221,6 +539,130 @@ class NotificationMuteView(APIView):
 
     def delete(self, request, user_id):
         NotificationMute.objects.filter(user=request.user, muted_actor_id=user_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class NotificationOpsView(APIView):
+    """N10 - `GET core/notification-ops/?minutes=15&by_type=1` -> push numbers (sent / delivered / failed by FCM code /
+    skipped by reason / opened) over the last N minutes vs the SLO (core/notification_ops.py). `?format=prom` ->
+    Prometheus text for Grafana (deploy/monitoring/prometheus_notification_rules.yml).
+
+    Access: staff users (JWT) OR `Authorization: Bearer <settings.NOTIFICATION_OPS_SCRAPE_TOKEN>` (empty => the feed
+    scrape token is used; both empty => only staff). Numbers only - no user data, no user ids."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []  # a scrape token is not a user JWT; staff pass their JWT in the header (handled below)
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "notification_ops"
+
+    @staticmethod
+    def _allowed(request):
+        import hmac
+
+        from django.conf import settings
+
+        user = getattr(request, "user", None)
+        if user is not None and getattr(user, "is_authenticated", False) and (user.is_staff or user.is_superuser):
+            return True
+        header = request.META.get("HTTP_AUTHORIZATION", "")
+        token = getattr(settings, "NOTIFICATION_OPS_SCRAPE_TOKEN", "") or getattr(settings, "FEED_OPS_SCRAPE_TOKEN", "") or ""
+        if token and header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), token):
+            return True
+        if header.startswith("Bearer "):  # a staff user's normal JWT
+            try:
+                from login.authentication import SlidingSessionAuthentication
+
+                auth = SlidingSessionAuthentication().authenticate(request)
+                return bool(auth and (auth[0].is_staff or auth[0].is_superuser))
+            except Exception:
+                return False
+        return False
+
+    def get(self, request):
+        from django.http import HttpResponse
+
+        from . import notification_ops as ops
+
+        if not self._allowed(request):
+            return Response({"success": False, "message": "Staff only."}, status=status.HTTP_403_FORBIDDEN)
+        if request.query_params.get("format") == "prom":
+            return HttpResponse(ops.prometheus_text(), content_type="text/plain; version=0.0.4; charset=utf-8")
+        try:
+            minutes = min(ops.MAX_SUMMARY_MINUTES, max(1, int(request.query_params.get("minutes", 15))))
+        except (TypeError, ValueError):
+            minutes = 15
+        summary = ops.summarize_last(minutes)
+        summary["breaches"] = ops.breaches(summary)
+        if _is_truthy(request.query_params.get("by_type")):
+            summary["by_type"] = ops.totals_by_type()
+        return Response({"success": True, "data": summary})
+
+
+def _scope_mute_bool(value):
+    """N9b - request `hide_bell`: true/false (also "1"/"0"/"true"/"false"); missing / unclear -> None (= keep as is)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes"):
+        return True
+    if text in ("0", "false", "no"):
+        return False
+    return None
+
+
+class NotificationScopeMuteView(APIView):
+    """N9 - mute the PUSH of one class / chat / post for a while.
+
+    GET    core/notification-scope-mutes/                     -> {results: [active mutes], history_days}
+    POST   core/notification-scope-mutes/  {scope_type, scope_id, duration?|minutes?, label?, hide_bell?}
+                 scope_type: class | conversation | post | section (campus)   hide_bell: also skip the bell row
+                 duration: 1h | 8h | 24h | 7d | forever  (or `minutes`)
+                 -> 201 (new) / 200 (changed); 400 {code, detail} on bad input
+    DELETE core/notification-scope-mutes/?scope_type=&scope_id=   -> 204 (idempotent)
+
+    The muter is always request.user (own data only). The bell row is NOT dropped - only push / banner. Types that can
+    never be silenced (safety, calls, emergencies) are untouched by a mute.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .notification_center import active_mutes, history_days, mute_dict
+
+        now = timezone.now()
+        rows = active_mutes(request.user.id, now).order_by("-created_at")[:200]
+        return Response({"results": [mute_dict(r, now) for r in rows], "history_days": history_days()})
+
+    def post(self, request):
+        from .notification_center import MuteError, mute_dict, set_mute
+
+        try:
+            row, created = set_mute(
+                request.user,
+                request.data.get("scope_type"),
+                request.data.get("scope_id"),
+                duration=request.data.get("duration"),
+                minutes=request.data.get("minutes"),
+                label=request.data.get("label") or "",
+                hide_bell=_scope_mute_bool(request.data.get("hide_bell")),
+            )
+        except MuteError as exc:
+            return Response({"code": exc.code, "detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(mute_dict(row), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def delete(self, request):
+        from .notification_center import MuteError, clear_mute
+
+        try:
+            clear_mute(
+                request.user,
+                request.query_params.get("scope_type") or request.data.get("scope_type"),
+                request.query_params.get("scope_id") or request.data.get("scope_id"),
+            )
+        except MuteError as exc:
+            return Response({"code": exc.code, "detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -325,10 +767,10 @@ class SearchView(APIView):
 
         try:
             # --- assigments ------------------------------------------------
-            # Mirrors assigmentsViewSet.get_queryset() (assigments/views.py)
+            # Mirrors assigmentsViewSet.get_queryset() (assignments/views.py)
             # verbatim. See class docstring above for why campus/tuitionclass
             # sourced assigmentss stay excluded for non-staff here too.
-            from assigments.models import assigments, assigmentsSource
+            from assignments.models import assigments, assigmentsSource
 
             assigments_qs = assigments.objects.all()
             if not user.is_staff:
@@ -428,6 +870,14 @@ class SearchView(APIView):
                 excluded_ids.add(blocked_id)
 
             base_users = User.objects.filter(is_active=True).exclude(id__in=excluded_ids)
+            # S4 -- "hide me from search" (people with an accepted follow link still find them).
+            from user_profile import privacy as privacy_rules
+
+            base_users = privacy_rules.exclude_hidden_from_search(base_users, user)
+            # P-F16 -- unified search: same minor rule as /profile user search.
+            from common import minor_policy
+
+            base_users = minor_policy.exclude_minors_for_stranger(base_users, user, feature=minor_policy.SEARCH)
             scoped_querysets["user"] = base_users
 
             # "friend" = people you already have an ACCEPTED follow
@@ -735,4 +1185,59 @@ class OnboardingCompleteView(APIView):
         progress.skipped = skipped
         progress.completed_at = timezone.now()
         progress.save(update_fields=["completed", "skipped", "completed_at"])
+        # T3.8 -- funnel milestone (idempotent; finished OR skipped, told apart by props)
+        from . import funnel
+
+        funnel.record_once_per_user(funnel.E.ONBOARDING_COMPLETED, request.user, props={"skipped": skipped})
         return Response({"completed": progress.completed, "skipped": progress.skipped})
+
+
+class AppConfigView(APIView):
+    """
+    T1.8 (R8) — force-update / app-config.
+
+    GET core/app-config/?platform=android|ios&version=1.4.2
+
+    PUBLIC on purpose (no auth, no login): the whole point is to stop an old,
+    broken or insecure build — including one whose token has expired or that
+    is sitting on the login screen — so this must answer without credentials.
+    It exposes nothing user-specific: just version floors, a store link and a
+    maintenance flag. Per-IP throttled (scope `app_config`; generous because a
+    campus Wi-Fi puts many students behind one IP).
+
+    Response (see core/app_config.py):
+        {platform, min_supported_version, latest_version,
+         update_required, update_available, store_url, message, message_hi,
+         maintenance: {active, message, message_hi}, server_time}
+
+    `update_required` / `update_available` are computed from `?version=` so
+    the client needn't parse anything; the raw floors are returned too so the
+    app can re-evaluate offline from its cached copy. A missing/garbled
+    `version` fails OPEN (both False).
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "app_config"
+
+    def get(self, request):
+        # P-J2: staged rollout buckets by the install's stable device id (header X-Device-Id, or ?device_id=).
+        bucket_id = request.headers.get("X-Device-Id") or request.query_params.get("device_id")
+        data = build_app_config(
+            request.query_params.get("platform"),
+            request.query_params.get("version"),
+            bucket_id=bucket_id,
+        )
+        response = Response(data)
+        # Short shared cache: a CDN/proxy can absorb launch spikes, yet a
+        # force-update flip still reaches users within a minute.
+        # P-J2: while a partial rollout / version floor exists the answer depends on the device, so it must NOT be shared.
+        from common.feature_flags import has_partial_rollout
+
+        if has_partial_rollout():
+            response["Cache-Control"] = "private, max-age=60"
+            response["Vary"] = "X-Device-Id, X-App-Version, X-Platform"
+        else:
+            response["Cache-Control"] = "public, max-age=60"
+        return response
+

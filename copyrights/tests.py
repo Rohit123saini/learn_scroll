@@ -33,6 +33,20 @@ def mk_user(name, **kw):
     return User.objects.create_user(username=name, password="pw12345678", email=f"{name}@x.com", **kw)
 
 
+def mk_claimant(name, email="rita@pub.com", trusted=True):
+    """A rights holder who may file AND whose notice is held at once: e-mail verified + staff-vetted."""
+    from .models import ClaimantEmailVerification, TrustedClaimant
+
+    u = mk_user(name)
+    User.objects.filter(pk=u.pk).update(date_joined=timezone.now() - timedelta(days=60))
+    u = User.objects.get(pk=u.pk)
+    ClaimantEmailVerification.objects.create(user=u, email=email.lower(), code_hash="x", verified_at=timezone.now(),
+                                             expires_at=timezone.now() + timedelta(minutes=15))
+    if trusted:
+        TrustedClaimant.objects.create(user=u, organisation="Test Pub")
+    return u
+
+
 def mk_staff(name, level):
     u = mk_user(name, is_staff=True)
     group = Group.objects.get(name={1: "Copyright L1 Reviewer", 2: "Copyright L2 Senior", 3: "Copyright L3 Admin"}[level])
@@ -67,7 +81,7 @@ class Base(TestCase):
 
     def setUp(self):
         self.owner = mk_user("owner")
-        self.rita = mk_user("rita")
+        self.rita = mk_claimant("rita")
         self.post = mk_post(self.owner)
 
     def file(self, post=None, claimant=None, **kw):
@@ -100,6 +114,9 @@ class ClaimFlowTests(Base):
         self.assertEqual(self.status_of(self.post), "approved")
 
     def test_cannot_claim_own_or_missing_content(self):
+        from .models import ClaimantEmailVerification
+        ClaimantEmailVerification.objects.create(user=self.owner, email="rita@pub.com", code_hash="x",
+                                                 verified_at=timezone.now(), expires_at=timezone.now())
         with self.assertRaises(services.ClaimError) as cm:
             services.submit_claim(self.owner, notice("post", self.post.id))
         self.assertEqual(cm.exception.code, "own_content")
@@ -134,7 +151,7 @@ class ClaimFlowTests(Base):
     def test_second_claim_on_same_content_is_a_duplicate_and_follows_the_first(self):
         l2 = mk_staff("l2b", 2)
         first = self.file()
-        second = self.file(claimant=mk_user("bob"))
+        second = self.file(claimant=mk_claimant("bob"))
         self.assertEqual(second.duplicate_of_id, first.id)
         services.uphold_claim(first, l2, "ok")
         second.refresh_from_db()
@@ -325,7 +342,7 @@ class StrikePolicyTests(Base):
         self.l2, self.l3 = mk_staff("l2d", 2), mk_staff("l3d", 3)
 
     def strike_once(self):
-        claim = self.file(post=mk_post(self.owner), claimant=mk_user(f"c{CopyrightClaim.objects.count()}"))
+        claim = self.file(post=mk_post(self.owner), claimant=mk_claimant(f"c{CopyrightClaim.objects.count()}"))
         services.uphold_claim(claim, self.l2, "ok")
         return claim
 
@@ -417,10 +434,12 @@ class AutomationTests(Base):
         from django.conf import settings
         names = {v["task"] for k, v in settings.CELERY_BEAT_SCHEDULE.items() if k.startswith("copyrights-")}
         self.assertEqual(names, {"copyrights.auto_restore_counter_notices", "copyrights.expire_strikes",
-                                 "copyrights.escalate_stale_claims", "copyrights.expire_needs_info"})
+                                 "copyrights.escalate_stale_claims", "copyrights.expire_needs_info",
+                                 "copyrights.warn_due_legal_orders", "copyrights.purge_personal_data"})
         from . import tasks
         registered = {tasks.auto_restore_counter_notices.name, tasks.expire_strikes.name,
-                      tasks.escalate_stale_claims.name, tasks.expire_needs_info.name}
+                      tasks.escalate_stale_claims.name, tasks.expire_needs_info.name,
+                      tasks.warn_due_legal_orders.name, tasks.purge_personal_data.name}
         self.assertEqual(names, registered)
 
 
@@ -430,7 +449,7 @@ class ApiTests(APITestCase):
         call_command("setup_copyright_roles", verbosity=0)
 
     def setUp(self):
-        self.owner, self.rita = mk_user("owner"), mk_user("rita")
+        self.owner, self.rita = mk_user("owner"), mk_claimant("rita")
         self.post = mk_post(self.owner)
 
     def test_full_api_round_trip(self):
@@ -468,6 +487,9 @@ class ApiTests(APITestCase):
         self.assertEqual(r.status_code, 400)
         r = self.client.post("/copyright/claims/", notice("post", "00000000-0000-0000-0000-000000000000"), format="json")
         self.assertEqual(r.status_code, 404)
+        from .models import ClaimantEmailVerification
+        ClaimantEmailVerification.objects.create(user=self.owner, email="rita@pub.com", code_hash="x",
+                                                 verified_at=timezone.now(), expires_at=timezone.now())
         self.client.force_authenticate(self.owner)
         r = self.client.post("/copyright/claims/", notice("post", self.post.id), format="json")
         self.assertEqual(r.status_code, 400)
@@ -560,6 +582,9 @@ class ReportAutomationTests(TestCase):
         self.author = mk_user("author")
         self.post = mk_post(self.author)
         self.reporters = [mk_user(f"rep{i}") for i in range(10)]
+        # brand-new accounts only count half (brigading guard) - these are established users
+        User.objects.filter(pk__in=[u.pk for u in self.reporters]).update(
+            date_joined=timezone.now() - timedelta(days=60))
 
     def report(self, i, reason="nudity", target=None, ttype="post"):
         return file_report(self.reporters[i], ttype, (target or self.post).id, reason)

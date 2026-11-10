@@ -120,6 +120,8 @@ class PricingPolicyApiTests(_Base):
     def create(self, payload):
         return _client(self.teacher).post(reverse("testseries-list"), payload, format="json")
 
+    # T3: the default individual policy is now "optional"; "required" is still supported and tested here.
+    @override_settings(TESTSERIES_PRICING_POLICY={"individual": {"mode": "required"}})
     def test_individual_series_must_be_paid(self):
         res = self.create({"title": "Free try", "is_paid": False})
         self.assertEqual(res.status_code, 400)
@@ -154,6 +156,7 @@ class PricingPolicyApiTests(_Base):
         )
         self.assertEqual(res.status_code, 200, res.content)
 
+    @override_settings(TESTSERIES_PRICING_POLICY={"individual": {"mode": "required"}})
     def test_publish_is_blocked_for_a_free_individual_draft(self):
         series = _series(self.teacher, published=False)
         res = _client(self.teacher).post(reverse("testseries-publish", kwargs={"pk": series.id}))

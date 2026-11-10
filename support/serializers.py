@@ -1,3 +1,5 @@
+import re
+
 from rest_framework import serializers
 
 from user_profile.serializers import SafeProfilePhotoField
@@ -7,6 +9,26 @@ from .models import BugReport, FeatureRequest, SupportMessage, SupportTicket
 
 def _clean(value: str) -> str:
     return (value or "").strip()
+
+
+# S11b - the app already scrubs diagnostics; this is the second lock on the server so a modified client cannot
+# smuggle e-mails / phone numbers / tokens into the staff-visible report.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_JWT_RE = re.compile(r"eyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]{5,}")
+_BEARER_RE = re.compile(r"(?i)\b(bearer|token|authorization|password|passwd|secret)\b\s*[:=]?\s*\S+")
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\s-]{8,}\d)(?!\d)")
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)[?#]\S*")
+DIAGNOSTICS_MAX = 8000
+
+
+def scrub_diagnostics(text: str) -> str:
+    t = (text or "").replace("\x00", "")
+    t = _JWT_RE.sub("[jwt]", t)
+    t = _BEARER_RE.sub(lambda m: f"{m.group(1)}: [hidden]", t)
+    t = _EMAIL_RE.sub("[email]", t)
+    t = _URL_QUERY_RE.sub(r"\1?[query]", t)
+    t = _PHONE_RE.sub("[number]", t)
+    return t[:DIAGNOSTICS_MAX]
 
 
 # ---------------------------------------------------------------- tickets
@@ -77,10 +99,12 @@ class MessageCreateSerializer(serializers.Serializer):
 class BugReportCreateSerializer(serializers.ModelSerializer):
     # Same size / extension / real-format / pixel checks as profile photos.
     screenshot = SafeProfilePhotoField(required=False, allow_null=True)
+    # Longer text is trimmed, not rejected - a report must never fail only because the log was long.
+    diagnostics = serializers.CharField(required=False, allow_blank=True, default="", trim_whitespace=False)
 
     class Meta:
         model = BugReport
-        fields = ["title", "description", "screen", "app_version", "platform", "device_info", "screenshot"]
+        fields = ["title", "description", "screen", "app_version", "platform", "device_info", "screenshot", "diagnostics"]
         extra_kwargs = {
             "screen": {"required": False},
             "app_version": {"required": False},
@@ -99,6 +123,9 @@ class BugReportCreateSerializer(serializers.ModelSerializer):
         if len(v) < 10:
             raise serializers.ValidationError("Please tell us what went wrong (at least 10 characters).")
         return v
+
+    def validate_diagnostics(self, v):
+        return scrub_diagnostics(v)
 
 
 class BugReportSerializer(serializers.ModelSerializer):
@@ -153,3 +180,14 @@ class FeatureRequestCreateSerializer(serializers.Serializer):
 
     def validate_description(self, v):
         return _clean(v)
+
+
+# ------------------------------------------------------------ FAQ feedback
+class FaqFeedbackSerializer(serializers.Serializer):
+    faq_id = serializers.RegexField(r"^[a-z0-9_]{1,60}$", max_length=60)
+    helpful = serializers.BooleanField()
+    lang = serializers.CharField(max_length=8, required=False, allow_blank=True, default="")
+
+    def validate_lang(self, v):
+        v = _clean(v).lower().replace("_", "-")[:8]
+        return v if re.fullmatch(r"[a-z]{2,3}(-[a-z0-9]{2,4})?", v or "") else ""

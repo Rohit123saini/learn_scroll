@@ -311,7 +311,7 @@ def load_facts(post_ids: Sequence, cfg: Optional[Mapping] = None) -> Dict[object
     rows = list(
         Post.objects.filter(id__in=ids)
         .annotate(media_n=Count("media", distinct=True))
-        .values("id", "user_id", "post_type", "title", "content", "hashtags", "reported_count", "media_n")
+        .values("id", "user_id", "post_type", "title", "content", "hashtags", "reported_count", "media_n", "shared_type")
     )
     facts: Dict[object, PostFacts] = {}
     for r in rows:
@@ -320,7 +320,10 @@ def load_facts(post_ids: Sequence, cfg: Optional[Mapping] = None) -> Dict[object
         facts[r["id"]] = PostFacts(
             post_id=r["id"], author_id=r["user_id"], post_type=r["post_type"] or "text", text=text,
             content=r["content"] or "",
-            hashtag_count=len(tags), media_count=int(r["media_n"] or 0), reported_count=int(r["reported_count"] or 0),
+            # a shared class / test-series card counts as the post's media: such a post
+            # is legitimately caption-less and must not be demoted as "tiny text".
+            hashtag_count=len(tags), media_count=int(r["media_n"] or 0) + (1 if r["shared_type"] else 0),
+            reported_count=int(r["reported_count"] or 0),
         )
 
     window = int(cfg["duplicate_window_days"] or 0)

@@ -48,3 +48,23 @@ def can_view_engagement_board(user) -> bool:
     """App-wide engagement is a growth/social-proof feature, same as any
     other public leaderboard — open to any authenticated user."""
     return bool(user and getattr(user, "is_authenticated", False))
+
+
+def can_view_study_time_board(user, scope_id) -> bool:
+    """S5 — study-room time board.
+
+    * `scope_id` (Conversation.id): sirf us room/conversation ke ACTIVE members (left_at null).
+    * `scope_id=None` (app-wide): settings.STUDY_TIME_GLOBAL_BOARD_ENABLED (default False) — bachon ka padhai-time sabko
+      dikhane se pehle product/privacy decision; ON hone par koi bhi authenticated user."""
+    if not (user and getattr(user, "is_authenticated", False)):
+        return False
+    if scope_id is None:
+        from django.conf import settings
+
+        return bool(getattr(settings, "STUDY_TIME_GLOBAL_BOARD_ENABLED", False))
+
+    from message.models import ConversationParticipant
+
+    return ConversationParticipant.objects.filter(
+        conversation_id=scope_id, user=user, left_at__isnull=True,
+    ).exists()

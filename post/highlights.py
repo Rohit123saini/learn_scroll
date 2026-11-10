@@ -36,11 +36,13 @@ import re
 
 from django.conf import settings
 from django.db.models import F, Q
+from django.http import Http404
+from django.shortcuts import get_object_or_404
 
 from user_profile.models import Follow
 
 from .close_friends_views import blocked_user_ids
-from .models import HighlightItem, Story
+from .models import Highlight, HighlightItem, Story
 from .story_visibility import filter_stories_visible_to
 
 DEFAULT_TITLE = "Highlights"
@@ -109,7 +111,8 @@ def reset_cover_crop(highlight):
 # --------------------------------------------------------------------------
 def highlightable_stories_q():
     """See the module docstring: live, or ended by itself."""
-    return Q(is_deleted=False) | Q(is_deleted=True, deleted_at__gte=F("expires_at"))
+    # takedown_hidden: a copyright claim / legal order keeps it down (copyrights/targets.py)
+    return (Q(is_deleted=False) | Q(is_deleted=True, deleted_at__gte=F("expires_at"))) & Q(takedown_hidden=False)
 
 
 def archive_queryset(owner):
@@ -192,7 +195,7 @@ def cover_crop_for(highlight, visible_items, cover):
 
 def build_highlight_rows(highlights, viewer, request, *, hide_empty):
     """One dict per highlight: {id, title, cover_url, cover_story_id,
-    cover_x, cover_y, cover_zoom, items_count, created_at, updated_at, user}.
+    cover_x, cover_y, cover_zoom, items_count, position, created_at, updated_at, user}.
     `items_count` counts only the items `viewer` may see. With `hide_empty`,
     highlights with no visible item are dropped (what everybody but the owner
     gets)."""
@@ -223,8 +226,35 @@ def build_highlight_rows(highlights, viewer, request, *, hide_empty):
             "cover_story_id": str(cover.id) if cover else None,
             **cover_crop_for(h, visible, cover),
             "items_count": len(visible),
+            "position": h.position,
             "created_at": h.created_at,
             "updated_at": h.updated_at,
             "user": _owner_payload(h.user, request),
         })
     return out
+
+
+def get_highlight_story_or_404(highlight_id, story_id, viewer):
+    """ST-A (1): ONE story of a highlight, for the share / save endpoints of a highlight viewer.
+
+    A highlight story has ended (its 24 h are over), so the live-story helpers (`get_visible_story_or_404`, which
+    wants `is_deleted=False`) cannot be used. The rules here are the READ rules of the highlight itself:
+      * the highlight is visible to `viewer` (blocks / inactive owner / private account -> 404),
+      * the story is an item of THAT highlight (a story id from another highlight -> 404),
+      * the story is still highlight-eligible (live, or ended by itself; one the owner removed early, or a takedown,
+        is gone for good) and its own audience lets `viewer` see it (Close Friends item -> 404 for others).
+    Returns (highlight, story). Never leaks: every miss is the same 404.
+    """
+    highlight = get_object_or_404(Highlight.objects.select_related("user"), id=highlight_id)
+    if not can_view_highlights_of(highlight.user, viewer):
+        raise Http404("Highlight not found.")
+    item = (
+        HighlightItem.objects.filter(
+            highlight=highlight, story_id=story_id, story_id__in=visible_story_ids(viewer),
+        )
+        .select_related("story", "story__user")
+        .first()
+    )
+    if item is None:
+        raise Http404("Story not found.")
+    return highlight, item.story

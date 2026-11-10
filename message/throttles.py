@@ -73,6 +73,91 @@ class CallInitiateThrottle(UserRateThrottle):
     scope = 'call_initiate'
 
 
+class LiveKitTokenRefreshThrottle(UserRateThrottle):
+    """🔥 C13 — `refresh-token` endpoints. Normal use ~1 refresh / 1-2h per room; reconnect
+    storm ya buggy client loop ko bound karta hai."""
+    rate = '30/hour'
+    scope = 'livekit_token_refresh'
+
+
+class CallTelemetryThrottle(UserRateThrottle):
+    """X1 — client call telemetry (`calls/<id>/telemetry/`): ~2 small POSTs per call; bounds a buggy client loop."""
+    rate = '120/hour'
+    scope = 'call_telemetry'
+
+
+class CallOpsThrottle(UserRateThrottle):
+    """X1 — `GET /message/calls/ops/` (Prometheus scrape / staff). Cheap cache reads; FAILS OPEN if the cache is down
+    (the endpoint you open DURING a Redis outage must not 500). Scrape token has no user => keyed by IP."""
+    rate = '30/min'
+    scope = 'call_ops'
+
+    def allow_request(self, request, view):
+        try:
+            return super().allow_request(request, view)
+        except Exception:
+            return True
+
+
+class StudyRoomModerationThrottle(UserRateThrottle):
+    """S4 — study room host controls (settings / mute / remove / admit / role). Host ke normal use se kaafi upar,
+    buggy client loop ya abuse ko bound karta hai."""
+    rate = '60/min'
+    scope = 'study_room_moderation'
+
+
+class StudyRoomHandThrottle(UserRateThrottle):
+    """S4 — raise-hand toggle spam rokne ke liye."""
+    rate = '30/min'
+    scope = 'study_room_hand'
+
+
+class StudyRoomReportThrottle(UserRateThrottle):
+    """S4 — room me user report (abuse / report-bombing bound)."""
+    rate = '10/hour'
+    scope = 'study_room_report'
+
+
+class StudyRoomBlockThrottle(UserRateThrottle):
+    """S8 — room se block / unblock (toggle-spam bound)."""
+    rate = '30/hour'
+    scope = 'study_room_block'
+
+
+class StudyRoomRulesThrottle(UserRateThrottle):
+    """S8 — room rules accept (loop / abuse bound)."""
+    rate = '60/hour'
+    scope = 'study_room_rules'
+
+
+class StudyRoomJoinThrottle(UserRateThrottle):
+    """X2 finding — `study-room/<id>/join/`: har join LiveKit API call + DB writes karta hai. Waiting-room loop 4s par
+    retry karta hai (~15/min), reconnect/rejoin bhi isi se jaata hai, isliye limit uske upar rakhi hai; buggy client
+    loop / token-farming ko bound karta hai."""
+    rate = '60/min'
+    scope = 'study_room_join'
+
+
+class StudyRoomStateThrottle(UserRateThrottle):
+    """X2 finding — whiteboard `state/` GET/PUT (autosave + admit ke baad reload). Collaborative board ka autosave
+    kuch seconds me hota hai, isliye generous; unbounded PUT spam (2 MB body) ko roke."""
+    rate = '180/min'
+    scope = 'study_room_state'
+
+
+class StudyRoomTelemetryThrottle(UserRateThrottle):
+    """X1 — client study-room telemetry (`study-room/<id>/telemetry/`): ~2 small POSTs per join; bounds a buggy loop."""
+    rate = '120/hour'
+    scope = 'study_room_telemetry'
+
+
+class StudyRoomActivityThrottle(UserRateThrottle):
+    """S5 — study-room activity heartbeat (`study-room/<id>/activity/`): client ~1/min jab active ho => ~60/hour;
+    buggy loop / spam ko roke (credit waise bhi real elapsed time se upar nahi jaata)."""
+    rate = '150/hour'
+    scope = 'study_room_activity'
+
+
 class GroupCreateThrottle(UserRateThrottle):
     """Group creation spam (mass-group-creation bots) rokne ke liye."""
     rate = '5/min'
@@ -83,6 +168,16 @@ class ReactionThrottle(UserRateThrottle):
     """Reaction-spam (rapid emoji toggling) ke liye — generous but bounded."""
     rate = '120/min'
     scope = 'reaction'
+
+
+class DoubtSimilarThrottle(UserRateThrottle):
+    """
+    T1.5 — "similar doubt" suggestions. The client calls this while the
+    student types (debounced), so it is chattier than a normal write but
+    each call is a trigram query — bounded per user.
+    """
+    rate = '60/min'
+    scope = 'doubt_similar'
 
 
 class TranslateThrottle(UserRateThrottle):
@@ -141,9 +236,11 @@ class MessageSendIPThrottle(ScopedIPThrottle):
 
 
 class CallInitiateIPThrottle(ScopedIPThrottle):
-    """Call-initiate IP-level safety net — FCM push + LiveKit room, dono costly."""
+    """Call-initiate IP-level safety net — FCM push + LiveKit room, dono costly.
+    X2 finding: 20/min per IP CGNAT / college WiFi / hostel NAT me asli users ko rok deta tha (ek IP ke peeche
+    sainkdon log). Per-user 10/min already hai, isliye IP net ko 120/min kiya (sirf bot-flood ke liye)."""
     scope = 'call_initiate_ip'
-    rate = '20/min'
+    rate = '120/min'
 
 
 # ---------------------------------------------------------------
@@ -275,3 +372,45 @@ class WSStudyRoomNoteRateLimiter:
         if count > limit:
             return False, cls.WINDOW_SECONDS
         return True, 0
+
+
+# ---------------------------------------------------------------
+# T1.4 (D7) — Doubt Queue throttles.
+#
+# Rates NAHI set kiye (sirf `scope`) — DRF phir `DEFAULT_THROTTLE_RATES
+# [scope]` (settings.py) se rate uthata hai, matlab rates ka single source
+# of truth settings.py hai. Har scope ki entry wahin hai; missing hoti to
+# pehli hi request `ImproperlyConfigured` (500) deti.
+#
+# Wiring: `views.DoubtQuestionViewSet.get_throttles()`.
+# ---------------------------------------------------------------
+class DoubtCreateThrottle(UserRateThrottle):
+    """Naya doubt (text ya photo) — spam/flood guard."""
+    scope = 'doubt_create'
+
+
+class DoubtImageUploadThrottle(UserRateThrottle):
+    """Photo wala doubt — `DoubtCreateThrottle` ke SATH lagta hai (dono
+    count hote hain). Image processing (Pillow decode/re-encode) + storage
+    cost ki wajah se tighter."""
+    scope = 'doubt_create_image'
+
+
+class DoubtAnswerThrottle(UserRateThrottle):
+    """Answer post karna (multi-answer ke baad koi bhi member de sakta hai)."""
+    scope = 'doubt_answer'
+
+
+class DoubtUpvoteThrottle(UserRateThrottle):
+    """Upvote / un-upvote toggling."""
+    scope = 'doubt_upvote'
+
+
+class DoubtActionThrottle(UserRateThrottle):
+    """Best-answer / teacher-verify / reveal / delete-answer."""
+    scope = 'doubt_action'
+
+
+class DoubtReadThrottle(UserRateThrottle):
+    """List / detail / answers-list — realtime refresh loops ko bound karta hai."""
+    scope = 'doubt_read'

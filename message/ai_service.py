@@ -1,9 +1,20 @@
 # message/ai_service.py
 import os, json, hashlib, logging
+import concurrent.futures
 from django.conf import settings
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
+
+# P-F6: every model call is timed / costed / tagged with its prompt version by aiquality (never breaks an answer).
+try:
+    from aiquality.telemetry import observe as _observe, note_cache_hit as _note_cache_hit
+except Exception:  # pragma: no cover - telemetry app missing: behave exactly as before
+    def _observe(call, **_kw):
+        return call()
+
+    def _note_cache_hit(*_a, **_k):
+        return None
 
 # Defined OUTSIDE the try: if Gemini init fails (missing google-genai / API key),
 # _MODEL must still exist or _get_cache_key()/log lines raise NameError.
@@ -37,6 +48,15 @@ CACHE_TTL = 60*60*24 # 24 ghante same board ka result cache rahega - API call ba
 _CACHE_MISS = object()
 
 
+def _prompt_version_tag(mode: str) -> str:
+    """P-F6: prompt version of this cache mode (aiquality.prompts). Telemetry app missing -> constant, as before."""
+    try:
+        from aiquality.prompts import cache_version
+        return cache_version(mode)
+    except Exception:  # pragma: no cover
+        return "v1"
+
+
 def _get_cache_key(mode: str, content: str) -> str:
     h = hashlib.sha256(content.encode()).hexdigest()[:16]
     # 🔥 FIX — key me `_MODEL` bhi shamil, taaki `GEMINI_MODEL` env var
@@ -45,18 +65,59 @@ def _get_cache_key(mode: str, content: str) -> str:
     # naturally naya cache-key bana dega — koi manual cache-flush nahi
     # chahiye, aur agar kabhi debug karna pade ki "yeh output kis model ne
     # diya", key hi bata degi.
-    return f"study_ai:{mode}:{_MODEL}:{h}"
+    # P-F6: prompt version bhi key me - prompt badalne (version bump) par purana cached answer nahi chalta.
+    return f"study_ai:{mode}:{_MODEL}:{_prompt_version_tag(mode)}:{h}"
 
 
 def _cache_get(key: str):
     """Returns cached value, or `_CACHE_MISS` if genuinely not cached."""
-    return cache.get(key, _CACHE_MISS)
+    value = cache.get(key, _CACHE_MISS)
+    if value is not _CACHE_MISS:
+        _note_cache_hit()  # P-F6: served without a model call (no cost)
+    return value
 
 
-def _call_gemini(prompt: str):
+# T0.4 — Gemini call ko wall-clock deadline dene ke liye chhota thread-pool. SDK ka
+# apna timeout DNS (`getaddrinfo failed`) jaise stalls ko hamesha bound nahi karta
+# (offline par ~12s lagte the); `future.result(timeout=...)` caller ko hamesha
+# deadline par chhod deta hai. Atka hua worker thread khud baad me nipat jaata hai.
+_GEMINI_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="gemini")
+
+
+class GeminiTimeout(Exception):
+    """Gemini call ne deadline cross kar di."""
+
+
+def _call_gemini_raw(prompt: str, timeout: float = None, quiet: bool = False):
+    """Gemini call.
+
+    `timeout` (seconds) diya ho to hard deadline lagti hai (`GeminiTimeout`).
+    `quiet=True` (smart-reply jaise best-effort features) => failure WARNING level
+    pe log hota hai, CRITICAL nahi — offline/DNS error pe alert-noise na ho.
+    """
     try:
+        if timeout:
+            try:
+                from google.genai import types as _gtypes
+                config = _gtypes.GenerateContentConfig(
+                    http_options=_gtypes.HttpOptions(timeout=int(timeout * 1000)),  # ms
+                )
+            except Exception:  # purana SDK — sirf wall-clock deadline
+                config = None
+            kwargs = {"config": config} if config is not None else {}
+            future = _GEMINI_POOL.submit(
+                lambda: _client.models.generate_content(model=_MODEL, contents=prompt, **kwargs)
+            )
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                raise GeminiTimeout(f"Gemini call exceeded {timeout}s")
         return _client.models.generate_content(model=_MODEL, contents=prompt)
     except Exception as e:
+        if quiet:
+            logger.warning(f"Gemini call failed (model={_MODEL}, best-effort): {type(e).__name__}: {e}")
+            raise
         # 🔥 NAYA — model retire/invalid hone par error CRITICAL level pe
         # log karo (500 to user ko waise bhi generic dikhega, par agar ye
         # sirf INFO/no-log rahega to production me poora AI feature months
@@ -64,6 +125,11 @@ def _call_gemini(prompt: str):
         # saath hua). Alerting/monitoring isi CRITICAL log pe hook karo.
         logger.critical(f"Gemini call failed (model={_MODEL}): {e}")
         raise
+
+
+def _call_gemini(prompt: str, timeout: float = None, quiet: bool = False):
+    """P-F6: same contract as before; the call is now logged (latency, tokens, cost, prompt version)."""
+    return _observe(lambda: _call_gemini_raw(prompt, timeout=timeout, quiet=quiet), prompt=prompt)
 
 
 def generate_summary(content: str) -> str:
@@ -142,14 +208,15 @@ def transcribe_audio(file_url: str, mime_type: str = "audio/ogg") -> str:
     audio_bytes = resp.content
 
     try:
-        res = _client.models.generate_content(
+        _tr_prompt = ("Transcribe this audio message exactly, in its original language. "
+                      "Return ONLY the transcript text, no preamble, no explanation.")
+        res = _observe(lambda: _client.models.generate_content(
             model=_MODEL,
             contents=[
-                "Transcribe this audio message exactly, in its original language. "
-                "Return ONLY the transcript text, no preamble, no explanation.",
+                _tr_prompt,
                 {"mime_type": mime_type, "data": audio_bytes},
             ],
-        )
+        ), prompt=_tr_prompt, has_image=True)
     except Exception as e:
         logger.critical(f"Gemini transcription failed (model={_MODEL}): {e}")
         raise
@@ -210,7 +277,9 @@ def generate_reply_suggestions(context_text: str, conversation_id: str) -> list:
     ---
     """
 
-    res = _call_gemini(prompt)
+    # T0.4 — smart-reply best-effort hai: tight timeout + quiet (warning) logging.
+    timeout = float(getattr(settings, "AI_SMART_REPLY_TIMEOUT", 4))
+    res = _call_gemini(prompt, timeout=timeout, quiet=True)
     text = res.text.replace("```json", "").replace("```", "").strip()
     data = json.loads(text)
     suggestions = [s.strip() for s in data.get("suggestions", []) if s and s.strip()][:3]
@@ -405,7 +474,8 @@ def generate_doubt_answer(
             types.Part.from_bytes(data=image_bytes, mime_type=image_mime or "image/jpeg"),
         ]
         try:
-            res = _client.models.generate_content(model=_MODEL, contents=contents)
+            res = _observe(lambda: _client.models.generate_content(model=_MODEL, contents=contents),
+                           prompt=prompt, has_image=True)
         except Exception as e:
             logger.critical(f"Gemini image-doubt call failed (model={_MODEL}): {e}")
             raise
@@ -549,7 +619,8 @@ def generate_study_buddy(
         from google.genai import types  # local import — sirf PDF-path ko chahiye
         contents = [prompt, types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")]
         try:
-            res = _client.models.generate_content(model=_MODEL, contents=contents)
+            res = _observe(lambda: _client.models.generate_content(model=_MODEL, contents=contents),
+                           prompt=prompt, has_image=True)
         except Exception as e:
             logger.critical(f"Gemini study-buddy PDF call failed (model={_MODEL}): {e}")
             raise

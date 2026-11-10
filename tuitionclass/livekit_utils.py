@@ -193,7 +193,7 @@ class ParticipantRole:
 # ---------------------------------------------------------------------------
 # Token issuance
 # ---------------------------------------------------------------------------
-def _grants_for_role(role: str) -> api.VideoGrants:
+def _grants_for_role(role: str, can_publish=None) -> api.VideoGrants:
     """Role → permission matrix. Host/co-host = moderation power; student =
     normal publish+subscribe; parent-observer = SUBSCRIBE-ONLY.
 
@@ -246,9 +246,12 @@ def _grants_for_role(role: str) -> api.VideoGrants:
             room_record=False,
         )
 
+    # `can_publish` (None = default True) lets a stage-only session hand a plain student a listen-only token;
+    # the host tier always publishes whatever is passed.
+    publish_ok = True if (is_host or can_publish is None) else bool(can_publish)
     return api.VideoGrants(
         room_join=True,
-        can_publish=True,
+        can_publish=publish_ok,
         can_subscribe=True,
         can_publish_data=True,
         can_update_own_metadata=True,
@@ -264,10 +267,11 @@ def generate_livekit_token(
     role: str = ParticipantRole.STUDENT,
     ttl: timedelta = DEFAULT_TOKEN_TTL,
     metadata: Optional[str] = None,
+    can_publish: Optional[bool] = None,
 ) -> str:
     """Signed JWT return karta hai jisse client `room_name` join karega."""
     _check_credentials()
-    grants = _grants_for_role(role)
+    grants = _grants_for_role(role, can_publish=can_publish)
     grants.room = room_name
 
     token = (
@@ -391,6 +395,37 @@ async def _set_participant_audio_muted_async(room_name: str, identity: str, mute
         await lk.aclose()
 
 
+async def _set_participants_can_publish_async(room_name: str, identities, allowed: bool) -> int:
+    """Change the LIVE publish permission of each identity (stage-only mode, guest accept/remove).
+
+    LiveKit unpublishes a participant's tracks by itself when `can_publish` goes False. One shared client for the
+    whole batch; an identity that is not connected right now is skipped (their NEXT token carries the right grant).
+    Returns how many updates went through. Only `can_publish` changes; subscribe + data stay on.
+    """
+    lk = _client()
+    done = 0
+    try:
+        for identity in identities:
+            try:
+                await lk.room.update_participant(
+                    api.UpdateParticipantRequest(
+                        room=room_name,
+                        identity=str(identity),
+                        permission=api.ParticipantPermission(
+                            can_subscribe=True,
+                            can_publish=bool(allowed),
+                            can_publish_data=True,
+                        ),
+                    )
+                )
+                done += 1
+            except Exception:
+                logger.info("LiveKit: update permission for %s in %s skipped", identity, room_name)
+    finally:
+        await lk.aclose()
+    return done
+
+
 async def _list_participants_async(room_name: str):
     lk = _client()
     try:
@@ -489,6 +524,7 @@ ensure_room = async_to_sync(_ensure_room_async)
 end_room = async_to_sync(_end_room_async)
 remove_participant = async_to_sync(_remove_participant_async)
 set_participant_audio_muted = async_to_sync(_set_participant_audio_muted_async)
+set_participants_can_publish = async_to_sync(_set_participants_can_publish_async)
 list_participants = async_to_sync(_list_participants_async)
 start_room_recording = async_to_sync(_start_room_recording_async)
 stop_room_recording = async_to_sync(_stop_room_recording_async)

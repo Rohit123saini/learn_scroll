@@ -29,22 +29,41 @@ WHY THIS EXISTS:
     exactly what a human reviewer skims past and exactly what a cheap
     static check catches for free. This command is that check.
 
-CURRENT SCOPE (deliberate, not a limitation of the approach):
-    Only `user_profile` and `core` are checked right now
-    (CONFIG_DRIFT_APPS below) — those are the two apps whose source was
-    available when this was written. The command itself is fully
-    generic (everything is driven off Django's app registry + AST/regex
-    scans of whatever app is named), so adding the rest of the apps
-    later is a one-line change to CONFIG_DRIFT_APPS — see settings.py.
-    Nothing else about the command needs touching when that happens.
+SCOPE:
+    The four per-app checks above run for every app in
+    settings.CONFIG_DRIFT_APPS (`--apps` overrides). The command is fully
+    generic (Django app registry + AST/regex scans), so covering another
+    app is a one-word change to that list — see settings.py.
 
-WIRING (one-time setup, settings.py):
+T3.5 / R10 — PROJECT-LEVEL CHECKS (run once, not per app):
+    5. ALLOWED_HOSTS wildcard — runtime value AND settings.py source. A bare
+       "*" (or ".") accepts any Host header: host-header injection, cache /
+       password-reset-link poisoning. ERROR when DEBUG is off (or
+       --production); WARNING in local dev. The SOURCE scan additionally
+       catches an unconditional `ALLOWED_HOSTS = ['*']` that a CI box with
+       the env var set would never trip at runtime.
+    6. DEBUG — runtime DEBUG=True (ERROR under --production / DJANGO_ENV=
+       production, otherwise WARNING), a hard-coded `DEBUG = True`, or a
+       truthy env default like os.getenv("DEBUG", "True") (insecure by
+       default).
+    7. Stale comments — "`X` is NOT confirmed to exist / doesn't exist yet"
+       where X is defined now, and comments pointing at a .py file that is
+       gone (see core/drift_scan.py). WARNINGs (heuristic). Silence one with
+       an inline `# drift: ignore`; acknowledge a backlog with --baseline.
 
-    CONFIG_DRIFT_APPS = ["user_profile", "core"]  # grow this list later
+SEVERITY / EXIT CODE (the CI gate):
+    Findings are "error" or "warning". Without --strict the command only
+    reports. With --strict it exits non-zero when anything NOT in the
+    baseline reaches --fail-on (default: warning == fail on any, matching
+    the original --strict behaviour; use --fail-on error to gate only on
+    errors). Baselines only ever absorb WARNINGs — errors can't be
+    baselined, they must be fixed.
 
-    # Optional escape hatches — only add an entry here once you've
-    # actually confirmed the flagged thing is fine on purpose, not
-    # because the check is wrong:
+WIRING (settings.py):
+
+    CONFIG_DRIFT_APPS = ["user_profile", "core", ...]
+    # Optional escape hatches — only add an entry once you've confirmed the
+    # flagged thing is fine on purpose, not because the check is wrong:
     CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
     CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
     CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
@@ -52,7 +71,11 @@ WIRING (one-time setup, settings.py):
 USAGE:
     python manage.py check_config_drift
     python manage.py check_config_drift --apps user_profile core tuitionclass
-    python manage.py check_config_drift --strict   # nonzero exit if CI should fail
+    python manage.py check_config_drift --strict --production          # CI gate
+    python manage.py check_config_drift --format json                  # machine-readable
+    python manage.py check_config_drift --write-baseline config_drift_baseline.json
+    python manage.py check_config_drift --strict --baseline config_drift_baseline.json
+    scripts/ci_config_drift.sh                                         # what CI runs
 
 LIMITATIONS (read before trusting a clean run blindly):
     - Throttle-scope and APIView-vs-urls.py checks are regex/AST scans
@@ -74,6 +97,9 @@ LIMITATIONS (read before trusting a clean run blindly):
       instead of once per manual pass.
 """
 import ast
+import importlib.util
+import json
+import os
 import re
 from pathlib import Path
 
@@ -81,7 +107,14 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-DEFAULT_CONFIG_DRIFT_APPS = ["user_profile", "core"]
+from core.drift_scan import (
+    Finding,
+    apply_baseline,
+    scan_settings_source,
+    scan_stale_comments,
+)
+
+DEFAULT_CONFIG_DRIFT_APPS = ["user_profile", "core"]  # fallback only; settings.CONFIG_DRIFT_APPS wins
 
 # Regex fallback for `throttle_scope = "xxx"` wherever it appears (view
 # class body, get_throttles() method body, etc.) — this is the common
@@ -100,34 +133,51 @@ _THROTTLE_CLASS_RE = re.compile(
 _BARE_SCOPE_RE = re.compile(r"^\s*scope\s*=\s*['\"]([\w\-]+)['\"]", re.MULTILINE)
 
 
+_PRODUCTION_ENV_NAMES = ("DJANGO_ENV", "ENVIRONMENT", "SENTRY_ENVIRONMENT")
+
+
 class Command(BaseCommand):
     help = (
-        "Detect config drift: throttle scopes missing a rate, periodic-"
-        "looking Celery tasks missing a beat schedule entry, unregistered "
-        "admin models, and APIViews never wired into urls.py. Scope is "
-        "settings.CONFIG_DRIFT_APPS (default: user_profile, core)."
+        "Detect config drift: throttle scopes missing a rate, periodic-looking "
+        "Celery tasks missing a beat schedule entry, unregistered admin models, "
+        "APIViews never wired into urls.py (per app, settings.CONFIG_DRIFT_APPS) "
+        "PLUS project-level checks: ALLOWED_HOSTS wildcard, DEBUG, stale comments."
     )
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--apps",
-            nargs="+",
-            default=None,
+            "--apps", nargs="+", default=None,
             help="App labels to check. Defaults to settings.CONFIG_DRIFT_APPS, "
             f"or {DEFAULT_CONFIG_DRIFT_APPS} if that setting isn't defined.",
         )
         parser.add_argument(
-            "--strict",
-            action="store_true",
-            help="Exit with a nonzero status if any drift is found (for CI).",
+            "--strict", action="store_true",
+            help="Exit non-zero if any (non-baselined) finding reaches --fail-on (for CI).",
         )
+        parser.add_argument(
+            "--fail-on", choices=["error", "warning"], default="warning",
+            help="With --strict: lowest severity that fails the run (default: warning = any finding).",
+        )
+        parser.add_argument(
+            "--production", action="store_true",
+            help="Treat this run as validating a production config: DEBUG=True and a wildcard "
+            "ALLOWED_HOSTS become errors. Also implied by DJANGO_ENV/ENVIRONMENT/SENTRY_ENVIRONMENT=production.",
+        )
+        parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+        parser.add_argument("--baseline", default=None, help="JSON file of acknowledged warning fingerprints.")
+        parser.add_argument(
+            "--write-baseline", default=None, metavar="PATH",
+            help="Write the current WARNING fingerprints to PATH and exit 0 (errors are never baselined).",
+        )
+        parser.add_argument("--skip-security", action="store_true", help="Skip the ALLOWED_HOSTS / DEBUG checks.")
+        parser.add_argument("--skip-stale-comments", action="store_true", help="Skip the stale-comment scan.")
 
+    # ------------------------------------------------------------------
     def handle(self, *args, **options):
-        target_apps = options["apps"] or getattr(
-            settings, "CONFIG_DRIFT_APPS", DEFAULT_CONFIG_DRIFT_APPS
-        )
+        target_apps = options["apps"] or getattr(settings, "CONFIG_DRIFT_APPS", DEFAULT_CONFIG_DRIFT_APPS)
+        production = options["production"] or self._env_says_production()
 
-        issues = []
+        findings = []
         for app_label in target_apps:
             try:
                 app_config = django_apps.get_app_config(app_label)
@@ -135,15 +185,142 @@ class Command(BaseCommand):
                 raise CommandError(f"Unknown app label: {app_label!r}") from exc
 
             app_path = Path(app_config.path)
-            issues += self._check_throttle_scopes(app_label, app_path)
-            issues += self._check_celery_beat(app_label, app_path)
-            issues += self._check_admin_registration(app_label)
-            issues += self._check_urls_wiring(app_label, app_path)
+            raw = []
+            raw += self._check_throttle_scopes(app_label, app_path)
+            raw += self._check_celery_beat(app_label, app_path)
+            raw += self._check_admin_registration(app_label)
+            raw += self._check_urls_wiring(app_label, app_path)
+            # legacy (kind, app_label, message) tuples -> Finding(error)
+            findings += [Finding(kind=k, severity="error", message=m, scope=a, key=m) for k, a, m in raw]
 
-        self._report(target_apps, issues)
+        if not options["skip_security"]:
+            findings += self._check_allowed_hosts(production)
+            findings += self._check_debug(production)
+            findings += self._check_settings_source()
+        if not options["skip_stale_comments"]:
+            findings += self._check_stale_comments()
 
-        if options["strict"] and issues:
-            raise CommandError(f"{len(issues)} config-drift issue(s) found.")
+        if options["write_baseline"]:
+            notes = {f.fingerprint: f"{f.kind}: {f.file or f.scope} — {f.key}"
+                     for f in findings if f.severity == "warning"}
+            warnings_only = sorted(notes)
+            Path(options["write_baseline"]).write_text(
+                json.dumps({"version": 1, "fingerprints": warnings_only,
+                            "notes": {k: notes[k] for k in warnings_only}}, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self.stdout.write(self.style.SUCCESS(
+                f"Wrote {len(warnings_only)} warning fingerprint(s) to {options['write_baseline']}."
+            ))
+            errors = [f for f in findings if f.severity == "error"]
+            if errors:
+                self.stdout.write(self.style.ERROR(f"{len(errors)} error(s) remain and are NOT baselined — fix them."))
+            return
+
+        baselined = []
+        baseline_path = options["baseline"] or self._default_baseline()
+        if baseline_path:
+            known = self._load_baseline(baseline_path)
+            findings, baselined = apply_baseline(findings, known)
+
+        if options["format"] == "json":
+            self.stdout.write(json.dumps(self._as_json(target_apps, production, findings, baselined), indent=2))
+        else:
+            self._report(target_apps, findings, baselined, production)
+
+        if options["strict"]:
+            failing = [f for f in findings if f.severity == "error" or options["fail_on"] == "warning"]
+            if failing:
+                raise CommandError(f"{len(failing)} config-drift issue(s) found.")
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _env_says_production():
+        return any(os.environ.get(n, "").strip().lower() in ("production", "prod") for n in _PRODUCTION_ENV_NAMES)
+
+    @staticmethod
+    def _default_baseline():
+        configured = getattr(settings, "CONFIG_DRIFT_BASELINE", None)
+        if configured and Path(configured).exists():
+            return str(configured)
+        candidate = Path(settings.BASE_DIR) / "config_drift_baseline.json"
+        return str(candidate) if candidate.exists() else None
+
+    @staticmethod
+    def _load_baseline(path):
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CommandError(f"Cannot read baseline {path!r}: {exc}") from exc
+        return data.get("fingerprints", []) if isinstance(data, dict) else list(data)
+
+    @staticmethod
+    def _as_json(target_apps, production, findings, baselined):
+        def row(f):
+            return {"kind": f.kind, "severity": f.severity, "scope": f.scope, "file": f.file,
+                    "line": f.line, "message": f.message, "fingerprint": f.fingerprint}
+        return {
+            "apps": list(target_apps), "production": production,
+            "errors": sum(f.severity == "error" for f in findings),
+            "warnings": sum(f.severity == "warning" for f in findings),
+            "baselined": len(baselined),
+            "findings": [row(f) for f in findings],
+        }
+
+    # ------------------------------------------------------------------
+    # Check 5 / 6 / 7 — project-level (T3.5, R10)
+    # ------------------------------------------------------------------
+    def _check_allowed_hosts(self, production):
+        hosts = list(getattr(settings, "ALLOWED_HOSTS", []) or [])
+        debug = bool(getattr(settings, "DEBUG", False))
+        strict_env = production or not debug
+        out = []
+        if any(h in ("*", ".") for h in hosts):
+            out.append(Finding(
+                kind="allowed_hosts_wildcard", severity="error" if strict_env else "warning", scope="settings",
+                key="runtime:ALLOWED_HOSTS=*",
+                message=(
+                    "ALLOWED_HOSTS contains a wildcard ('*') — any Host header is accepted "
+                    "(host-header injection, cache and password-reset-link poisoning; Channels' "
+                    "AllowedHostsOriginValidator is also defeated). List the real hostnames in the "
+                    "ALLOWED_HOSTS env var."
+                    + ("" if strict_env else " (Tolerated here only because DEBUG=True.)")
+                ),
+            ))
+        elif not hosts and strict_env:
+            out.append(Finding(
+                kind="allowed_hosts_empty", severity="warning", scope="settings", key="runtime:ALLOWED_HOSTS=[]",
+                message="ALLOWED_HOSTS is empty with DEBUG off — Django will answer every request with 400. "
+                        "Set the ALLOWED_HOSTS env var for this environment.",
+            ))
+        return out
+
+    def _check_debug(self, production):
+        if not getattr(settings, "DEBUG", False):
+            return []
+        return [Finding(
+            kind="debug_enabled", severity="error" if production else "warning", scope="settings",
+            key="runtime:DEBUG=True",
+            message="DEBUG is True — error pages leak source, settings and SQL, and static/CORS "
+                    "conveniences switch on. Must be False in production"
+                    + ("." if production else " (reported as a warning because this isn't a --production run)."),
+        )]
+
+    def _check_settings_source(self):
+        module = getattr(settings, "SETTINGS_MODULE", None)
+        try:
+            spec = importlib.util.find_spec(module) if module else None
+        except (ImportError, ValueError):
+            spec = None
+        if spec is None or not spec.origin:
+            return []
+        return scan_settings_source(Path(spec.origin))
+
+    def _check_stale_comments(self):
+        root = Path(getattr(settings, "CONFIG_DRIFT_STALE_COMMENT_ROOT", None) or settings.BASE_DIR)
+        return scan_stale_comments(root)
 
     # ------------------------------------------------------------------
     # Check 1 — throttle scope -> DEFAULT_THROTTLE_RATES
@@ -276,16 +453,33 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
     # Check 4 — APIView subclass -> referenced somewhere in urls.py
     # ------------------------------------------------------------------
+    def _view_sources(self, app_path):
+        """Text of every module that can hold views: `views.py` and/or a `views/`
+        package (T3.2 split message/ and tuitionclass/ into packages — a plain
+        `views.py` read would silently skip them)."""
+        texts = []
+        single = self._read(app_path / "views.py")
+        if single is not None:
+            texts.append(single)
+        pkg = app_path / "views"
+        if pkg.is_dir():
+            for module in sorted(pkg.glob("*.py")):
+                text = self._read(module)
+                if text is not None:
+                    texts.append(text)
+        return texts
+
     def _check_urls_wiring(self, app_label, app_path):
-        views_file = app_path / "views.py"
-        views_text = self._read(views_file)
-        if views_text is None:
+        view_texts = self._view_sources(app_path)
+        if not view_texts:
             return []
 
         urls_text = self._read(app_path / "urls.py") or ""
         skip = set(getattr(settings, "CONFIG_DRIFT_URL_SKIP", set()))
 
-        api_view_classes = self._find_api_view_classes(views_text)
+        api_view_classes = set()
+        for text in view_texts:
+            api_view_classes |= self._find_api_view_classes(text)
 
         issues = []
         for class_name in sorted(api_view_classes):
@@ -348,30 +542,43 @@ class Command(BaseCommand):
             return None
 
     # ------------------------------------------------------------------
-    def _report(self, target_apps, issues):
-        self.stdout.write(f"Checked apps: {', '.join(target_apps)}\n")
+    def _report(self, target_apps, findings, baselined, production):
+        self.stdout.write(f"Checked apps: {', '.join(target_apps)} (+ project-level checks)"
+                          f"{' [production]' if production else ''}\n")
+        if baselined:
+            self.stdout.write(f"{len(baselined)} known warning(s) acknowledged by the baseline.")
 
-        if not issues:
+        if not findings:
             self.stdout.write(self.style.SUCCESS("No config drift found."))
             return
 
-        by_kind = {}
-        for kind, app_label, message in issues:
-            by_kind.setdefault(kind, []).append((app_label, message))
-
         headings = {
+            "allowed_hosts_wildcard": "ALLOWED_HOSTS wildcard (runtime)",
+            "allowed_hosts_wildcard_source": "ALLOWED_HOSTS wildcard (settings.py source)",
+            "allowed_hosts_empty": "ALLOWED_HOSTS empty",
+            "debug_enabled": "DEBUG enabled",
+            "debug_hardcoded_true": "DEBUG hard-coded True",
+            "debug_unsafe_default": "DEBUG insecure default",
             "throttle_rate_missing": "Throttle scopes with no DEFAULT_THROTTLE_RATES entry",
             "task_not_scheduled": "Tasks with no CELERY_BEAT_SCHEDULE entry",
             "model_not_registered": "Models not registered in admin.py",
             "view_not_wired": "APIViews not referenced in urls.py",
+            "stale_comment_symbol": "Stale comments (claim something is missing, but it exists now)",
+            "stale_comment_path": "Stale comments (point at a file that no longer exists)",
         }
+        by_kind = {}
+        for f in findings:
+            by_kind.setdefault(f.kind, []).append(f)
 
-        for kind, heading in headings.items():
+        for kind in list(headings) + [k for k in by_kind if k not in headings]:
             entries = by_kind.get(kind)
             if not entries:
                 continue
-            self.stdout.write(self.style.WARNING(f"\n{heading}:"))
-            for app_label, message in entries:
-                self.stdout.write(f"  [{app_label}] {message}")
+            style = self.style.ERROR if any(e.severity == "error" for e in entries) else self.style.WARNING
+            self.stdout.write(style(f"\n{headings.get(kind, kind)}:"))
+            for f in entries:
+                self.stdout.write(f"  [{f.severity.upper()}][{f.scope}] {f.message}")
 
-        self.stdout.write(self.style.ERROR(f"\n{len(issues)} issue(s) found."))
+        errors = sum(f.severity == "error" for f in findings)
+        warnings = len(findings) - errors
+        self.stdout.write(self.style.ERROR(f"\n{errors} error(s), {warnings} warning(s)."))

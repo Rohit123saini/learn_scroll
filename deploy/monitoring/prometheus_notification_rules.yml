@@ -1,0 +1,47 @@
+# N10 - Prometheus alert rules for NOTIFICATIONS (metrics come from GET /core/notification-ops/?format=prom,
+# core/notification_ops.py). Load with:   rule_files: [ "prometheus_notification_rules.yml" ]
+# "delivered" = ACCEPTED by FCM (FCM gives no device receipt). Dead tokens (uninstalled apps) are NOT counted against it.
+groups:
+  - name: learnscroll-notification-slo
+    rules:
+      - alert: PushDeliverySuccessBelow97
+        expr: learnscroll_notification_delivery_success_pct{window="1h"} < 97 and learnscroll_notification_window_events{window="1h",event="sent"} > 50
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "Push delivery success {{ $value }}% over 1h (SLO 97%)"
+          runbook: "deploy/monitoring/README.md#notifications-n10"
+
+      - alert: PushFcmDown
+        expr: sum(increase(learnscroll_notification_push_failed_total{code="fcm_down"}[10m])) > 20
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Pushes are failing because FCM is unreachable / not initialised (credentials?)"
+          runbook: "deploy/monitoring/README.md#notifications-n10"
+
+      - alert: PushQuotaOrAuthErrors
+        expr: sum(increase(learnscroll_notification_push_failed_total{code=~"resource_exhausted|third_party_auth_error|invalid_argument"}[30m])) > 20
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "FCM is rejecting pushes ({{ $labels.code }}) - quota, APNs auth or a bad payload"
+
+      - alert: PushSkipsWithoutReason
+        expr: >
+          sum(increase(learnscroll_notification_push_skipped_total{reason=~"not_allowed|error"}[1h]))
+          > 0.05 * clamp_min(sum(increase(learnscroll_notification_push_skipped_total[1h])), 1)
+          and sum(increase(learnscroll_notification_push_skipped_total[1h])) > 50
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "More than 5% of skipped pushes have no clear reason - the skip reasons are missing a branch"
+
+      - alert: NotificationOpenRateCollapsed
+        expr: >
+          learnscroll_notification_open_rate_pct{window="24h"} < 0.3 * avg_over_time(learnscroll_notification_open_rate_pct{window="24h"}[7d])
+          and learnscroll_notification_window_events{window="24h",event="delivered"} > 500
+        for: 2h
+        labels: { severity: ticket }
+        annotations:
+          summary: "Open rate fell to {{ $value }}% (a third of its 7-day average) - is tap routing broken?"

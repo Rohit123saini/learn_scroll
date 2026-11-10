@@ -116,6 +116,20 @@ router — list/retrieve/create/update/delete on each, plus the custom
                                                           session attendance, chat activity, and poll-
                                                           result summary; computed once when the session
                                                           hits COMPLETED, then just read back)
+    sessions/{id}/chapters/              GET, POST        (X12 - markers on the recording timeline. GET: anyone who may open
+                                                          the recording. POST: teacher/staff, {title, offset_seconds?})
+    sessions/{id}/chapters/{cid}/        PATCH, DELETE    (teacher/staff; the "Class started" marker cannot be deleted)
+    sessions/{id}/replay-chat/           GET              (X12 - live chat with its place on the video timeline,
+                                                          ?from=&to=&after_id=&limit=)
+    sessions/{id}/viewers/               GET              (X12 - teacher/staff: who attended live / watched the replay)
+    sessions/{id}/insights/              GET              (X12 - teacher/staff: peak viewers, watch time, questions, polls)
+    sessions/{id}/watch/                 GET, POST        (X12 - replay progress ping {position, delta, duration?})
+    sessions/{id}/recording-notes/       GET, POST        (X12 - class materials attached to the recording; POST teacher/staff)
+    sessions/{id}/recording-notes/{nid}/ DELETE           (teacher/staff)
+    sessions/{id}/recording-saves/       GET, POST        (X12 - "Save as lecture / reel / post": POST starts a background
+                                                          job (202), GET lists the session's jobs)
+    recording-saves/{id}/                GET              (X12 - job status to poll: pending/processing/ready/failed + post_id)
+    recording-saves/{id}/retry/          POST             (X12 - run a failed job again)
     passes/                              GET, POST
     passes/{id}/                         GET, PUT, PATCH, DELETE  (teacher only. Once a pass has
                                                           ever been purchased: DELETE is refused
@@ -273,8 +287,10 @@ router — list/retrieve/create/update/delete on each, plus the custom
     referrals/                           GET               (people the caller has successfully referred —
                                                           own ledger only)
     referrals/my-code/                   GET               (own referral code + redemption tally)
-    referrals/redeem/                    POST              (redeem someone else's referral code, once,
-                                                          new-account-only; body {"code": "R..."})
+    referrals/redeem/                    POST              (CLOSED - always 410 Gone; refer & earn is URL-only now)
+    referrals/earnable/                  GET               (classes / test series whose creator set a commission
+                                                          % > 0, everyone but the owner, each with a share URL
+                                                          carrying the caller's ?ref=; ?q= ?limit=)
     referrals/class-referral-summary/    GET               (task 65 — global "aapne itne log invite kiye"
                                                           dashboard: per-classroom referral commission
                                                           earned/pending, across every classroom the
@@ -299,6 +315,7 @@ router — list/retrieve/create/update/delete on each, plus the custom
 """
 
 from django.urls import include, path
+from .creator_earnings_views import CreatorEarningsView  # P-F9_F10
 from rest_framework.routers import DefaultRouter
 
 # ---------------------------------------------------------------------------
@@ -363,6 +380,39 @@ from .views import (
 )
 
 from . import chunked_upload_views
+
+# X12 (auto recording) - chapters, replay chat, viewers, insights, watch ping, notes, "save as lecture / reel / post".
+# Plain APIViews -> explicit path() below, same as attendance_views.
+from .standalone_live_views import (
+    StandaloneLiveCancelView,
+    StandaloneLiveCreateView,
+    StandaloneLivePolicyView,
+    StandaloneLiveRemindView,
+    StandaloneLiveUpcomingView,
+)
+from .live_moderation_views import (
+    SessionChatFilterView,
+    SessionModerationActView,
+    SessionModerationAuditView,
+    SessionModerationQueueView,
+    SessionModerationResolveView,
+    SessionRecordingNoticeAckView,
+    SessionRecordingNoticeView,
+    SessionReportView,
+)
+from .recording_views import (
+    RecordingSaveDetailView,
+    RecordingSaveRetryView,
+    SessionChapterDetailView,
+    SessionChaptersView,
+    SessionInsightsView,
+    SessionRecordingNoteDetailView,
+    SessionRecordingNotesView,
+    SessionRecordingSavesView,
+    SessionReplayChatView,
+    SessionViewersView,
+    SessionWatchView,
+)
 
 # ---------------------------------------------------------------------------
 # Task 10 fix — these four views (Phase 2 teacher parent-codes, Phase 4
@@ -450,6 +500,12 @@ router.register(r"referrals", ReferralViewSet, basename="referral")
 
 urlpatterns = [
     path("dashboard/", MyDashboardView.as_view(), name="my-dashboard"),
+    # X12 L-C - standalone "Go Live" (no classroom): standalone_live_views.py
+    path("live/go/policy/", StandaloneLivePolicyView.as_view(), name="standalone-live-policy"),
+    path("live/go/", StandaloneLiveCreateView.as_view(), name="standalone-live-go"),
+    path("live/upcoming/", StandaloneLiveUpcomingView.as_view(), name="standalone-live-upcoming"),
+    path("live/<int:session_id>/remind/", StandaloneLiveRemindView.as_view(), name="standalone-live-remind"),
+    path("live/<int:session_id>/cancel/", StandaloneLiveCancelView.as_view(), name="standalone-live-cancel"),
     # NOTE (fix — was registered on the router's underlying ViewSet only
     # via import, but TeacherEarningsView is a plain APIView, not a
     # ViewSet, so router.register() never picks it up on its own; it needs
@@ -457,11 +513,44 @@ urlpatterns = [
     # above. Without this line the view existed and was imported into
     # urls.py but was unreachable at any URL.
     path("my-earnings/", TeacherEarningsView.as_view(), name="teacher-earnings"),
+    path("creator-earnings/", CreatorEarningsView.as_view(), name="creator-earnings"),  # P-F9_F10
     # Same "plain APIView needs its own explicit path()" reasoning as
     # my-earnings/ above — StudentProgressView isn't a ViewSet either.
     path("my-progress/", StudentProgressView.as_view(), name="student-progress"),
     # FEATURE (student attendance) — see attendance_views.py.
     path("sessions/<int:session_id>/attendance/", SessionAttendanceView.as_view(), name="session-attendance"),
+    # X12 (auto recording) - see recording_views.py. These are `sessions/<int:session_id>/<name>/` paths of their own; the
+    # router's `sessions/<pk>/<action>/` routes never collide with them (none of these names is a ClassSessionViewSet action).
+    path("sessions/<int:session_id>/chapters/", SessionChaptersView.as_view(), name="session-chapters"),
+    path("sessions/<int:session_id>/chapters/<int:chapter_id>/", SessionChapterDetailView.as_view(), name="session-chapter-detail"),
+    path("sessions/<int:session_id>/replay-chat/", SessionReplayChatView.as_view(), name="session-replay-chat"),
+    path("sessions/<int:session_id>/viewers/", SessionViewersView.as_view(), name="session-recording-viewers"),
+    path("sessions/<int:session_id>/insights/", SessionInsightsView.as_view(), name="session-recording-insights"),
+    path("sessions/<int:session_id>/watch/", SessionWatchView.as_view(), name="session-recording-watch"),
+    path("sessions/<int:session_id>/recording-notes/", SessionRecordingNotesView.as_view(), name="session-recording-notes"),
+    path(
+        "sessions/<int:session_id>/recording-notes/<int:note_id>/",
+        SessionRecordingNoteDetailView.as_view(), name="session-recording-note-detail",
+    ),
+    path("sessions/<int:session_id>/recording-saves/", SessionRecordingSavesView.as_view(), name="session-recording-saves"),
+    # X12 live safety - see live_moderation_views.py. Same `sessions/<int:session_id>/<name>/` rule as above: none of these
+    # names (`moderation`, `recording-notice`) is a ClassSessionViewSet action, so the router never shadows them.
+    path("sessions/<int:session_id>/moderation/report/", SessionReportView.as_view(), name="live-mod-report"),
+    path("sessions/<int:session_id>/moderation/queue/", SessionModerationQueueView.as_view(), name="live-mod-queue"),
+    path(
+        "sessions/<int:session_id>/moderation/queue/<int:event_id>/resolve/",
+        SessionModerationResolveView.as_view(), name="live-mod-resolve",
+    ),
+    path("sessions/<int:session_id>/moderation/act/", SessionModerationActView.as_view(), name="live-mod-act"),
+    path("sessions/<int:session_id>/moderation/chat-filter/", SessionChatFilterView.as_view(), name="live-mod-chat-filter"),
+    path("sessions/<int:session_id>/moderation/audit/", SessionModerationAuditView.as_view(), name="live-mod-audit"),
+    path("sessions/<int:session_id>/recording-notice/", SessionRecordingNoticeView.as_view(), name="live-recording-notice"),
+    path(
+        "sessions/<int:session_id>/recording-notice/ack/",
+        SessionRecordingNoticeAckView.as_view(), name="live-recording-notice-ack",
+    ),
+    path("recording-saves/<int:save_id>/", RecordingSaveDetailView.as_view(), name="recording-save-detail"),
+    path("recording-saves/<int:save_id>/retry/", RecordingSaveRetryView.as_view(), name="recording-save-retry"),
     path(
         "classrooms/<int:classroom_id>/attendance/summary/",
         ClassroomAttendanceSummaryView.as_view(), name="classroom-attendance-summary",

@@ -1,0 +1,37 @@
+<!-- P-I - permissions derived from lib/ (permission_handler: camera, microphone, notification, storage; geolocator;
+     livekit/webrtc; flutter_callkit_incoming; record; flutter_background). Keep ONLY what you can justify in Play's
+     Data safety form (deploy/PLAY_DATA_SAFETY.md). Put inside <manifest> of android/app/src/main/AndroidManifest.xml. -->
+<uses-permission android:name="android.permission.INTERNET"/>
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+<uses-permission android:name="android.permission.CAMERA"/>
+<uses-permission android:name="android.permission.RECORD_AUDIO"/>
+<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+<uses-permission android:name="android.permission.WAKE_LOCK"/>
+<uses-permission android:name="android.permission.VIBRATE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+<uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>   <!-- incoming-call screen -->
+<!-- Media: scoped-storage APIs, NOT broad storage. READ_MEDIA_* only if photo_manager/gal really need the gallery -->
+<uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+<uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+<!-- Only if geolocator is used for a feature users see (lib/ has 1 import): else delete both lines -->
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+<!-- REMOVE if present: MANAGE_EXTERNAL_STORAGE, READ_PHONE_STATE, SYSTEM_ALERT_WINDOW (Play review flags) -->
+
+<!-- Verified app links (server side: /.well-known/assetlinks.json is already served by common/web_links.py).
+     Inside the main <activity>: -->
+<intent-filter android:autoVerify="true">
+    <action android:name="android.intent.action.VIEW"/>
+    <category android:name="android.intent.category.DEFAULT"/>
+    <category android:name="android.intent.category.BROWSABLE"/>
+    <data android:scheme="https" android:host="api.learnscroll.app" android:pathPrefix="/u/"/>
+    <data android:scheme="https" android:host="api.learnscroll.app" android:pathPrefix="/p/"/>
+    <data android:scheme="https" android:host="api.learnscroll.app" android:pathPrefix="/classroom/"/>
+    <data android:scheme="https" android:host="api.learnscroll.app" android:pathPrefix="/test-series/"/>
+</intent-filter>
+<!-- Application tag: android:allowBackup="false" android:usesCleartextTraffic="false" -->

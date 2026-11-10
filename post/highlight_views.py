@@ -3,7 +3,8 @@ post/highlight_views.py
 
 STORIES UPGRADE - PART 3b: Highlights API. Rules + visibility: post/highlights.py.
 
-    GET    /post/highlights/?user_id=          a person's highlights (default: mine). Not paginated
+    GET    /post/highlights/?user_id=          a person's highlights (default: mine), in the owner's own order
+                                               (`position`, then most recently edited). Not paginated
                                                (max 50 per user) but shaped like a page:
                                                {"count", "results": [row, ..]}
     POST   /post/highlights/                   create {"title"?, "story_ids": [..], "cover_story_id"?,
@@ -13,7 +14,17 @@ STORIES UPGRADE - PART 3b: Highlights API. Rules + visibility: post/highlights.p
                                                "cover_story_id"? (null = automatic),
                                                "cover_x"?, "cover_y"?, "cover_zoom"? (need an explicit cover)} -> detail
     DELETE /post/highlights/<id>/              owner: 204 (the stories themselves are untouched)
+    POST   /post/highlights/reorder/           (P6) owner: {"highlight_ids": [..]} = the new order of the row on the
+                                               profile (first = leftmost). Highlights not listed keep their relative
+                                               order after the listed ones. Anything that is not MY highlight -> 400
+                                               `highlight_not_found`. -> {"count", "results": [row, ..]} in the new order.
+                                               Does not touch `updated_at`.
     POST   /post/highlights/<id>/stories/      owner: add one {"story_id"} -> 201 added / 200 already there
+    POST   /post/highlights/<id>/stories/<sid>/share/  (ST-A 1) any viewer: send that story into a chat
+                                               {"conversation_id"} -> 201; 403 `story_reshare_off` when the owner
+                                               switched sharing off (the owner is always allowed)
+    POST   /post/highlights/<id>/stories/<sid>/save/   (ST-A 1) any viewer: {url, media_type, filename} to download;
+                                               403 `story_save_off`
     DELETE /post/highlights/<id>/stories/<sid>/ owner: remove one (idempotent). Removing the LAST story deletes
                                                the highlight -> {"highlight_deleted": true}
     GET    /post/stories/archive/              owner: my stories that can go into a highlight (paginated)
@@ -22,7 +33,7 @@ A highlight the caller may not see is a 404 (never 403), same as stories.
 """
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Exists, Max, OuterRef
+from django.db.models import Exists, F, Max, OuterRef
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -40,6 +51,7 @@ from .highlights import (
     build_highlight_rows,
     can_view_highlights_of,
     clean_title,
+    get_highlight_story_or_404,
     max_highlights,
     max_items,
     reset_cover_crop,
@@ -141,7 +153,9 @@ def _create_highlight(user, data):
             f"You can have at most {max_highlights()} highlights.", code="highlight_limit",
         )
     stories = _resolve_owned_stories(user, story_ids)
-    highlight = Highlight.objects.create(user=user, title=title)
+    # P6: a new highlight goes to the front of the owner's own order (the others move one place right).
+    Highlight.objects.filter(user=user).update(position=F("position") + 1)
+    highlight = Highlight.objects.create(user=user, title=title, position=0)
     HighlightItem.objects.bulk_create(
         [HighlightItem(highlight=highlight, story=s, position=i) for i, s in enumerate(stories)]
     )
@@ -189,6 +203,27 @@ def _update_highlight(highlight, data):
     _apply_crop(highlight, data)
 
     highlight.save()  # bumps updated_at
+
+
+class HighlightReorderSerializer(serializers.Serializer):
+    highlight_ids = serializers.ListField(
+        child=serializers.UUIDField(), allow_empty=False, max_length=200,
+    )
+
+
+def _reorder_highlights(user, ordered_ids):
+    """P6: store the owner's own order. `ordered_ids` (deduped) go first, in the order given; every other highlight
+    of the owner follows in its current order. Only `position` is written (a bulk update, so `updated_at` - which the
+    old default order used - is not bumped by a drag). Caller runs this inside transaction.atomic."""
+    mine = list(Highlight.objects.select_for_update(of=("self",)).filter(user=user).order_by("position", "-updated_at"))
+    by_id = {h.pk: h for h in mine}
+    if any(i not in by_id for i in ordered_ids):
+        raise HighlightError("Some of these highlights were not found.", code="highlight_not_found", field="highlight_ids")
+    listed = set(ordered_ids)
+    final = list(ordered_ids) + [h.pk for h in mine if h.pk not in listed]
+    for position, pk in enumerate(final):
+        if by_id[pk].position != position:
+            Highlight.objects.filter(pk=pk).update(position=position)
 
 
 def _touch(highlight_id):
@@ -261,7 +296,7 @@ class HighlightListCreateAPIView(APIView):
                 raise Http404("User not found.")
         if not can_view_highlights_of(owner, request.user):
             return Response({"count": 0, "results": []})  # nothing to show, nothing leaked
-        highlights = Highlight.objects.filter(user=owner).select_related("user").order_by("-updated_at")
+        highlights = Highlight.objects.filter(user=owner).select_related("user").order_by("position", "-updated_at")
         rows = build_highlight_rows(highlights, request.user, request, hide_empty=owner.id != request.user.id)
         return Response({"count": len(rows), "results": rows})
 
@@ -277,6 +312,25 @@ class HighlightListCreateAPIView(APIView):
             return _error_response(exc)
         highlight = Highlight.objects.select_related("user").get(pk=highlight.pk)
         return Response(_detail_payload(highlight, request.user, request), status=status.HTTP_201_CREATED)
+
+
+class HighlightReorderAPIView(APIView):
+    """POST /post/highlights/reorder/  {"highlight_ids": ["<uuid>", ..]} - P6. Owner only (it only ever sees MY rows)."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Change the order of my highlights row", request=HighlightReorderSerializer, tags=["Stories"])
+    def post(self, request):
+        ser = HighlightReorderSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ids = _dedupe(ser.validated_data["highlight_ids"])
+        try:
+            with transaction.atomic():
+                _reorder_highlights(request.user, ids)
+        except HighlightError as exc:
+            return _error_response(exc)
+        highlights = Highlight.objects.filter(user=request.user).select_related("user").order_by("position", "-updated_at")
+        rows = build_highlight_rows(highlights, request.user, request, hide_empty=False)
+        return Response({"count": len(rows), "results": rows})
 
 
 class HighlightDetailAPIView(APIView):
@@ -392,3 +446,66 @@ class StoryArchiveAPIView(APIView):
         page = paginator.paginate_queryset(qs, request, view=self)
         data = StorySerializer(page, many=True, context={"request": request}).data
         return paginator.get_paginated_response(data)
+
+
+# --------------------------------------------------------------------------
+# ST-A (1): Share / Save from a highlight (read-only viewer)
+# --------------------------------------------------------------------------
+class HighlightStoryShareAPIView(APIView):
+    """POST /post/highlights/<id>/stories/<story_id>/share/ {"conversation_id": "..."}
+
+    The live-story endpoint (`stories/<id>/share/`) answers 404 for an ended story, so a highlight needs its own door.
+    Order of checks: highlight + item visible (else 404, never leaks) -> `Story.allow_reshare` (403 `story_reshare_off`;
+    the owner is always allowed) -> conversation (404 / 403 not a participant). Same message as the live share
+    (`meta.story_share = True`), so the chat bubble is identical."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Send a highlight story into a chat conversation", request=None, tags=["Stories"])
+    def post(self, request, highlight_id, story_id):
+        from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+
+        from message.models import Conversation
+
+        from .serializers import PostShareRequestSerializer
+        from .story_share import share_story_to_conversation
+        from .story_visibility import STORY_RESHARE_OFF, STORY_RESHARE_OFF_MESSAGE, can_reshare_story
+
+        _highlight, story = get_highlight_story_or_404(highlight_id, story_id, request.user)
+        if not can_reshare_story(story, request.user):
+            return Response({"detail": STORY_RESHARE_OFF_MESSAGE, "code": STORY_RESHARE_OFF},
+                            status=status.HTTP_403_FORBIDDEN)
+        body = PostShareRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        try:
+            message = share_story_to_conversation(
+                story, request.user, body.validated_data["conversation_id"], request=request,
+            )
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Conversation not found"}, status=status.HTTP_404_NOT_FOUND)
+        except DjangoPermissionDenied as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        return Response(
+            {"success": True, "data": {"message_id": str(message.id), "conversation_id": str(message.conversation_id)}},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class HighlightStorySaveAPIView(APIView):
+    """POST /post/highlights/<id>/stories/<story_id>/save/ -> {"success": true, "data": {url, media_type, filename}}.
+    Same gate as the live story (`Story.allow_save`, owner always; 403 `story_save_off`). Like the live one it keeps
+    the app and honest clients in line, it is not DRM (the media URL is public)."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Get the downloadable media of a highlight story (checks allow_save)", request=None, tags=["Stories"])
+    def post(self, request, highlight_id, story_id):
+        from .story_share import saveable_media
+        from .story_visibility import STORY_SAVE_OFF, STORY_SAVE_OFF_MESSAGE, can_save_story
+
+        _highlight, story = get_highlight_story_or_404(highlight_id, story_id, request.user)
+        if not can_save_story(story, request.user):
+            return Response({"detail": STORY_SAVE_OFF_MESSAGE, "code": STORY_SAVE_OFF},
+                            status=status.HTTP_403_FORBIDDEN)
+        data = saveable_media(story, request)
+        if data is None:
+            return Response({"detail": "Story has no media"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": True, "data": data})

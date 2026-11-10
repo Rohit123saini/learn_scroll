@@ -278,3 +278,135 @@ def expire_stale_recordings():
     return TestRecording.objects.filter(
         status=TestRecording.Status.RECORDING, started_at__lt=cutoff
     ).update(status=TestRecording.Status.FAILED, ended_at=timezone.now())
+
+
+# ---------------------------------------------------------------------------
+# N6 - "test closing soon" reminders (24h + 1h before the attempt's deadline).
+#
+# Beat: every 10 minutes (settings.CELERY_BEAT_SCHEDULE "testseries-send-test-deadline-reminders").
+# Only IN_PROGRESS attempts are looked at: the student already started the test, so a nudge is useful; a student who
+# never began gets the normal "new test" notifications instead. `deadline_at` is already min(started_at + duration,
+# series.ends_at) (TestAttempt.save), so one column covers both "window closes" and "timer runs out".
+#
+# Rules (all deliberate, each one stops a reminder that would just be noise):
+#   * tiers are exclusive bands of the REMAINING time: 24h tier = (1h, 24h], 1h tier = (0, 1h]. A late-started attempt
+#     never gets a stale "24h" ping AND a "1h" ping together.
+#   * a tier is skipped when the whole attempt was never longer than that lead (a 20-minute timed test does not
+#     announce "1 hour left" the moment it starts - the student chose that limit).
+#   * a student who saved an answer in the last 10 minutes is clearly at the screen already: no push, no row.
+#   * one bell row per (attempt, tier), found again on the next run (idempotent). `data.push_state` works like the
+#     streak reminder: pending -> sent | skipped; quiet hours / DND keep it pending so the next run retries until the
+#     deadline passes. TESTSERIES_DUE_SOON is an URGENT type: the N6 daily cap never blocks it (the push still obeys the
+#     user's own push toggle / per-type chip, focus mode and quiet hours via core.tasks._push_state_for).
+#   * after a Snooze the same row is re-pushed by core.deliver_snoozed_reminder, which asks still_relevant() first
+#     (attempt submitted / window over => silent).
+# ---------------------------------------------------------------------------
+# (lead minutes, label) - highest first. The label is what lands in Notification.data["lead"] (dedupe key + analytics).
+DEADLINE_REMINDER_LEADS = ((24 * 60, "24h"), (60, "1h"))
+DEADLINE_ACTIVE_GRACE_MINUTES = 10
+DEADLINE_REMINDER_BATCH = 500
+
+
+def _deadline_remaining_text(remaining: timedelta) -> str:
+    minutes = max(1, int(remaining.total_seconds() // 60))
+    if minutes >= 120:
+        return f"{round(minutes / 60)} hours"
+    if minutes >= 60:
+        return "about 1 hour"
+    return f"{minutes} min"
+
+
+@shared_task(name="testseries.send_test_deadline_reminders")
+def send_test_deadline_reminders():
+    from core.models import Notification, NotificationPreference
+    from core.services import create_notification
+    from core.tasks import _push_state_for, push_for_notification_row
+
+    notif_type = Notification.NotifType.TESTSERIES_DUE_SOON
+    now = timezone.now()
+    active_since = now - timedelta(minutes=DEADLINE_ACTIVE_GRACE_MINUTES)
+    summary = {"created": 0, "sent": 0, "deferred": 0, "skipped_prefs": 0, "skipped_active": 0}
+
+    for index, (lead_minutes, label) in enumerate(DEADLINE_REMINDER_LEADS):
+        lead = timedelta(minutes=lead_minutes)
+        # band: remaining in (next_lead, lead]; the last tier goes down to "now".
+        lower = now + (timedelta(minutes=DEADLINE_REMINDER_LEADS[index + 1][0])
+                       if index + 1 < len(DEADLINE_REMINDER_LEADS) else timedelta(0))
+        attempts = list(
+            TestAttempt.objects.filter(
+                status=TestAttempt.Status.IN_PROGRESS,
+                deadline_at__isnull=False,
+                deadline_at__gt=lower,
+                deadline_at__lte=now + lead,
+                started_at__isnull=False,
+            )
+            .select_related("series")
+            .order_by("deadline_at")[:DEADLINE_REMINDER_BATCH]
+        )
+        if not attempts:
+            continue
+
+        # Attempt that was never longer than this lead: the student picked that limit themselves.
+        attempts = [a for a in attempts if (a.deadline_at - a.started_at) > lead]
+        if not attempts:
+            continue
+
+        student_ids = {a.student_id for a in attempts}
+        existing = {}
+        for row in Notification.objects.filter(
+            recipient_id__in=student_ids, notif_type=notif_type, created_at__gte=now - lead - timedelta(days=1),
+        ):
+            data = row.data if isinstance(row.data, dict) else {}
+            if data.get("lead") == label and data.get("attempt_id"):
+                existing[(row.recipient_id, str(data["attempt_id"]))] = row
+        prefs = {p.user_id: p for p in NotificationPreference.objects.filter(user_id__in=student_ids)}
+
+        for attempt in attempts:
+            try:
+                if attempt.draft_saved_at and attempt.draft_saved_at >= active_since:
+                    summary["skipped_active"] += 1
+                    continue
+                key = (attempt.student_id, str(attempt.pk))
+                row = existing.get(key)
+                if row is None:
+                    series = attempt.series
+                    row = create_notification(
+                        attempt.student_id,
+                        notif_type,
+                        "Test closing soon \u23f0",
+                        f"\u201c{series.title}\u201d closes in {_deadline_remaining_text(attempt.deadline_at - now)}"
+                        " - finish and submit before time runs out.",
+                        data={
+                            "type": "testseries_due_soon",
+                            "series_id": str(attempt.series_id),
+                            "attempt_id": str(attempt.pk),
+                            "ends_at": attempt.deadline_at.isoformat(),
+                            "lead": label,
+                            "push_state": "pending",
+                        },
+                    )
+                    if row is None:  # in-app chip off / restricted: nothing to push either
+                        continue
+                    summary["created"] += 1
+                if (row.data or {}).get("push_state") != "pending":
+                    continue  # already sent / skipped on an earlier run
+
+                state = _push_state_for(prefs.get(attempt.student_id), notif_type, now)
+                if state == "defer":
+                    summary["deferred"] += 1
+                    continue
+                if state == "send":
+                    push_for_notification_row(row)
+                    summary["sent"] += 1
+                    new_state = "sent"
+                else:
+                    summary["skipped_prefs"] += 1
+                    new_state = "skipped"
+                row.data = {**(row.data or {}), "push_state": new_state}
+                row.save(update_fields=["data"])
+            except Exception:  # noqa: BLE001 - one bad attempt must not block the rest
+                logger.exception("send_test_deadline_reminders: attempt %s failed", attempt.pk)
+
+    if summary["created"] or summary["sent"]:
+        logger.info("send_test_deadline_reminders: %s", summary)
+    return summary

@@ -49,4 +49,10 @@ def extract_mentioned_user_ids(text, conversation, sender_id=None):
         blocked = blocked_user_ids(sender_id)
         if blocked:
             ids = [uid for uid in ids if uid not in blocked]
+    # S4: people who limited "who can @mention me" (Settings > Privacy) get no mention row / push either.
+    if ids and sender_id is not None:
+        from user_profile import privacy as privacy_rules
+
+        allowed = privacy_rules.allowed_owner_ids(sender_id, ids, 'mention_from')
+        ids = [uid for uid in ids if privacy_rules.as_user_id(uid) in allowed]
     return ids

@@ -1,0 +1,42 @@
+# T0.1 — local dev Postgres (SQLite "database is locked" se bachne ke liye).
+#
+#   docker compose -f deploy/docker-compose.dev.yml up -d db
+#
+# .env me (settings.py DATABASE_URL padhta hai):
+#   DATABASE_URL=postgres://learnscroll:learnscroll@127.0.0.1:5432/learnscroll
+#
+# phir:   pip install "psycopg2-binary"      # (agar installed nahi)
+#         python manage.py migrate
+#
+# Redis OPTIONAL hai (presence/online flag ke liye LocMemCache bhi chalta hai jab
+# daphne ka EK hi process ho). Multiple workers chalao to `redis` bhi up karo aur
+#   REDIS_URL=redis://127.0.0.1:6379/0
+# set karo (django-redis + channels_redis installed hone chahiye).
+services:
+  db:
+    image: postgres:16
+    container_name: learnscroll-dev-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: learnscroll
+      POSTGRES_PASSWORD: learnscroll
+      POSTGRES_DB: learnscroll
+    ports:
+      - "5432:5432"
+    volumes:
+      - learnscroll_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U learnscroll -d learnscroll"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: learnscroll-dev-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+volumes:
+  learnscroll_pgdata:

@@ -39,6 +39,9 @@ enrolled one everywhere else in the app (roster, attendance, results,
 fee) — exactly what "self-service front door onto the same enrollment"
 should look like.
 """
+import re
+from urllib.parse import quote
+
 from django.db import IntegrityError
 from django.db.models import F
 from rest_framework import status
@@ -63,6 +66,57 @@ def _invite_share_text(*, section_label: str, campus_name: str, code: str) -> st
         f"Join {section_label} at {campus_name} on LearnScroll! "
         f"Open the app -> Campus -> \"Join with code\" and enter: {code}"
     )
+
+
+def _normalize_code(raw) -> str:
+    """T2.8 — what a classmate pastes is rarely clean: "abc-123 4", a code
+    copied together with trailing punctuation from WhatsApp, lower case...
+    Keep only letters/digits and upper-case them (the alphabet has no
+    separators, so nothing meaningful is lost)."""
+    text = str(raw or "").strip()
+    if len(text) > 20:
+        # A whole forwarded message was pasted ("... and enter: ABC1234"):
+        # the code is the last word.
+        text = text.split()[-1]
+    return re.sub(r"[^A-Za-z0-9]", "", text).upper()
+
+
+_UNAVAILABLE_MESSAGES = {
+    "revoked": "This invite code was deactivated. Ask your class teacher for the new one.",
+    "expired": "This invite code has expired. Ask your class teacher for a fresh one.",
+    "full": "This invite code has reached its limit. Ask your class teacher to raise it or share a new one.",
+}
+
+
+def _joined_payload(invite, *, enrollment, already_enrolled, welcome_badge=None):
+    """Shared success body of the redeem view. `section_label` / `class_name` /
+    `section_name` let the app say "You joined 10 - A" instead of just the
+    campus name; `welcome_badge` is the founding-member badge code when this
+    join earned one."""
+    section = invite.section
+    return {
+        "enrollment": StudentEnrollmentSerializer(enrollment).data,
+        "campus_id": str(invite.campus_id),
+        "campus_name": invite.campus.name,
+        "section_id": str(section.id),
+        "section_name": section.name,
+        "class_name": section.school_class.name,
+        "section_label": f"{section.school_class.name} - {section.name}",
+        "already_enrolled": already_enrolled,
+        "welcome_badge": welcome_badge,
+    }
+
+
+def _award_pilot_founding_badge(user):
+    """T2.7 tie-in: a student who joins a campus through an invite code while
+    the founding window is open becomes a founding member. Returns the badge
+    code when newly awarded, else None. Never raises."""
+    try:
+        from user_profile.services import award_founding_member
+
+        return "founding_member" if award_founding_member(user, reason="campus_invite") else None
+    except Exception:
+        return None
 
 
 class CampusInviteCodeGenerateView(APIView):
@@ -128,6 +182,8 @@ class CampusInviteCodeGenerateView(APIView):
             campus_name=campus.name,
             code=code_obj.code,
         )
+        # T2.8 — one-tap "send to the class WhatsApp group" link.
+        data["whatsapp_url"] = f"https://wa.me/?text={quote(data['share_text'])}"
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -200,9 +256,9 @@ class CampusInviteCodeRedeemView(APIView):
     throttle_classes = [CampusInviteCodeRedeemThrottle]
 
     def post(self, request):
-        raw_code = (request.data.get("code") or "").strip().upper()
+        raw_code = _normalize_code(request.data.get("code"))
         if not raw_code:
-            return Response({"detail": "code is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "code is required.", "reason": "missing"}, status=status.HTTP_400_BAD_REQUEST)
 
         invite = (
             CampusInviteCode.objects.select_related("section", "section__school_class", "campus")
@@ -210,7 +266,10 @@ class CampusInviteCodeRedeemView(APIView):
             .first()
         )
         if not invite:
-            return Response({"detail": "Invalid invite code."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Invalid invite code. Check it and try again.", "reason": "invalid"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         session = invite.section.school_class.session
 
@@ -224,20 +283,22 @@ class CampusInviteCodeRedeemView(APIView):
         ).first()
         if existing:
             return Response(
-                {
-                    "enrollment": StudentEnrollmentSerializer(existing).data,
-                    "campus_id": str(invite.campus_id),
-                    "campus_name": invite.campus.name,
-                    "already_enrolled": True,
-                },
+                _joined_payload(invite, enrollment=existing, already_enrolled=True),
                 status=status.HTTP_200_OK,
             )
 
-        if not invite.is_usable:
-            return Response({"detail": "This invite code is no longer active."}, status=status.HTTP_400_BAD_REQUEST)
+        reason = invite.unavailable_reason
+        if reason:
+            return Response(
+                {"detail": _UNAVAILABLE_MESSAGES[reason], "reason": reason},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not is_campus_approved(invite.campus_id):
             return Response(
-                {"detail": "This campus is pending platform verification and can't onboard students yet."},
+                {
+                    "detail": "This campus is pending platform verification and can't onboard students yet.",
+                    "reason": "campus_pending",
+                },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -256,23 +317,16 @@ class CampusInviteCodeRedeemView(APIView):
                 student=request.user, section=invite.section, session=session,
             ).first()
             return Response(
-                {
-                    "enrollment": StudentEnrollmentSerializer(enrollment).data,
-                    "campus_id": str(invite.campus_id),
-                    "campus_name": invite.campus.name,
-                    "already_enrolled": True,
-                },
+                _joined_payload(invite, enrollment=enrollment, already_enrolled=True),
                 status=status.HTTP_200_OK,
             )
 
         CampusInviteCode.objects.filter(pk=invite.pk).update(uses_count=F("uses_count") + 1)
 
         return Response(
-            {
-                "enrollment": StudentEnrollmentSerializer(enrollment).data,
-                "campus_id": str(invite.campus_id),
-                "campus_name": invite.campus.name,
-                "already_enrolled": False,
-            },
+            _joined_payload(
+                invite, enrollment=enrollment, already_enrolled=False,
+                welcome_badge=_award_pilot_founding_badge(request.user),
+            ),
             status=status.HTTP_201_CREATED,
         )

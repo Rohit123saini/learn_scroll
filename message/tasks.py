@@ -717,3 +717,387 @@ def cleanup_expired_notes():
     if result["deleted"]:
         logger.info("cleanup_expired_notes: deleted %s expired note(s)", result["deleted"])
     return result
+
+
+# ======================================================================
+# 🔥 C1 — CALL LIFECYCLE SWEEPER (stuck / ghost calls)
+# ----------------------------------------------------------------------
+# Pehle ring-timeout SIRF client me tha (call_manager.dart `_noAnswerTimer`,
+# 30s). Caller ka app kill / net off ho jaye to `CallSession` hamesha
+# `ringing`/`ongoing` pada rehta, callee ka native ring kabhi cancel nahi
+# hota aur missed-call history bhi nahi banti. Ye task server ko apni
+# "source of truth" banata hai:
+#
+#   1. ringing/initiated + `CALL_RING_TIMEOUT_SECONDS` se purani
+#      -> MISSED (participants MISSED, cancel push, `call_end` event).
+#   2. ongoing + koi bhi ONGOING participant bacha nahi
+#      -> ended (duration ke saath).
+#   3. ongoing + `CALL_STALE_ONGOING_SECONDS` se purani
+#      -> ended (LiveKit token 2h me expire hota hai, uske baad media
+#      possible hi nahi — ye ghost calls ka hard cap hai).
+#   4. ongoing call me add-participant se bulaye gaye jo
+#      `CALL_RING_TIMEOUT_SECONDS` me nahi uthe -> MISSED (call chalti rahe).
+#
+# Idempotent + bounded (`CALL_SWEEP_BATCH`) + har call row-lock ke saath
+# re-check hoti hai, isliye accept/end ke saath race safe hai.
+# Beat: "message-sweep-stale-calls" (settings.py), har 30s.
+# ======================================================================
+_CALL_TERMINAL_STATUSES = ('ended', 'missed', 'rejected', 'busy', 'cancelled')
+
+
+def _broadcast_call_closed(call, reason):
+    """Best-effort: dono groups (call_<id> + chat_<conv>) ko `call_end`
+    bhejo taaki open CallScreen/IncomingCallScreen turant band ho."""
+    try:
+        layer = get_channel_layer()
+        if layer is None:
+            return
+        user_id = str(call.caller_id)
+        async_to_sync(layer.group_send)(
+            f'call_{call.id}',
+            {
+                'type': 'call_signal',
+                'data': {'event': 'call_end', 'user_id': user_id,
+                         'call_id': str(call.id), 'reason': reason, 'call_closed': True},
+            },
+        )
+        if call.conversation_id:
+            async_to_sync(layer.group_send)(
+                f'chat_{call.conversation_id}',
+                {
+                    'type': 'call_event',
+                    'event': 'call_end',
+                    'call_id': str(call.id),
+                    'user_id': user_id,
+                    'reason': reason,
+                    'call_closed': True,
+                },
+            )
+    except Exception:
+        logger.warning("sweep_stale_calls: broadcast failed call=%s", call.id, exc_info=True)
+
+
+def _cancel_ring_push(user_ids, call):
+    if not user_ids:
+        return
+    try:
+        from .push_utils import send_call_cancelled_push
+        send_call_cancelled_push(
+            recipient_ids=list(user_ids),
+            call_id=call.id,
+            conversation_id=call.conversation_id,
+        )
+    except Exception:
+        logger.warning("sweep_stale_calls: cancel push failed call=%s", call.id, exc_info=True)
+
+
+def _finish_stale_call(call_id, now, reason):
+    """Ek call ko safely band karo. True = is run ne band ki."""
+    from .models import CallParticipant, CallSession, CallStatus
+
+    with transaction.atomic():
+        call = CallSession.objects.select_for_update().filter(id=call_id).first()
+        if call is None or call.status in _CALL_TERMINAL_STATUSES:
+            return False
+
+        ringing_user_ids = list(
+            CallParticipant.objects.filter(call=call, status=CallStatus.RINGING)
+            .values_list('user_id', flat=True)
+        )
+        CallParticipant.objects.filter(call=call, status=CallStatus.RINGING).update(
+            status=CallStatus.MISSED, left_at=now,
+        )
+        CallParticipant.objects.filter(
+            call=call, status=CallStatus.ONGOING, left_at__isnull=True,
+        ).update(status=CallStatus.ENDED, left_at=now)
+
+        call.status = CallStatus.ENDED if call.connected_at else CallStatus.MISSED
+        call.ended_at = now
+        if call.connected_at:
+            call.duration_seconds = max(int((now - call.connected_at).total_seconds()), 0)
+        call.is_recording = False
+        call.save(update_fields=['status', 'ended_at', 'duration_seconds', 'is_recording', 'updated_at'])
+
+    if call.status == CallStatus.MISSED:
+        # X1 — kabhi connect na hui call = "missed" ring outcome (once per call; sweeper hi nahi, webhook room_finished bhi yahin aata hai).
+        from . import call_ops
+        call_ops.note_ring_outcome('missed', call_id=call.id)
+    _cancel_ring_push(ringing_user_ids, call)
+    # C12 — jo ring me the (ab MISSED) unko "Missed call" push + bell row; kabhi connect na hui call ka chat bubble.
+    if ringing_user_ids or call.status == CallStatus.MISSED:
+        enqueue_missed_call(call.id, ringing_user_ids)
+    _broadcast_call_closed(call, reason)
+    return True
+
+
+@shared_task(name="message.sweep_stale_calls")
+def sweep_stale_calls():
+    from django.db.models import Exists, OuterRef
+    from .models import CallParticipant, CallSession, CallStatus
+
+    now = timezone.now()
+    ring_timeout = int(getattr(settings, 'CALL_RING_TIMEOUT_SECONDS', 45))
+    stale_ongoing = int(getattr(settings, 'CALL_STALE_ONGOING_SECONDS', 3 * 3600))
+    batch = int(getattr(settings, 'CALL_SWEEP_BATCH', 200))
+    ring_cutoff = now - timedelta(seconds=ring_timeout)
+    ongoing_cutoff = now - timedelta(seconds=stale_ongoing)
+
+    # 1) kisi ne uthayi hi nahi
+    ring_ids = list(
+        CallSession.objects.filter(
+            status__in=[CallStatus.INITIATED, CallStatus.RINGING],
+            started_at__lte=ring_cutoff,
+        ).values_list('id', flat=True)[:batch]
+    )
+    timed_out = sum(1 for cid in ring_ids if _finish_stale_call(cid, now, 'ring_timeout'))
+
+    # 2) ongoing par koi active participant nahi (ring_cutoff grace accept
+    #    ke saath race se bachne ke liye)
+    active = CallParticipant.objects.filter(
+        call=OuterRef('pk'), status=CallStatus.ONGOING, left_at__isnull=True,
+    )
+    empty_ids = list(
+        CallSession.objects.filter(status=CallStatus.ONGOING, started_at__lte=ring_cutoff)
+        .annotate(has_active=Exists(active)).filter(has_active=False)
+        .values_list('id', flat=True)[:batch]
+    )
+    emptied = sum(1 for cid in empty_ids if _finish_stale_call(cid, now, 'no_participants'))
+
+    # 3) hard cap
+    old_ids = list(
+        CallSession.objects.filter(status=CallStatus.ONGOING, started_at__lte=ongoing_cutoff)
+        .values_list('id', flat=True)[:batch]
+    )
+    capped = sum(1 for cid in old_ids if _finish_stale_call(cid, now, 'max_duration'))
+
+    # 4) chalti call me add-participant se bulaye, jawab nahi diya
+    late = list(
+        CallParticipant.objects.filter(
+            status=CallStatus.RINGING, joined_at__lte=ring_cutoff,
+            call__status=CallStatus.ONGOING,
+        ).values_list('id', 'call_id', 'user_id')[:batch]
+    )
+    missed_late = 0
+    if late:
+        by_call = {}
+        for pid, cid, uid in late:
+            by_call.setdefault(cid, []).append((pid, uid))
+        for cid, rows in by_call.items():
+            updated = CallParticipant.objects.filter(
+                id__in=[r[0] for r in rows], status=CallStatus.RINGING,
+            ).update(status=CallStatus.MISSED, left_at=now)
+            missed_late += updated
+            call = CallSession.objects.filter(id=cid).first()
+            if call:
+                _cancel_ring_push([r[1] for r in rows], call)
+                # C12 — chalti call me bulaye gaye jo nahi uthe: missed push + bell row (bubble nahi — call connected hai).
+                enqueue_missed_call(call.id, [r[1] for r in rows])
+
+    if timed_out or emptied or capped or missed_late:
+        logger.info(
+            "sweep_stale_calls: ring_timeout=%s no_participants=%s max_duration=%s late_invites_missed=%s",
+            timed_out, emptied, capped, missed_late,
+        )
+
+
+# ======================================================================
+# 🔥 C11 — group call ring push + bell rows (request ke andar nahi, Celery me)
+# ----------------------------------------------------------------------
+# 200-member group me initiate ke andar hi sync FCM multicast + har user ka
+# `create_notification` request ko slow/timeout kar deta tha. Ab view sirf DB
+# + ek WS event karta hai; push `CALL_PUSH_CHUNK` recipients ke chhote parallel
+# tasks me jaata hai. Har task call ko dobara fetch karke check karta hai ki
+# call abhi bhi ring ho rahi hai aur recipient abhi bhi RINGING hai (caller ne
+# queue me rehte rehte cancel kar diya ho to koi "ghost ring" na jaaye).
+# 1:1 call par ye path use nahi hota (single user — sync hi fast hai).
+# ======================================================================
+@shared_task(
+    name="message.send_call_ring_push",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=2,
+    acks_late=True,
+)
+def send_call_ring_push_task(self, call_id, recipient_ids, caller_name="", caller_avatar=None,
+                             call_waiting=False):
+    from .models import CallParticipant, CallSession, CallStatus
+    from .push_utils import send_incoming_call_push
+
+    call = CallSession.objects.filter(id=call_id).first()
+    if call is None or call.status not in (CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ONGOING):
+        return 0
+
+    still_ringing = list(
+        CallParticipant.objects.filter(
+            call=call, user_id__in=recipient_ids, status=CallStatus.RINGING, left_at__isnull=True,
+        ).values_list('user_id', flat=True)
+    )
+    if not still_ringing:
+        return 0
+
+    try:
+        send_incoming_call_push(
+            recipient_ids=still_ringing,
+            caller_name=caller_name,
+            call_type=call.type,
+            call_id=call.id,
+            conversation_id=call.conversation_id,
+            channel_name=call.channel_name,
+            caller_avatar=caller_avatar,
+            call_waiting=call_waiting,
+        )
+    except Exception as exc:
+        logger.warning("send_call_ring_push failed call=%s (%s recipients)", call_id, len(still_ringing),
+                       exc_info=True)
+        raise self.retry(exc=exc)
+    return len(still_ringing)
+
+
+def enqueue_call_ring_push(call_id, recipient_ids, *, caller_name="", caller_avatar=None, call_waiting=False):
+    """
+    Ring push ko `CALL_PUSH_CHUNK` ke tukdon me Celery me bhejo (commit ke baad).
+    Broker down ho to `dispatch_after_commit` inline chala deta hai. Kabhi raise nahi karta.
+    """
+    ids = [str(u) for u in recipient_ids]
+    if not ids:
+        return 0
+    try:
+        from core.async_utils import dispatch_after_commit
+        chunk = max(int(getattr(settings, 'CALL_PUSH_CHUNK', 100)), 1)
+        for i in range(0, len(ids), chunk):
+            dispatch_after_commit(
+                send_call_ring_push_task,
+                str(call_id), ids[i:i + chunk],
+                caller_name=caller_name, caller_avatar=caller_avatar, call_waiting=call_waiting,
+            )
+    except Exception:
+        logger.exception("enqueue_call_ring_push failed call=%s", call_id)
+        return 0
+    return len(ids)
+
+
+# ======================================================================
+# 🔥 C12 — missed-call push + bell row + chat bubble (Celery me)
+# ----------------------------------------------------------------------
+# Sweeper / cancel / busy / socket-leave jaise hooks sirf `enqueue_missed_call` bulate hain (commit ke baad);
+# asli kaam `message/missed_calls.py::process_missed_call` me hai. Task call + participant rows dobara
+# padhta hai (sirf abhi bhi MISSED wale), isliye retry / duplicate enqueue safe hai (bell row `data.missed`,
+# bubble `meta.call_id` se dedupe).
+# `CALL_MISSED_NOTIFY_ASYNC=false` => request/sweeper ke andar hi sync (broker ke bina bhi chalta hai).
+# ======================================================================
+@shared_task(
+    name="message.notify_missed_call",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=3,
+    acks_late=True,
+)
+def notify_missed_call_task(self, call_id, user_ids):
+    from .missed_calls import process_missed_call
+
+    try:
+        return process_missed_call(call_id, list(user_ids or []))
+    except Exception as exc:  # process_missed_call khud swallow karta hai; ye sirf unexpected infra errors ke liye
+        logger.warning("notify_missed_call failed call=%s", call_id, exc_info=True)
+        raise self.retry(exc=exc)
+
+
+def enqueue_missed_call(call_id, user_ids):
+    """
+    Missed-call notification (push + bell row + bubble) schedule karo. Kabhi raise nahi karta.
+    `user_ids` khali ho sakta hai — tab sirf call-level chat bubble (agar call connect hi nahi hui) banta hai.
+    """
+    ids = [str(u) for u in (user_ids or []) if u is not None]
+    try:
+        if not getattr(settings, 'CALL_MISSED_NOTIFY_ASYNC', True):
+            from .missed_calls import process_missed_call
+            process_missed_call(str(call_id), ids)
+            return len(ids)
+        from core.async_utils import dispatch_after_commit
+        dispatch_after_commit(notify_missed_call_task, str(call_id), ids)
+    except Exception:
+        logger.exception("enqueue_missed_call failed call=%s", call_id)
+        return 0
+    return len(ids)
+
+
+
+# ======================================================================
+# S5 — study room presence sweeper
+# ----------------------------------------------------------------------
+# LiveKit ka `participant_left` webhook kho jaye (server down / network) to interval khula reh jata hai.
+# Ye task unhe LiveKit se verify karke band karta hai (study_room_presence.sweep_stale).
+# Beat: "message-sweep-stale-study-presence" (settings.CELERY_BEAT_SCHEDULE) — har 10 min.
+# ======================================================================
+@shared_task(name="message.sweep_stale_study_presence")
+def sweep_stale_study_presence():
+    from .study_room_presence import sweep_stale
+
+    summary = sweep_stale()
+    if summary.get('closed'):
+        logger.info("message.sweep_stale_study_presence: %s", summary)
+    return summary
+
+
+# ======================================================================
+# X1 — call SLO fast-burn watch. Beat: "message-call-slo-watch" (settings.py), har 5 min.
+# connect-success < CALL_SLO["connect_success_pct"] (default 95 %) over the last `alert_window_minutes` with at least
+# `alert_min_attempts` client connect attempts => ONE ERROR log + Sentry message (message/call_ops.py).
+# ======================================================================
+@shared_task(name="message.call_slo_watch")
+def call_slo_watch():
+    from . import call_ops
+
+    summary = call_ops.check_and_alert()
+    c = summary["connect"]
+    return {"attempts": c["attempts"], "success_pct": c["success_pct"], "problems": summary["problems"]}
+
+
+# ======================================================================
+# N3 — push reliability. Dono tasks ka logic message/push_reliability.py + push_utils.py me hai.
+#   message.retry_push                    transient FCM failure (503 / 500 / quota / network) ka exponential-backoff retry.
+#                                         push_utils._send_multicast khud schedule karta hai (5s, 20s, 80s; call ring ki
+#                                         apni TTL khatam to retry nahi).
+#   message.cleanup_stale_device_tokens   Beat: "message-cleanup-stale-device-tokens" (settings.CELERY_BEAT_SCHEDULE), roz 04:30.
+#                                         60 din se dikhe nahi / lagataar fail / orphan session / per-user 10+ tokens.
+# ======================================================================
+@shared_task(name="message.retry_push", ignore_result=True)
+def retry_push(tokens, attempt=1, expires_at=None, notification=None, data=None, android_priority="high",
+               channel_id="chat_messages", apns_alert=None, ttl_seconds=None, collapse_key=None,
+               apns_thread_id=None, apns_collapse_id=None):
+    import time
+
+    from firebase_admin import messaging
+
+    from . import push_utils
+    from .models import DeviceToken
+
+    if expires_at is not None and time.time() >= float(expires_at):
+        return {"sent": 0, "reason": "expired"}
+    # Is beech logout / token rotate / dead-token delete ho chuka ho to wo token ab bhejna nahi.
+    live = set(DeviceToken.objects.filter(token__in=list(tokens or [])).values_list("token", flat=True))
+    tokens = [t for t in (tokens or []) if t in live]
+    if not tokens:
+        return {"sent": 0, "reason": "no_live_tokens"}
+    note = None
+    if notification:
+        note = messaging.Notification(
+            title=notification.get("title"), body=notification.get("body"), image=notification.get("image"),
+        )
+    push_utils._send_multicast(
+        tokens, notification=note, data=data, android_priority=android_priority, channel_id=channel_id,
+        apns_alert=apns_alert, ttl_seconds=ttl_seconds, collapse_key=collapse_key,
+        apns_thread_id=apns_thread_id, apns_collapse_id=apns_collapse_id,
+        retry_attempt=int(attempt), expires_at=float(expires_at) if expires_at is not None else None,
+    )
+    return {"sent": len(tokens), "attempt": int(attempt)}
+
+
+@shared_task(name="message.cleanup_stale_device_tokens")
+def cleanup_stale_device_tokens():
+    from .push_reliability import cleanup_stale_tokens
+
+    summary = cleanup_stale_tokens()
+    if any(summary.values()):
+        logger.info("message.cleanup_stale_device_tokens: %s", summary)
+    return summary

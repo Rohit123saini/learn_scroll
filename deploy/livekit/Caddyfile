@@ -1,0 +1,5 @@
+# TLS termination for LiveKit signalling (wss://). Caddy gets/renews the certificate automatically.
+# DNS: <LIVEKIT_DOMAIN> A record -> this server. Ports 80 + 443 open.
+<LIVEKIT_DOMAIN> {
+    reverse_proxy 127.0.0.1:7880
+}

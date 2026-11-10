@@ -30,10 +30,12 @@ from .models import (
     ClassroomStaff,
     ClassroomWishlist,
     SessionAttendance,
+    SessionChapter,
     CoinPurchase,
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
+    LiveModerationEvent,
     LivePoll,
     Notice,
     ParentMessageTemplate,
@@ -42,6 +44,9 @@ from .models import (
     PassGift,
     PassPurchase,
     PollResponse,
+    RecordingNote,
+    RecordingSave,
+    RecordingWatch,
     Referral,
     ReferralAttribution,
     ReferralCode,
@@ -127,9 +132,13 @@ class ClassroomAdmin(admin.ModelAdmin):
     list_display = (
         "title", "teacher", "classroom_type", "language",
         "rating_avg", "rating_count", "enrolled_count",
+        "recording_enabled", "recording_auto",
         "is_active", "is_flagged", "is_deleted", "created_at",
     )
-    list_filter = ("classroom_type", "language", "is_active", "is_flagged", "is_deleted")
+    list_filter = (
+        "classroom_type", "language", "recording_enabled", "recording_auto",   # X12: auto-recording
+        "is_active", "is_flagged", "is_deleted",
+    )
     search_fields = ("title", "subject", "organisation_name", "teacher__username", "teacher__email")
     autocomplete_fields = ["teacher"]
     readonly_fields = ("rating_avg", "rating_count", "enrolled_count", "created_at", "updated_at", "deleted_at")
@@ -162,11 +171,18 @@ class ClassScheduleAdmin(admin.ModelAdmin):
 # ---------------------------------------------------------------------------
 @admin.register(ClassSession)
 class ClassSessionAdmin(admin.ModelAdmin):
-    list_display = ("classroom", "status", "scheduled_start", "scheduled_end", "actual_start", "actual_end", "room_id")
+    list_display = (
+        "classroom", "status", "scheduled_start", "scheduled_end", "actual_start", "actual_end", "room_id",
+        "recording_started_at", "recording_duration_seconds",
+    )
     list_filter = ("status",)
     search_fields = ("classroom__title", "room_id")
     autocomplete_fields = ["classroom", "schedule"]
-    readonly_fields = ("room_id", "created_at")
+    # X12: the recording bookkeeping is written by the LiveKit webhook (recording_auto.py) - not edited by hand
+    readonly_fields = (
+        "room_id", "created_at",
+        "last_egress_id", "recording_started_at", "auto_record_attempted_at", "recording_duration_seconds",
+    )
     date_hierarchy = "scheduled_start"
 
 
@@ -335,7 +351,7 @@ class ChatMessageReportAdmin(admin.ModelAdmin):
 # ---------------------------------------------------------------------------
 @admin.register(LivePoll)
 class LivePollAdmin(admin.ModelAdmin):
-    list_display = ("question", "session", "created_by", "is_active", "created_at", "closed_at")
+    list_display = ("question", "session", "created_by", "is_active", "correct_option_index", "revealed_at", "created_at", "closed_at")
     list_filter = ("is_active",)
     search_fields = ("question", "session__classroom__title")
     autocomplete_fields = ["session", "created_by"]
@@ -674,3 +690,98 @@ class ClassroomParentStateAdmin(admin.ModelAdmin):
     search_fields = ("classroom__title", "student__username")
     autocomplete_fields = ["classroom", "student", "updated_by"]
     readonly_fields = ("updated_at",)
+
+
+# ---------------------------------------------------------------------------
+# X12 (auto recording) - chapters, replay watch rows, attached notes and "save as lecture / reel / post" jobs.
+# Watch rows and save jobs are system-written records: shown for support ("why is my clip stuck?"), not hand-edited.
+# ---------------------------------------------------------------------------
+@admin.register(SessionChapter)
+class SessionChapterAdmin(admin.ModelAdmin):
+    list_display = ("session", "offset_seconds", "title", "kind", "created_by", "created_at")
+    list_filter = ("kind",)
+    search_fields = ("title", "session__classroom__title")
+    autocomplete_fields = ["session", "created_by"]
+    readonly_fields = ("created_at",)
+    ordering = ("session", "offset_seconds", "id")
+
+
+@admin.register(RecordingWatch)
+class RecordingWatchAdmin(_ReadOnlyAdmin):
+    list_display = ("session", "user", "position_seconds", "watched_seconds", "duration_seconds", "completed", "last_watched_at")
+    list_filter = ("completed",)
+    search_fields = ("user__username", "session__classroom__title")
+    raw_id_fields = ("session", "user")
+    date_hierarchy = "last_watched_at"
+
+
+@admin.register(RecordingNote)
+class RecordingNoteAdmin(admin.ModelAdmin):
+    list_display = ("session", "material", "at_seconds", "attached_by", "created_at")
+    search_fields = ("material__title", "session__classroom__title")
+    autocomplete_fields = ["session", "material", "attached_by"]
+    readonly_fields = ("created_at",)
+
+
+@admin.register(RecordingSave)
+class RecordingSaveAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "kind", "status", "title", "visibility", "created_by", "post_id", "created_at", "finished_at")
+    list_filter = ("kind", "status", "visibility")
+    search_fields = ("title", "post_id", "created_by__username", "session__classroom__title")
+    raw_id_fields = ("session", "created_by")
+    # a job is created and moved only by recording_save.py; the admin may re-queue a failed one, nothing else
+    readonly_fields = (
+        "session", "created_by", "kind", "status", "title", "description", "start_seconds", "end_seconds",
+        "visibility", "include_chapters", "series_id", "post_id", "error", "created_at", "finished_at",
+    )
+    date_hierarchy = "created_at"
+    actions = ["requeue_failed"]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.action(description="Run selected FAILED clip jobs again")
+    def requeue_failed(self, request, queryset):
+        from .tasks import save_recording_clip
+
+        ids = list(queryset.filter(status=RecordingSave.Status.FAILED).values_list("pk", flat=True))
+        if not ids:
+            self.message_user(request, "No failed jobs in the selection.")
+            return
+        RecordingSave.objects.filter(pk__in=ids, status=RecordingSave.Status.FAILED).update(
+            status=RecordingSave.Status.PENDING, error="", finished_at=None,
+        )
+        queued = 0
+        for pk in ids:
+            try:
+                save_recording_clip.delay(pk)
+                queued += 1
+            except Exception:       # broker down: the row is pending, sweep_recording_saves queues it again
+                break
+        self.message_user(request, f"{len(ids)} job(s) set to pending, {queued} queued now.")
+
+
+@admin.register(LiveModerationEvent)
+class LiveModerationEventAdmin(admin.ModelAdmin):
+    """X12: the audit log of live moderation (reports, warnings, mutes, kicks, bans, filter hits). It is a LOG: rows are
+    written only by live_moderation.log_event, so the admin can read and search them but never add or edit one. Deleting
+    is allowed for platform staff only (data-retention requests); an admin cannot rewrite what a moderator did."""
+    list_display = ("id", "created_at", "session", "kind", "actor", "target_user", "reason", "resolution", "resolved_at")
+    list_filter = ("kind", "resolution", "reason")
+    search_fields = ("session__classroom__title", "actor__username", "target_user__username", "reason", "detail")
+    raw_id_fields = ("session", "actor", "target_user", "resolved_by")
+    readonly_fields = (
+        "session", "kind", "actor", "target_user", "reason", "detail", "chat_message_id", "content_report_id",
+        "resolved_at", "resolved_by", "resolution", "created_at",
+    )
+    date_hierarchy = "created_at"
+    list_select_related = ("session", "session__classroom", "actor", "target_user")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return bool(request.user.is_superuser)

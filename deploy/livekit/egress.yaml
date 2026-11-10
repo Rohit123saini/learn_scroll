@@ -1,0 +1,17 @@
+# LiveKit Egress (call recording / class recording). C4.
+api_key: <LIVEKIT_API_KEY>
+api_secret: <LIVEKIT_API_SECRET>
+ws_url: ws://127.0.0.1:7880       # internal URL of the livekit-server (same host network)
+redis:
+  address: <REDIS_HOST>:6379
+  db: 1
+health_port: 8080
+log_level: info
+# S3 upload credentials are passed per-request by Django (LIVEKIT_EGRESS_S3_* env) for tuitionclass;
+# for message calls set LIVEKIT_EGRESS_S3_BUCKET and give the egress container AWS creds via env
+# (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION) OR add an `s3:` block here.
+# s3:
+#   access_key: <KEY>
+#   secret: <SECRET>
+#   region: <REGION>
+#   bucket: <BUCKET>

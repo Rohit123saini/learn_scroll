@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up two-factor login - LearnScroll admin</title>
+<style>
+  body{font:15px/1.55 system-ui,sans-serif;max-width:680px;margin:32px auto;padding:0 16px;color:#1d2b3a}
+  code,pre{background:#eef2f7;border-radius:4px;padding:2px 5px;font-size:13px}
+  pre{padding:10px 12px;overflow-x:auto}
+  .note{border:1px solid #c9d4e3;background:#f5f8fc;border-radius:6px;padding:10px 14px}
+  @media (prefers-color-scheme: dark){body{background:#14181d;color:#e4e9ef}code,pre{background:#222a33}.note{background:#1b222a;border-color:#33404d}a{color:#8ab4f8}}
+</style>
+</head>
+<body>
+<h1>Set up two-factor login</h1>
+<p>{% if require_2fa %}Admin login needs your password <strong>and</strong> a 6-digit code from an authenticator app.{% else %}Two-factor is currently optional on this server, but staff accounts should still enrol.{% endif %}</p>
+
+{% if signed_in %}
+<p class="note">Signed in as <strong>{{ username }}</strong>:
+  {% if has_device %}2FA is <strong>active</strong> on your account.{% else %}you do <strong>not</strong> have 2FA active yet - follow the steps below.{% endif %}</p>
+{% endif %}
+
+<ol>
+  <li>Install an authenticator app on your phone (Google Authenticator, Authy or 1Password).</li>
+  <li>Ask someone with server (shell) access - a superuser - to run:
+    <pre>python manage.py setup_staff_2fa {{ username }}</pre>
+    It prints a QR code (and an <code>otpauth://</code> link). Scan it with the app.
+    The secret is shown only on the server, never by chat or email.</li>
+  <li>The app now shows a 6-digit code. Confirm it:
+    <pre>python manage.py setup_staff_2fa {{ username }} --confirm 123456</pre>
+    (use your real code instead of 123456). If it says wrong/expired, check your phone's clock and retry.</li>
+  <li>The command then prints <strong>8 one-time backup codes</strong> - shown only once. Save them somewhere safe;
+    each works once if you lose your phone.</li>
+  <li>Log in at <a href="{% url 'admin:login' %}">the admin login</a> with your password and the 6-digit code.</li>
+</ol>
+
+<h3>Lost your phone?</h3>
+<p>Use a backup code in the code box. Then ask a superuser to run
+  <code>python manage.py setup_staff_2fa {{ username }} --reset</code> and enrol again.</p>
+</body>
+</html>

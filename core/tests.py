@@ -65,7 +65,11 @@ class NotificationModelTests(CoreTestBase):
     def test_message_app_types_set_matches_new_notif_types(self):
         self.assertEqual(
             Notification.MESSAGE_APP_TYPES,
-            {Notification.NotifType.CHAT_MESSAGE, Notification.NotifType.MENTION, Notification.NotifType.INCOMING_CALL},
+            {
+                Notification.NotifType.CHAT_MESSAGE, Notification.NotifType.MENTION, Notification.NotifType.INCOMING_CALL,
+                Notification.NotifType.PARENT_DEVICE_PENDING,  # added with the parent-device flow
+                Notification.NotifType.DOUBT_ANSWERED,  # T1.2: doubt answer alerts live in the message app too
+            },
         )
 
 
@@ -283,6 +287,13 @@ class NotificationPreferenceViewTests(CoreTestBase):
 # ===========================================================================
 # SearchView / search_everything() — Task 18, §9 items 14/15
 # ===========================================================================
+def _where_sql(queryset):
+    """The WHERE part of a queryset's SQL, lower-cased ("" when it has none). Asserting on the whole statement is
+    wrong: the SELECT column list names every column of the model, so `posted_by_id` etc. are always "found"."""
+    sql = str(queryset.query).lower()
+    return sql.split(" where ", 1)[1] if " where " in sql else ""
+
+
 class SearchViewTests(CoreTestBase):
     """[GAP CLOSED — §9 item 14] `SearchView` had zero test coverage
     before this pass.
@@ -388,7 +399,8 @@ class SearchViewTests(CoreTestBase):
         with patch("core.views.search_everything", side_effect=side_effect):
             response = self.client.get("/core/search/?q=algebra")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(captured.keys()), {"assigments", "testseries", "message", "campus_notice"})
+        # `user` / `friend` ("add friend" search) are wired too since the Task 18 gap-fix.
+        self.assertEqual(set(captured.keys()), {"assigments", "testseries", "message", "campus_notice", "user", "friend"})
 
     def test_sources_param_is_parsed_into_a_list(self):
         with patch("core.views.search_everything", return_value=[]) as mock_search:
@@ -418,7 +430,8 @@ class SearchViewTests(CoreTestBase):
         with patch("core.views.search_everything", side_effect=side_effect):
             response = self.client.get("/core/search/?q=algebra&sources=message,campus_notice")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(captured.keys()), {"message", "campus_notice"})
+        # SearchView builds every scoped queryset (they are lazy); the requested sources must all be among them.
+        self.assertTrue({"message", "campus_notice"} <= set(captured.keys()), captured.keys())
 
     def test_unregistered_sources_return_empty_not_error(self):
         # A genuinely unregistered source (not in core.search.SOURCES at
@@ -437,7 +450,7 @@ class SearchViewTests(CoreTestBase):
         captured, side_effect = self._capture_scoped_querysets()
         with patch("core.views.search_everything", side_effect=side_effect):
             self.client.get("/core/search/?q=algebra")
-        sql = str(captured["assigments"].query).lower()
+        sql = _where_sql(captured["assigments"])  # WHERE only: the SELECT column list always names posted_by_id / source
         self.assertIn("posted_by_id", sql)
         self.assertIn("source", sql)  # the PERSONAL-source half of the OR
 
@@ -450,7 +463,7 @@ class SearchViewTests(CoreTestBase):
         captured, side_effect = self._capture_scoped_querysets()
         with patch("core.views.search_everything", side_effect=side_effect):
             self.client.get("/core/search/?q=algebra")
-        sql = str(captured["assigments"].query).lower()
+        sql = _where_sql(captured["assigments"])  # no narrowing at all for staff -> no WHERE clause
         self.assertNotIn("posted_by_id", sql)
 
     def test_testseries_scoping_includes_own_created_and_campus_enrolled(self):
@@ -460,7 +473,7 @@ class SearchViewTests(CoreTestBase):
         captured, side_effect = self._capture_scoped_querysets()
         with patch("core.views.search_everything", side_effect=side_effect):
             self.client.get("/core/search/?q=algebra")
-        sql = str(captured["testseries"].query).lower()
+        sql = _where_sql(captured["testseries"])  # WHERE only: the SELECT list names every column
         self.assertIn("creator_id", sql)  # own-created
         self.assertIn("context_type", sql)  # campus-context branch
         self.assertIn("context_id", sql)  # campus-enrolled-sections branch
@@ -489,7 +502,7 @@ class SearchViewTests(CoreTestBase):
         with patch("core.views.search_everything", side_effect=side_effect):
             self.client.get("/core/search/?q=algebra")
         sql = str(captured["message"].query).lower()
-        self.assertIn("memberships", sql)  # conversation__memberships__user
+        self.assertIn("conversationparticipant", sql)  # conversation__memberships__user (joins message_conversationparticipant)
         self.assertIn("left_at", sql)  # current-membership-only narrowing
         self.assertIn("expires_at", sql)  # non-expired disappearing messages
         self.assertIn("deleted_for_everyone", sql)
@@ -502,7 +515,11 @@ class SearchViewTests(CoreTestBase):
         every campus's notices, mirroring `NoticeViewSet.get_queryset()`.
         """
         captured, side_effect = self._capture_scoped_querysets()
-        with patch("core.views.search_everything", side_effect=side_effect):
+        # The test user belongs to no campus, so the real id list is empty and Django refuses to render
+        # `campus_id IN ()` (EmptyResultSet). Give the helper two ids so the WHERE clause can be inspected.
+        with patch("campus.views.get_my_campus_ids", return_value=[101, 102]), \
+                patch("core.views.search_everything", side_effect=side_effect):
             self.client.get("/core/search/?q=algebra")
-        sql = str(captured["campus_notice"].query).lower()
+        sql = _where_sql(captured["campus_notice"])
         self.assertIn("campus_id", sql)
+        self.assertIn("101", sql)

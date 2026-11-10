@@ -915,6 +915,27 @@ confirmed via `views.py`)*
   here is logged and swallowed, never blocks the join itself) — the streak view itself
   only reads.
 
+### Study Room Presence + Attendance Minutes *(NEW — S5)*
+Join par `StudyRoomAttendance` ki sirf ek row banti thi (duration / leave nahi). Ab LiveKit webhook se asli minutes aate hain.
+- **Webhook:** `POST /message/livekit/webhook/` (ya purana tuitionclass `livekit-webhook/` URL — dono `livekit_webhook.handle_message_event`
+  se guzarte hain). `study_<conversation uuid>[_suffix]` rooms ke `participant_joined`, `participant_left` /
+  `participant_connection_aborted`, `room_finished` events `study_room_presence.handle_webhook_event` ko jaate hain
+  (call rooms `call_...` pehle jaisa C2 handler). Sab idempotent; kabhi raise nahi.
+- **Tables:** `StudyRoomPresence` (ek row = ek LiveKit connection; unique `(room_name, user, joined_at)`, `joined_at` = LiveKit ka
+  `participant.joined_at`) aur `StudyRoomAttendance` ke naye columns `total_seconds`, `join_count`, `first_joined_at`,
+  `last_left_at`, `presence_tracked`. Interval band hote hi minutes local midnight pe din ke hisaab se split hokar
+  `total_seconds` me jud jaate hain; ek interval ka credit `LIVEKIT_STUDY_ROOM_MAX_SECONDS` (12h) se zyada nahi.
+- **Streak:** `GET /message/study-room/<conversation_id>/streak/` ab "kam se kam N minute" se calculate karta hai
+  (`STUDY_ROOM_STREAK_MIN_MINUTES`, default 10; 0 = join kaafi). Purani rows (`presence_tracked=False`) aur
+  `STUDY_ROOM_PRESENCE_ENABLED=False` me join hi kaafi. Abhi room me chal rahe interval ka aaj ka hissa live gina jata hai.
+  Naye response keys: `today_minutes`, `total_study_minutes`, `streak_min_minutes`, `today_counted`.
+- **Sweeper:** `message.sweep_stale_study_presence` (beat, har 10 min) — leave webhook kho gaya ho to LiveKit se verify karke
+  interval band; asli leave time na pata ho to `STUDY_ROOM_PRESENCE_STALE_CREDIT_SECONDS` (1h) tak hi credit.
+- **Leaderboard:** `GET /leaderboard/board/?scope_type=study_time&scope_id=<conversation uuid>&period=weekly|all_time` — score = minutes,
+  metadata `minutes / days / sessions`; sirf us conversation ke active members. `scope_id` khali = app-wide board
+  (`STUDY_TIME_GLOBAL_BOARD_ENABLED`, default OFF => 403). Rows `leaderboard.tasks` (weekly har 30 min, all-time roz) likhta hai.
+- **Deploy:** LiveKit `webhook.urls` me upar wala URL hona chahiye; nahi hai to `STUDY_ROOM_PRESENCE_ENABLED=0`.
+
 ### Parent Dashboard (`ParentDashboardView`, `views_parent.py`) *(REDESIGNED this batch —
 Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions of this doc)*
 - `GET /message/parent/dashboard/` (header `X-Parent-Token: <token>`, gated by
@@ -1985,7 +2006,7 @@ with `?token=<JWT_ACCESS_TOKEN>` in the query string; token is verified via
 | URL | Consumer | Purpose |
 |---|---|---|
 | `wss://.../ws/chat/<conversation_id>/?token=...` | `ChatConsumer` | Per-conversation realtime chat |
-| `wss://.../ws/call/<call_id>/?token=...` | `CallConsumer` | WebRTC/LiveKit signaling relay for one call |
+| `wss://.../ws/call/<call_id>/?token=...` | `CallConsumer` | Call events only (join/leave/mute/ring/cancel); no SDP/ICE relay (C14) |
 | `wss://.../ws/inbox/?token=...` | `InboxConsumer` | One global connection per session — drives the chat-list screen |
 
 ### `ChatConsumer`
@@ -2104,19 +2125,27 @@ recipient's `user_{id}` group so the conversations-list screen updates without a
 being open.
 
 ### `CallConsumer`
-Pure signaling relay (SDP/ICE) — no media flows through Django; that's LiveKit's job.
+**Events-only socket (C14).** No SDP/ICE relay any more - media negotiation is 100%
+LiveKit (token via REST). The socket carries only call events: `user_joined`,
+`user_left`, `mute`, `video_off`, plus server-side ring/cancel/ended events that REST,
+the LiveKit webhook and the sweeper push into the `call_<id>` group.
 
-**Client → Server:** `signal` (relays `payload` to the other peer, excluding echo to
-self via `sender_channel_name`), `mute`/`video_off` (updates `CallParticipant` flag +
-relays), `leave` (closes socket).
+**Connect rule:** only a user with a `CallParticipant` row for this call (status
+RINGING / ONGOING / ENDED-for-reconnect) may connect. A group member without invite /
+REST `join` is closed with `4003`. A RINGING participant can listen but does not
+broadcast `user_joined`.
 
-**Server → Client:** `call_signal` → sent as raw `event['data']` (not wrapped) — i.e.
-client receives `{"event": "signal"|"user_joined"|"user_left"|"mute"|"video_off",
-...}` directly.
+**Client -> Server:** `mute` (`is_muted: bool`) / `video_off` (`is_video_off: bool`) -
+only an ONGOING participant; payload is rebuilt server-side (`event`, `user_id`, flag),
+client-supplied extra keys are dropped. `leave` closes the socket. `signal` now returns
+`{"type": "error", "code": "signal_not_supported"}` and relays nothing. Frames > 2 KB /
+binary -> `invalid_frame`; > 20 msgs / 10 s -> close `4008`.
 
-`connect()` also has a reverse-join safety net: if the peer already joined and is
-`ONGOING` before this user's `user_joined` broadcast could reach them, this user
-proactively receives a synthetic `user_joined` for that peer.
+**Server -> Client:** `call_signal` -> sent as raw `event['data']`, e.g.
+`{"event": "user_joined"|"user_left"|"mute"|"video_off"|..., ...}`.
+
+`connect()` keeps the reverse-join safety net: if the peer is already ONGOING the
+(ONGOING) user receives a synthetic `user_joined` for that peer.
 
 `disconnect()` marks the participant left; if that was the last `ONGOING` participant,
 computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
@@ -3645,3 +3674,38 @@ already be fully working all along — just implemented directly in `push_utils.
 through the `services.create_bell_rows_for_push` helper this doc used to describe, which
 has since been removed from `services.py` as dead code (§9.4 item 19, §10 `push_utils.
 py`).)*
+
+## 16. S8 — Discovery -> Room Safety
+
+Problem: `/groups/discover/` ke public group me koi bhi join karke seedha study room me aa jata tha — na approval, na rules, room me block/report-with-block nahi, minors ka naam/photo adult strangers ko dikhta tha.
+
+### 16.1 Join approval
+- `study_room_safety.join_decision(group, user)`: private group -> approval; `Group.join_approval_required` -> approval; minor + `MINOR_PUBLIC_GROUP_JOIN_APPROVAL` -> approval (`post/minor_privacy.py`).
+- `POST /groups/join/` -> 201 `{status:'joined', rules_required}` ya 202 `{status:'pending', reason: private|group_setting|minor}`. Reject ke baad dobara request = same row PENDING pe reset.
+- `GET /groups/discover/` card fields: `join_approval_required`, `join_needs_approval` (viewer ke hisaab se), `my_request_status` (`pending|rejected|null`), `has_custom_rules`.
+- `add_members`: approval wale group / minor target ko non-admin seedha add nahi kar sakta -> `GroupJoinRequest`; response `pending_approval_count`, `pending_approval_user_ids`.
+- Admin/mod: `GET /groups/<id>/join-requests/` ab public group me bhi kaam karta hai (approve/reject wahi).
+
+### 16.2 Room rules
+- Default rules (EN+HI) `study_room_safety.DEFAULT_ROOM_RULES`; group ke apne rules `Group.room_rules` (max 2000 chars), badalne par `room_rules_version` +1 aur WS `room_rules_changed {version}`.
+- `GET /groups/<id>/room-rules/` (public group ka non-member bhi) — pre-join sheet. `GET|POST /study-room/<conv>/rules/` — accept (409 `rules_version_changed` agar beech me rules badle).
+- Public group ke study room me join + `refresh-token` dono par gate: 403 `rules_not_accepted` (group admin/mod exempt; `STUDY_ROOM_RULES_REQUIRED_PUBLIC`).
+
+### 16.3 Minor privacy (public group)
+- `masked_user_ids(viewer, conversation, ids)`: minor ka naam first-name only, photo None — adult non-staff viewer ko. Group admin/mod aur doosre minors ko real.
+- Lagta hai: join `participants`, `room/` roster + waiting, LiveKit token naam, push "X andar aana chahta hai", WS `user_joined/update_window/quick_chat/sticker/hand_raised` (consumer `_study_room_apply_safety`, server-stamped `sender_user_id`).
+- Client hints `privacy`: `is_minor`, `mask_identity`, `camera_default_off` (join pe camera OFF), `join_needs_approval`.
+
+### 16.4 Block + report
+- `POST|DELETE /study-room/<conv>/block/ {user_id}` — existing `BlockedUser` (global, DM bhi). Dono taraf WS events hide (moderation events exempt), `room_block_changed` targeted event; join/`room/` response me `blocked_user_ids` (dono direction).
+- `POST /study-room/<conv>/report/` me `block: true`; `STUDY_ROOM_REPORT_AUTO_REMOVE_THRESHOLD` (0 = off) distinct reporters in window => session se removed (host/co-host/group staff kabhi nahi).
+- Limit: LiveKit video/audio per-viewer server se filter nahi hota — blocked user ka tile + audio client-side hide hota hai.
+
+### 16.5 Settings
+`STUDY_ROOM_RULES_REQUIRED_PUBLIC` (1), `STUDY_ROOM_REPORT_AUTO_REMOVE_THRESHOLD` (0), `STUDY_ROOM_REPORT_AUTO_REMOVE_WINDOW_MINUTES` (60), `MINOR_PUBLIC_ROOM_MASK_IDENTITY` (1), `MINOR_PUBLIC_GROUP_JOIN_APPROVAL` (1), `MINOR_PUBLIC_ROOM_CAMERA_OFF` (1). Migration: `message/0013_group_join_rules_safety`.
+
+### 16.6 Flutter
+`widgets/study_room_rules_sheet.dart`, `StudyRoomControlsController` (block/mask/privacy/rules), `StudyRoomCallManager.setBlockedIdentities`, discover Request/Requested + pre-join rules, group profile "Room safety" card (join approval + rules editor), host sheet Block/Unblock + Report+Block, `showStudyRoomSafetySheet` (non-manager long-press).
+
+### 16.7 Open
+`create_group(member_ids=...)` public group me minors ko seedha add karta hai (creator admin hai, approval nahi lagta) — product decision. Tests (`tests_study_room_s8.py`) abhi nahi likhe.

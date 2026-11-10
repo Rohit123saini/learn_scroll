@@ -186,6 +186,7 @@ if APITestCase is not None:
             with override_settings(FEED_QUALITY=ON):
                 r = self.client.get(reverse("post-why", args=[p.id]))
             self.assertEqual(r.status_code, 200, getattr(r, "data", r.content))
-            stages = {s["stage"]: s for s in r.data["stages"]}
-            if r.data["feed_source"] in ("recommended", "trending"):
+            body = r.data["data"]  # the endpoint wraps its payload: {"success": .., "data": {...}}
+            stages = {s["stage"]: s for s in body["stages"]}
+            if body["feed_source"] in ("recommended", "trending"):
                 self.assertEqual(stages["quality"]["verdict"], "ok")

@@ -19,6 +19,9 @@ study from classrooms / campus / test attempts. Two jobs:
      feed when nothing matches" - an empty feed is the honest answer and the
      user can switch Exam Mode off.
 
+S8: a focus-schedule window (UserPreference.focus_schedule) turns the same filter on while it runs, and the learner's
+content level + content languages add hashtag boosts (feed_context.POINTS_PREF) - boosts only, never a filter.
+
 Fails soft: any error loading the profile means "no profile" (no boost, no
 filter) rather than a 500 on the home feed.
 """
@@ -42,7 +45,10 @@ class ExamProfile(NamedTuple):
     exam_target: str = ""
     class_level: str = ""
     subjects: Tuple[str, ...] = ()
-    exam_mode: bool = False  # EFFECTIVE (on and exam date not passed)
+    exam_mode: bool = False  # EFFECTIVE: Exam Mode on (exam date not passed) OR a focus-schedule window is running now
+    # S8 learning preferences (trailing + defaulted, so older constructions keep working):
+    content_level: str = ""  # "" | beginner | intermediate | advanced
+    languages: Tuple[str, ...] = ()  # content languages, ISO codes ("hi", "en")
 
 
 EMPTY = ExamProfile()
@@ -63,8 +69,31 @@ def profile_tags(profile: ExamProfile) -> List[str]:
     return list(dict.fromkeys(tags))
 
 
+def preference_tags(profile: ExamProfile) -> List[str]:
+    """S8: hashtags of the viewer's content level + content languages (user_profile/learning_prefs.py)."""
+    from user_profile import learning_prefs
+
+    return learning_prefs.preference_tags(profile.content_level, profile.languages)
+
+
 def has_profile(profile: ExamProfile) -> bool:
-    return bool(profile.exam_target or profile.class_level or profile.subjects)
+    return bool(
+        profile.exam_target or profile.class_level or profile.subjects or profile.content_level or profile.languages
+    )
+
+
+def _focus_now(pref) -> bool:
+    """Exam Mode (S8: or a focus-schedule window running in the user's local time). The schedule part is looked up only
+    when the user actually has a schedule switched on - no extra query for everyone else. Never raises."""
+    try:
+        if not getattr(pref, "focus_schedule_enabled", False):
+            return bool(pref.exam_mode_active)
+        from user_profile import learning_prefs
+
+        return bool(pref.focus_now(tz=learning_prefs.user_tz(pref.user_id)))
+    except Exception:  # pragma: no cover - a schedule problem must not decide the feed
+        logger.warning("feed_exam: focus schedule check failed", exc_info=True)
+        return bool(getattr(pref, "exam_mode_active", False))
 
 
 def load_profile(user) -> ExamProfile:
@@ -81,7 +110,9 @@ def load_profile(user) -> ExamProfile:
             exam_target=pref.exam_target or "",
             class_level=pref.class_level or "",
             subjects=subjects,
-            exam_mode=pref.exam_mode_active,
+            exam_mode=_focus_now(pref),
+            content_level=getattr(pref, "content_level", "") or "",
+            languages=tuple(str(c).strip().lower() for c in (getattr(pref, "content_languages", None) or []) if str(c).strip()),
         )
     except Exception:  # pragma: no cover - profile problems must never break the feed
         logger.warning("feed_exam: load_profile failed", exc_info=True)

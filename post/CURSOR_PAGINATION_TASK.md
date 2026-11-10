@@ -90,3 +90,31 @@ return an older ranking; the on-demand build already costs the same as the old p
 latency becomes a problem.
 Production note: multi-worker deployments need a shared cache (Redis) — settings already refuses
 `DEBUG=False` without `REDIS_URL`.
+
+## Part 3 — Flutter follows the Home feed `next` cursor  ✅ DONE (not run / not analyzed)
+
+Finding: the backend of Part 2 already did exactly the Reels model on `GET /post/feed/` (opaque `cursor` inside `next`,
+frozen snapshot, expired snapshot = server rebuilds with the cursor's `seen_cutoff` and continues at the same offsets).
+The gap was the APP: `home.dart::_loadMore` still sent `?page=N`, i.e. it kept hitting the old `_list_legacy` path.
+
+Flutter
+* `services/feed_cursor.dart` (new, pure): `resolveFeedNextUri` (uses only path+query of `next`, anchored on `Api.baseUrl`),
+  `newItemsById` (dedupe), `FeedCursorInvalid`.
+* `services/home_api_model_service.dart`: `getFeedFromAPI/getHomeFeed(nextUrl: ...)` GETs the `next` URL as returned; 404 on a
+  cursor -> `FeedCursorInvalid`. Page-1 cache write only for a real first page.
+* `home.dart`: `_currentPage` is gone; `_nextUrl` is set from `feed.next` everywhere page 1 is applied (first load, cache,
+  refresh, "new posts" pill, tab switch). `_loadMore` follows `_nextUrl`; on `FeedCursorInvalid` it starts a NEW session
+  (first page, no cursor) and appends only posts not already on screen; a page that adds nothing new but has `next`
+  keeps loading (max 3 in a row). A response that arrives after a refresh/tab switch is still discarded (`_feedGen`).
+* Old cache files / old servers: a `next` that is a plain `?page=N` URL is followed the same way, so nothing breaks.
+
+Cursor expired vs rejected
+* expired (TTL / Redis flush): handled by the SERVER (fallback above), the app does nothing special.
+* rejected (404): the APP starts a new session.
+
+Tests (NOT RUN)
+* `post/tests_cursor_pagination.py::HomeFeedCursorWalkTests` - whole-session walks: plain, cache flushed before every page,
+  page_size changing each page, posts created mid-scroll, seen-marking each page, score wave each page, following tab,
+  post deleted mid-scroll, garbage / Reels / Home cursors. Each asserts no duplicate AND no gap.
+* `test/feed_cursor_test.dart` - next-URL resolving + dedupe helper.
+

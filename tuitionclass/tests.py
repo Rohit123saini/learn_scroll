@@ -101,13 +101,47 @@ TEST_REST_FRAMEWORK_THROTTLES = override_settings(
 
 # Patch every LiveKit network call + Celery dispatch at the module level so
 # no test in this file ever touches the network or a broker.
-LIVEKIT_PATCH = patch.multiple(
-    "tuitionclass.views",
+class _PatchAcrossViews:
+    """`tuitionclass.views` is a package since T3.2 (the old 7k-line views.py was
+    split by responsibility). `mock.patch` only affects the module whose
+    namespace *binds* the name, so patching `tuitionclass.views.<name>` alone
+    would silently stop working. This patches `<name>` in the package AND in
+    every submodule that bound it — same start()/stop() API as `patch`.
+    """
+
+    def __init__(self, **replacements):
+        self._replacements = replacements
+        self._stack = []
+
+    def start(self):
+        import importlib
+        import pkgutil
+
+        pkg = importlib.import_module("tuitionclass.views")
+        modules = [pkg] + [
+            importlib.import_module(f"{pkg.__name__}.{m.name}")
+            for m in pkgutil.iter_modules(pkg.__path__)
+        ]
+        started = []
+        for mod in modules:
+            for name, replacement in self._replacements.items():
+                if hasattr(mod, name):
+                    patcher = patch.object(mod, name, replacement)
+                    patcher.start()
+                    started.append(patcher)
+        self._stack.append(started)
+
+    def stop(self):
+        for patcher in reversed(self._stack.pop() if self._stack else []):
+            patcher.stop()
+
+
+LIVEKIT_PATCH = _PatchAcrossViews(
     ensure_room=lambda *a, **k: None,
     generate_livekit_token=lambda *a, **k: "fake-token",
     remove_participant=lambda *a, **k: None,
 )
-SAFE_DELAY_PATCH = patch("tuitionclass.views._safe_delay", lambda *a, **k: None)
+SAFE_DELAY_PATCH = _PatchAcrossViews(_safe_delay=lambda *a, **k: None)
 
 
 def _apply_common_patches(test_case: TestCase):
@@ -1396,14 +1430,12 @@ class ClassroomBanTests(TuitionClassTestBase):
 
 
 # ===========================================================================
-# 8. Referral redemption — one-time, new-account-only, credits both wallets
+# 8. Referral code redemption is CLOSED (refer & earn is URL-only + creator opt-in now).
+#    redeem -> 410 and credits nothing; my-code / earnings no longer expose the old bonus / platform %.
 # ===========================================================================
 class ReferralRedeemTests(TuitionClassTestBase):
     def setUp(self):
         super().setUp()
-        # A separate pair from the shared teacher/student fixtures so the
-        # redeem-window / coin-crediting math below isn't entangled with
-        # any pass-purchase coin spend done elsewhere in the base fixture.
         self.referrer = User.objects.create_user(username="referrer1", password="pass12345")
         self.newcomer = User.objects.create_user(username="newcomer1", password="pass12345")
 
@@ -1413,84 +1445,57 @@ class ReferralRedeemTests(TuitionClassTestBase):
         url = reverse("referral-redeem")
         return client.post(url, {"code": code}, format="json")
 
-    def test_valid_code_credits_both_wallets(self):
+    def test_redeem_is_gone_and_credits_nothing(self):
         code = referral_code_for_user(self.referrer.id)
-        referrer_before = self.referrer.coin
-        newcomer_before = self.newcomer.coin
+        referrer_before, newcomer_before = self.referrer.coin, self.newcomer.coin
 
         resp = self._redeem(self.newcomer, code)
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.status_code, status.HTTP_410_GONE)
+        self.assertEqual(resp.data["new_endpoint"], "/referrals/earnable/")
 
-        bonus = django_settings.REFERRAL_BONUS_COINS
         self.referrer.refresh_from_db()
         self.newcomer.refresh_from_db()
-        self.assertEqual(self.referrer.coin, referrer_before + bonus)
-        self.assertEqual(self.newcomer.coin, newcomer_before + bonus)
-        self.assertTrue(
-            Referral.objects.filter(referrer=self.referrer, referred=self.newcomer, bonus_amount=bonus).exists()
-        )
-        self.assertEqual(
-            CoinTransaction.objects.filter(
-                user__in=[self.referrer, self.newcomer], reason=CoinTransaction.Reason.REFERRAL_BONUS
-            ).count(),
-            2,
-        )
-
-    def test_invalid_code_is_rejected(self):
-        resp = self._redeem(self.newcomer, "not-a-real-code")
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual((self.referrer.coin, self.newcomer.coin), (referrer_before, newcomer_before))
         self.assertFalse(Referral.objects.exists())
+        self.assertFalse(CoinTransaction.objects.filter(reason=CoinTransaction.Reason.REFERRAL_BONUS).exists())
 
-    def test_cannot_redeem_own_code(self):
-        code = referral_code_for_user(self.referrer.id)
-        resp = self._redeem(self.referrer, code)
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+    def test_redeem_is_gone_for_any_body_even_invalid(self):
+        self.assertEqual(self._redeem(self.newcomer, "not-a-real-code").status_code, status.HTTP_410_GONE)
+        self.assertEqual(self._redeem(self.referrer, referral_code_for_user(self.referrer.id)).status_code, 410)
 
-    def test_cannot_redeem_twice(self):
-        code = referral_code_for_user(self.referrer.id)
-        first = self._redeem(self.newcomer, code)
-        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
-
-        second_referrer = User.objects.create_user(username="referrer2", password="pass12345")
-        second_code = referral_code_for_user(second_referrer.id)
-        second = self._redeem(self.newcomer, second_code)
-        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(Referral.objects.filter(referred=self.newcomer).count(), 1)
-
-    def test_redeem_outside_window_is_rejected(self):
-        window = django_settings.REFERRAL_REDEEM_WINDOW_DAYS
-        self.newcomer.date_joined = timezone.now() - timedelta(days=window + 1)
-        self.newcomer.save(update_fields=["date_joined"])
-
-        code = referral_code_for_user(self.referrer.id)
-        resp = self._redeem(self.newcomer, code)
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertFalse(Referral.objects.exists())
-
-    def test_my_code_reflects_referral_count_and_earnings(self):
-        code = referral_code_for_user(self.referrer.id)
-        self._redeem(self.newcomer, code)
-
+    def test_my_code_has_no_bonus_per_referral(self):
         client = APIClient()
         client.force_authenticate(self.referrer)
-        url = reverse("referral-my-code")
-        resp = client.get(url)
+        resp = client.get(reverse("referral-my-code"))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["code"], code)
-        self.assertEqual(resp.data["referral_count"], 1)
-        self.assertEqual(resp.data["total_bonus_earned"], django_settings.REFERRAL_BONUS_COINS)
+        self.assertEqual(resp.data["code"], referral_code_for_user(self.referrer.id))
+        self.assertNotIn("bonus_per_referral", resp.data)
+        self.assertIn("referral_count", resp.data)
+
+    def test_earnings_has_no_platform_testseries_percent(self):
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        resp = client.get(reverse("referral-earnings"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn("testseries_commission_percent", resp.data)
+        for key in ("total_commission_earned", "testseries_commission", "classroom_commission", "recent"):
+            self.assertIn(key, resp.data)
 
     def test_referral_list_is_own_ledger_only(self):
-        code = referral_code_for_user(self.referrer.id)
-        self._redeem(self.newcomer, code)
+        # pre-existing Referral rows (from before redeem was closed) stay readable, own ledger only
+        Referral.objects.create(referrer=self.referrer, referred=self.newcomer, bonus_amount=50)
 
         client = APIClient()
         client.force_authenticate(self.newcomer)  # the referred user, not the referrer
-        url = reverse("referral-list")
-        resp = client.get(url)
+        resp = client.get(reverse("referral-list"))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = resp.data.get("results", resp.data)
         self.assertEqual(len(results), 0)
+
+        client.force_authenticate(self.referrer)
+        results = client.get(reverse("referral-list")).data
+        results = results.get("results", results)
+        self.assertEqual(len(results), 1)
 
 
 # ===========================================================================
@@ -2529,9 +2534,14 @@ class NotificationDigestTaskTests(TuitionClassTestBase):
 
         mail.outbox = []
 
+    def verified_email(self):
+        """N8: the digest only goes to a VERIFIED address."""
+        return {"email_verified_address": self.student.email, "email_verified_at": timezone.now()}
+
     def test_due_user_with_notifications_gets_a_digest_email(self):
         pref = NotificationPreference.objects.create(
             user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            **self.verified_email(),
         )
         Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
         Notification.objects.create(recipient=self.student, notif_type="session_live", title="Class started")
@@ -2558,6 +2568,7 @@ class NotificationDigestTaskTests(TuitionClassTestBase):
     def test_user_with_nothing_new_is_not_emailed_and_window_stays_open(self):
         pref = NotificationPreference.objects.create(
             user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            **self.verified_email(),
         )
         send_notification_digests()
         pref.refresh_from_db()
@@ -2566,6 +2577,7 @@ class NotificationDigestTaskTests(TuitionClassTestBase):
     def test_not_yet_due_user_is_skipped(self):
         pref = NotificationPreference.objects.create(
             user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            **self.verified_email(),
             last_digest_sent_at=timezone.now() - timedelta(hours=1),  # sent an hour ago, daily interval not up
         )
         Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
@@ -2578,6 +2590,7 @@ class NotificationDigestTaskTests(TuitionClassTestBase):
     def test_muted_notif_type_excluded_from_digest(self):
         pref = NotificationPreference.objects.create(
             user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            **self.verified_email(),
             muted_types=["notice_posted"],
         )
         Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="Muted notice")
@@ -2593,6 +2606,7 @@ class NotificationDigestTaskTests(TuitionClassTestBase):
     def test_running_twice_in_a_row_does_not_double_send(self):
         NotificationPreference.objects.create(
             user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            **self.verified_email(),
         )
         Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
 
@@ -2890,4 +2904,68 @@ class ParentTeacherMessageTests(TuitionClassTestBase):
         )
         url = reverse("parentteachermessage-reply", args=[message.pk])
         resp = self._client_for(self.teacher).post(url, {"teacher_reply": "   "}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ===========================================================================
+# 6. BALANCE GATE — a join request is only created when the student can pay
+# ===========================================================================
+@TEST_REST_FRAMEWORK_THROTTLES
+class JoinRequestBalanceGateTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.client.force_authenticate(self.student)
+        self.url = reverse("classjoinrequest-list")
+
+    def _post(self, **extra):
+        payload = {"classroom": self.classroom.id, "class_pass": self.class_pass.id}
+        payload.update(extra)
+        return self.client.post(self.url, payload, format="json")
+
+    def _set_coins(self, amount):
+        self.student.coin = amount
+        self.student.save(update_fields=["coin"])
+
+    def test_insufficient_balance_blocks_request_and_creates_nothing(self):
+        self._set_coins(99)  # pass costs 100
+        resp = self._post()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(ClassJoinRequest.objects.filter(student=self.student).count(), 0)
+
+    def test_exact_balance_is_enough(self):
+        self._set_coins(100)
+        resp = self._post()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_request_does_not_debit_coins(self):
+        self._set_coins(500)
+        self._post()
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 500)  # debit only happens on accept
+
+    def test_free_pass_needs_no_balance(self):
+        free_pass = ClassPass.objects.create(
+            classroom=self.classroom, pass_type=ClassPass.PassType.MONTHLY, price=Decimal("0"), validity_days=10
+        )
+        self._set_coins(0)
+        resp = self._post(class_pass=free_pass.id)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_coupon_discount_is_applied_to_the_balance_check(self):
+        Coupon.objects.create(
+            code="HALF50",
+            created_by=self.teacher,
+            classroom=self.classroom,
+            discount_percent=50,
+            valid_from=timezone.now() - timedelta(days=1),
+            valid_until=timezone.now() + timedelta(days=1),
+        )
+        self._set_coins(50)  # 100 -> 50 after coupon
+        resp = self._post(coupon_code="HALF50")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_invalid_coupon_is_rejected_at_request_time(self):
+        self._set_coins(1000)
+        resp = self._post(coupon_code="NOPE")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

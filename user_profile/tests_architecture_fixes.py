@@ -166,6 +166,7 @@ class GatewayReferenceCollisionTests(APITestCase):
 
 
 # ------------------------------------------------------------------- #13
+@override_settings(COIN_CASHOUT_ENABLED=True)  # P-G1: these tests exercise the cash-out path itself
 class WithdrawalAccountingTests(APITestCase):
     def setUp(self):
         self.u = mk("acct")
@@ -297,6 +298,7 @@ class CoinToInrRateSettingTests(APITestCase):
 
 
 # ------------------------------------------------------------------- #16
+@override_settings(COIN_CASHOUT_ENABLED=True)  # P-G1: these tests exercise the cash-out path itself
 class WithdrawalAdminActionSerializerTests(APITestCase):
     def setUp(self):
         self.staff = mk("staff", is_staff=True)

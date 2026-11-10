@@ -1,0 +1,52 @@
+# X3 - Prometheus rules for PRODUCT ANALYTICS (metrics come from GET /core/analytics/product/?format=prom,
+# core/product_analytics.py). Load with:   rule_files: [ "prometheus_product_rules.yml" ]
+# These are "is the measurement itself healthy" rules - not business alerts. Everything is consent-gated and aggregate.
+groups:
+  - name: learnscroll-product-analytics
+    rules:
+      - alert: ProductAnalyticsInvalidValues
+        expr: sum(increase(learnscroll_product_dropped_total{reason="invalid"}[1h])) > 50
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Product analytics is dropping {{ $value }} events/h as 'invalid' - app and server vocabulary differ"
+          runbook: "deploy/monitoring/README.md#product-analytics-x3"
+
+      - alert: ProductAnalyticsOffInProd
+        expr: learnscroll_product_analytics_enabled == 0
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "PRODUCT_ANALYTICS_ENABLED is off - dashboards will be empty (fine if on purpose)"
+          runbook: "deploy/monitoring/README.md#product-analytics-x3"
+
+      - alert: ProductAnalyticsScrapeDown
+        expr: up{job="learnscroll-product-analytics"} == 0
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Product analytics endpoint is not scrapable (token / 403 / throttle)"
+          runbook: "deploy/monitoring/README.md#product-analytics-x3"
+
+      - alert: ExperimentLeftRunningNoExposure
+        # an experiment is ON but nobody was exposed for 3 days: a broken hook or a forgotten flag
+        expr: |
+          (learnscroll_experiment_running{kind="flag"} == 1)
+          unless on (experiment)
+          (sum by (experiment) (increase(learnscroll_product_experiment_exposure_total[3d])) > 0)
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "Experiment {{ $labels.experiment }} is running but has no exposures in 3 days"
+          runbook: "deploy/monitoring/README.md#product-analytics-x3"
+
+      - alert: CopyExperimentNoPushes
+        expr: |
+          (learnscroll_experiment_running{kind="copy"} == 1)
+          unless on (experiment)
+          (sum by (experiment) (increase(learnscroll_product_notification_variant_total{stage="pushed"}[3d])) > 0)
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "Copy experiment {{ $labels.experiment }} is on but no push used a variant in 3 days"
+          runbook: "deploy/monitoring/README.md#product-analytics-x3"

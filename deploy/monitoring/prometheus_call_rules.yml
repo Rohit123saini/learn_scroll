@@ -1,0 +1,64 @@
+# X1 - Prometheus alert rules for CALLS (metrics come from GET /message/calls/ops/?format=prom, message/call_ops.py).
+# SLO: connect-success >= 95 %. Load with:   rule_files: [ "prometheus_call_rules.yml" ]
+# Note: connect numbers are CLIENT-reported (one attempt per participant per call) - see README "Calls (X1)".
+groups:
+  - name: learnscroll-call-slo
+    rules:
+      # THE alert asked for: connect-success < 95 %
+      - alert: CallConnectSuccessBelow95
+        expr: learnscroll_call_connect_success_pct{window="1h"} < 95 and learnscroll_call_connect_attempts{window="1h"} > 20
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "Call connect-success {{ $value }}% over 1h (SLO 95%)"
+          runbook: "deploy/monitoring/README.md#callconnectsuccessbelow95"
+
+      - alert: CallConnectFastBurn
+        expr: learnscroll_call_connect_success_pct{window="5m"} < 80 and learnscroll_call_connect_attempts{window="5m"} > 10
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Calls are failing to connect right now ({{ $value }}% over 5m)"
+          runbook: "deploy/monitoring/README.md#callconnectsuccessbelow95"
+
+      - alert: CallSetupSlow
+        expr: learnscroll_call_setup_ms{stat="p95", window="1h"} > 5000
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "p95 call setup time is above 5 s over 1h (bucket upper bound {{ $value }} ms)"
+          runbook: "deploy/monitoring/README.md#callsetupslow"
+
+      - alert: CallIceFailuresDominant
+        expr: >
+          learnscroll_call_connect_failures{reason=~"ice_failed|timeout", window="1h"}
+          > 0.5 * clamp_min(sum(learnscroll_call_connect_failures{window="1h"}), 1)
+          and sum(learnscroll_call_connect_failures{window="1h"}) > 10
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Most call connect failures are ICE / timeout - TURN / UDP path problem? (reason={{ $labels.reason }})"
+          runbook: "deploy/monitoring/README.md#calliceFailuresdominant"
+
+      - alert: CallReconnectsHigh
+        expr: learnscroll_call_reconnects_per_call{window="1h"} > 0.5
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $value }} reconnect cycles per call over 1h (network / LiveKit node instability)"
+          runbook: "deploy/monitoring/README.md#callreconnectshigh"
+
+      - alert: CallAnswerRateLow
+        expr: learnscroll_call_ring_answer_rate_pct{window="24h"} < 40 and sum(learnscroll_call_ring_outcomes{window="24h"}) > 50
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "Only {{ $value }}% of rings are answered over 24h - ring delivery (push / CallKit) problem?"
+          runbook: "deploy/monitoring/README.md#callanswerratelow"
+
+      - alert: CallOpsScrapeDown
+        expr: up{job="learnscroll-call-ops"} == 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Cannot scrape /message/calls/ops/ - call alerts above are blind"

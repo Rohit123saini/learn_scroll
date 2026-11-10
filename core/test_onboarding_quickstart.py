@@ -39,7 +39,7 @@ class QuickStartTests(TestCase):
     def test_more_than_three_interests_rejected_and_nothing_saved(self):
         r = self._post(interests=["education", "tech", "sports", "news"])
         self.assertEqual(r.status_code, 400)
-        self.assertIn("interests", r.data)
+        self.assertIn("interests", r.data.get("errors") or r.data)
         self.assertEqual(UserInterest.objects.filter(user=self.user).count(), 0)
         self.user.refresh_from_db()
         self.assertEqual(self.user.study_class, "")

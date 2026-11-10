@@ -1,0 +1,24 @@
+# Celery BEAT -- the scheduler that FIRES the periodic tasks in CELERY_BEAT_SCHEDULE.
+# !! Run EXACTLY ONE beat process in the whole system (two beats = every task runs twice).
+# Never use `worker -B` in production for the same reason.
+[Unit]
+Description=LearnScroll Celery beat scheduler
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=learnscroll
+Group=learnscroll
+WorkingDirectory=/srv/learnscroll/backend
+EnvironmentFile=/srv/learnscroll/.env
+# --schedule must be a path the service user can WRITE (beat keeps its "last run" state there).
+ExecStart=/srv/learnscroll/venv/bin/celery -A LearnScroll beat --loglevel=INFO --schedule=/var/lib/learnscroll/celerybeat-schedule
+Restart=always
+# P-C3: exit code 3 = "another beat already runs" (LearnScroll/beat_guard.py) -> do not restart-loop.
+RestartPreventExitStatus=3
+RestartSec=5
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

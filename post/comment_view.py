@@ -23,6 +23,7 @@ from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from common.open_throttles import PublicReadThrottle  # P-B3
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from drf_spectacular.utils import extend_schema, OpenApiParameter
@@ -30,6 +31,13 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter
 from.models import Post, PostComment, CommentMedia, ChunkedUpload, PostChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
 from .services import notify_post_commented, save_uploaded_chunk, assemble_chunks, hidden_commenter_ids
+
+
+def _clean_comment_or_empty(value):
+    """Chunked-upload paths store the comment text first and use it later: sanitise it there too. An over-long text
+    is cut at the comment limit here (the file is already uploaded - refusing now would waste it)."""
+    from .rich_text import comment_max, sanitize_rich_text
+    return sanitize_rich_text(value)[:comment_max()]
 
 def get_media_type(file):
     content_type = getattr(file, 'content_type', '') or ''
@@ -79,8 +87,10 @@ class CommentCreateAPIView(APIView):
         if post_hidden_for(request.user, post):
             return Response({"error": "Post not found"}, status=404)
 
-        if post.is_comments_disabled:
-            return Response({"error": "Comments disabled"}, status=403)
+        from .post_options import can_comment
+        _ok, _code, _msg = can_comment(post, request.user)
+        if not _ok:
+            return Response({"error": _msg, "code": _code}, status=403)
 
         # Block (either direction) with the post's author => can't comment.
         if post.user_id != request.user.id:
@@ -93,10 +103,18 @@ class CommentCreateAPIView(APIView):
             files = [f for f in request.FILES.getlist('file') if hasattr(f, 'size')]
 
         content = data.get('content', '').strip()
-        if not content and not files:
+        reply_reel = None
+        if data.get('reel_post_id'):
+            from .reply_reels import ReplyReelError, resolve_reply_reel
+            try:
+                reply_reel = resolve_reply_reel(request.user, data['reel_post_id'])
+            except ReplyReelError as exc:
+                return Response({"error": exc.message, "code": exc.code}, status=exc.status)
+        if not content and not files and reply_reel is None:
             return Response({"error": "Content or file is required"}, status=400)
 
-        comment = PostComment.objects.create(post=post, user=request.user, parent=parent, content=content)
+        comment = PostComment.objects.create(post=post, user=request.user, parent=parent, content=content,
+                                             reply_reel=reply_reel)
 
         for f in files[:5]:
             CommentMedia.objects.create(
@@ -122,6 +140,11 @@ class CommentCreateAPIView(APIView):
         # `post/signals.py` deliberately has NO PostComment receiver.
         if parent:
             PostComment.objects.filter(id=parent.id).update(replies_count=F('replies_count') + 1)
+        elif getattr(comment, 'is_hidden', False):
+            # P-F15: held at posting (profanity / adult content, user_profile/automod.hold_comment_if_needed).
+            # A hidden top-level comment is not counted and does not notify the post owner; it is counted
+            # (+1) when an appeal / moderator restores it (report_targets.restore).
+            pass
         else:
             Post.objects.filter(id=post.id).update(comments_count=F('comments_count') + 1)
             # Task 11 fix — only a new TOP-LEVEL comment notifies the post
@@ -191,8 +214,10 @@ def chunked_upload_init(request):
         # resolved — no second query), so a blocked upload fails
         # immediately instead of after the client has already spent time/
         # bandwidth pushing chunks.
-        if target_post.is_comments_disabled:
-            return Response({"error": "Comments disabled"}, status=403)
+        from .post_options import can_comment
+        _ok, _code, _msg = can_comment(target_post, request.user)
+        if not _ok:
+            return Response({"error": _msg, "code": _code}, status=403)
 
         upload_id = str(uuid.uuid4())
         ChunkedUpload.objects.create(
@@ -202,7 +227,7 @@ def chunked_upload_init(request):
             total_size=total_size,
             post_id=post_id if post_id else None,
             parent_id=parent_id,
-            content=request.data.get('content', ''),
+            content=_clean_comment_or_empty(request.data.get('content', '')),
             user=request.user
         )
         os.makedirs(os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id), exist_ok=True)
@@ -302,8 +327,10 @@ def chunked_upload_complete(request):
         else:
             parent = None
             post = get_object_or_404(Post, id=upload.post_id)
-        if post.is_comments_disabled:
-            return Response({"error": "Comments disabled"}, status=403)
+        from .post_options import can_comment
+        _ok, _code, _msg = can_comment(post, request.user)
+        if not _ok:
+            return Response({"error": _msg, "code": _code}, status=403)
 
         # TASK 3 — assembly itself (verify every chunk present, stitch
         # them together, clean up temp_chunks/<upload_id>/) is now shared
@@ -318,7 +345,7 @@ def chunked_upload_complete(request):
             return Response({"error": str(e)}, status=400)
 
         comment = PostComment.objects.create(
-            post=post, user=request.user, parent=parent, content=upload.content or ""
+            post=post, user=request.user, parent=parent, content=_clean_comment_or_empty(upload.content)
         )
 
         relative_path = os.path.relpath(final_path, settings.MEDIA_ROOT)
@@ -411,8 +438,16 @@ class CommentUpdateAPIView(APIView):
         if content is None:
             content = request.data.get('content', '')
 
+        if content is not None:
+            from rest_framework import serializers as _drf_serializers
+            from .rich_text import clean_comment, validation_message
+            try:
+                content = clean_comment(content)
+            except _drf_serializers.ValidationError as exc:
+                return Response({"error": validation_message(exc)}, status=400)
+
         if content is not None and str(content).strip()!= "":
-            comment.content = str(content).strip()
+            comment.content = content
             comment.is_edited = True
             comment.save(update_fields=['content', 'is_edited', 'updated_at'])
         elif content is not None and str(content).strip() == "":
@@ -464,6 +499,7 @@ class CommentDeleteAPIView(APIView):
 
 class CommentListAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PublicReadThrottle]  # P-B3: public GET, scoped limit (240/min) instead of the 20/min anon default
 
     # TASK G5 (growth_and_feature_tasks.md) — "Comments & reactions parity
     # with mainstream apps". The reaction model (5 types, CommentLike) and
@@ -483,11 +519,14 @@ class CommentListAPIView(APIView):
                 name='sort', type=str, required=False,
                 description="'top' (default, most-reacted first) or 'newest' (chronological).",
             ),
+            OpenApiParameter(name='offset', type=int, required=False, description='Window start (default 0).'),
+            OpenApiParameter(name='limit', type=int, required=False, description='Window size, 1-50 (default 50). Response header X-Has-More: 1/0.'),
         ],
         tags=['Comments'],
     )
     def get(self, request, post_id):
-        post = get_object_or_404(Post, id=post_id)
+        # P-C5: select_related('user') - the block check below reads `post.user` (was one extra query).
+        post = get_object_or_404(Post.objects.select_related('user'), id=post_id)
         from .moderation_guard import post_hidden_for
         if post_hidden_for(request.user, post):
             return Response({"error": "Post not found"}, status=404)
@@ -496,7 +535,7 @@ class CommentListAPIView(APIView):
             from user_profile.views import is_blocked_between
             if is_blocked_between(request.user, post.user):
                 return Response({"error": "Post not found"}, status=404)
-        qs = PostComment.objects.filter(post=post, parent__isnull=True, is_deleted=False).select_related('user').prefetch_related('media')
+        qs = PostComment.objects.filter(post=post, parent__isnull=True, is_deleted=False).select_related('user', 'reply_reel__user').prefetch_related('media', 'reply_reel__media')
         if not request.user.is_authenticated or request.user.id!= post.user_id:
             qs = qs.filter(is_hidden=False)
         # RestrictUser (issue #2): the post owner's restricted users' comments
@@ -507,14 +546,30 @@ class CommentListAPIView(APIView):
             qs = qs.exclude(user_id__in=hidden_ids)
         sort = (request.query_params.get('sort') or 'top').lower()
         if sort == 'newest':
-            comments = qs.order_by('-is_pinned', '-created_at')[:50]
+            ordered = qs.order_by('-is_pinned', '-created_at', '-id')
         else:
-            comments = qs.order_by('-is_pinned', '-likes_count', '-created_at')[:50]
-        serializer = PostCommentSerializer(comments, many=True, context={'request': request})
-        return Response(serializer.data)
+            ordered = qs.order_by('-is_pinned', '-likes_count', '-created_at', '-id')
+        # P-E3_E6: opt-in paging. Before, comments 51+ were simply unreachable. The body stays a bare JSON list (old
+        # clients keep working); `?offset=` / `?limit=` (<=50, default 50) select a window and the `X-Has-More` header
+        # says whether another window exists. `-id` is a stable tie-break so equal-score comments do not swap pages.
+        try:
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = min(50, max(1, int(request.query_params.get('limit', 50))))
+        except (TypeError, ValueError):
+            limit = 50
+        window = list(ordered[offset:offset + limit + 1])  # +1 row = "is there more?" without a COUNT query
+        has_more = len(window) > limit
+        serializer = PostCommentSerializer(window[:limit], many=True, context={'request': request})
+        resp = Response(serializer.data)
+        resp['X-Has-More'] = '1' if has_more else '0'
+        return resp
 
 class CommentRepliesAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PublicReadThrottle]  # P-B3
 
     # TASK G5 — same `?sort=` support as CommentListAPIView, but the
     # default stays 'oldest' (chronological) here on purpose: replies
@@ -533,11 +588,21 @@ class CommentRepliesAPIView(APIView):
         tags=['Comments'],
     )
     def get(self, request, comment_id):
-        parent = get_object_or_404(PostComment, id=comment_id, is_deleted=False)
+        # P-C5: select_related('post') - `parent.post.user_id` is read below (was one extra query).
+        parent = get_object_or_404(PostComment.objects.select_related('post', 'post__user'), id=comment_id, is_deleted=False)
+        # P-B3 (real gap): replies used to be readable for ANY comment id even when the post is hidden / removed / blocked,
+        # which CommentListAPIView already refuses. Same rule here, same 404 shape.
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, parent.post):
+            return Response({"error": "Post not found"}, status=404)
+        if request.user.is_authenticated and parent.post.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, parent.post.user):
+                return Response({"error": "Post not found"}, status=404)
         sort = (request.query_params.get('sort') or 'oldest').lower()
         order = ('-likes_count', 'created_at') if sort == 'top' else ('created_at',)
         # FIX 2 - nested replies ke liye sab reply laayenge
-        replies = PostComment.objects.filter(parent=parent, is_deleted=False, is_hidden=False).select_related('user').prefetch_related('media').order_by(*order)
+        replies = PostComment.objects.filter(parent=parent, is_deleted=False, is_hidden=False).select_related('user', 'reply_reel__user').prefetch_related('media', 'reply_reel__media').order_by(*order)
         # RestrictUser (issue #2) — same rule as CommentListAPIView.
         viewer_id = request.user.id if request.user.is_authenticated else None
         hidden_ids = hidden_commenter_ids(parent.post.user_id, viewer_id)
@@ -567,3 +632,40 @@ class CommentHideAPIView(APIView):
                 Post.objects.filter(id=post.id).update(comments_count=F('comments_count') + 1)
         comment.save(update_fields=['is_hidden', 'hidden_by', 'hidden_at'])
         return Response({"message": "Hidden" if comment.is_hidden else "Unhidden", "is_hidden": comment.is_hidden})
+
+# ===================== PIN A COMMENT (round 5) =====================
+class CommentPinAPIView(APIView):
+    """POST /post/comment/<id>/pin/ pins one top-level comment of MY post to the top of its comments (one at a time:
+    pinning another one un-pins the old one). DELETE un-pins. Post author only."""
+    permission_classes = [IsAuthenticated]
+
+    def _comment(self, request, comment_id):
+        comment = get_object_or_404(PostComment.objects.select_related('post'), id=comment_id, is_deleted=False)
+        if comment.post.user_id != request.user.id:
+            return None, Response({"error": "Only the post author can pin a comment", "code": "not_owner"}, status=403)
+        return comment, None
+
+    @transaction.atomic
+    def post(self, request, comment_id):
+        comment, err = self._comment(request, comment_id)
+        if err is not None:
+            return err
+        if comment.parent_id is not None:
+            return Response({"error": "Only a main comment can be pinned, not a reply", "code": "reply_not_pinnable"}, status=400)
+        if comment.is_hidden:
+            return Response({"error": "A hidden comment can't be pinned", "code": "hidden_not_pinnable"}, status=400)
+        PostComment.objects.filter(post_id=comment.post_id, is_pinned=True).exclude(pk=comment.pk).update(is_pinned=False)
+        if not comment.is_pinned:
+            comment.is_pinned = True
+            comment.save(update_fields=['is_pinned'])
+        return Response({"message": "Pinned", "is_pinned": True, "comment_id": str(comment.id)})
+
+    @transaction.atomic
+    def delete(self, request, comment_id):
+        comment, err = self._comment(request, comment_id)
+        if err is not None:
+            return err
+        if comment.is_pinned:
+            comment.is_pinned = False
+            comment.save(update_fields=['is_pinned'])
+        return Response({"message": "Unpinned", "is_pinned": False, "comment_id": str(comment.id)})

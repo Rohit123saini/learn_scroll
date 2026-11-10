@@ -1,0 +1,17 @@
+# P-C3 -- OPTIONAL override: put pgbouncer between the app and an external/managed Postgres (single host).
+#   docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.pgbouncer.yml --env-file /srv/learnscroll/.env up -d
+# In /srv/learnscroll/.env:  DATABASE_URL=postgres://USER:PASS@pgbouncer:6432/learnscroll   and   DB_DISABLE_SERVER_SIDE_CURSORS=true
+# The `migrate` service below talks to Postgres DIRECTLY: set MIGRATE_DATABASE_URL in the same .env (see deploy/PGBOUNCER.md).
+# Mounts deploy/pgbouncer/pgbouncer.ini + userlist.txt (copy the *.example files, edit, keep userlist.txt out of git).
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:1.23.1   # pin; check for a newer tag before use
+    restart: always
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    expose: ["6432"]
+    deploy: {resources: {limits: {memory: 128m}}}
+  migrate:
+    environment:
+      DATABASE_URL: ${MIGRATE_DATABASE_URL:?set MIGRATE_DATABASE_URL to the direct Postgres URL (port 5432)}

@@ -180,13 +180,13 @@ class ConfigAndVariantTests(_Base):
         p = mk(self.other, "why config post about organic chemistry", likes_count=3)
         r = self.client.get(reverse("post-why", args=[p.id]))
         self.assertEqual(r.status_code, 200)
-        self.assertNotIn("config", r.data)
+        self.assertNotIn("config", r.data["data"])  # response is wrapped: {"success": .., "data": {...}}
         User.objects.filter(pk=self.me.pk).update(is_staff=True)
         self.me.refresh_from_db()
         self.client.force_authenticate(self.me)
         r = self.client.get(reverse("post-why", args=[p.id]))
-        self.assertIn("mix", r.data["config"])
-        self.assertIn("bucket", r.data["experiment"])
+        self.assertIn("mix", r.data["data"]["config"])
+        self.assertIn("bucket", r.data["data"]["experiment"])
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from user_profile.models import SpendLimitExceeded  # S9
 
 from . import live, policy
 from .access import user_can_access_series, user_can_edit_series, visible_series_q
@@ -74,6 +75,16 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
         source = params.get("source")
         if source:
             qs = qs.filter(source=source)
+        # P5: `?creator_username=` - "this creator's series" on a profile. Narrowing only (visibility is still decided
+        # by `visible_series_q` below), so it can never reveal anything the normal list would not.
+        creator_username = (params.get("creator_username") or "").strip()
+        if creator_username:
+            qs = qs.filter(creator__username__iexact=creator_username[:150])
+        # `?status=draft` - the "add this poll/quiz to one of my drafts" picker (post app). Narrowing only: who may
+        # SEE a draft is still decided by `visible_series_q` below.
+        status_param = params.get("status")
+        if status_param in ("draft", "published", "archived"):
+            qs = qs.filter(status=status_param)
 
         # ---- Task G9: search / filter — subject, difficulty, price
         # (free/paid), minimum rating, free-text title/description.
@@ -131,7 +142,27 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
         # context series, which don't go through this method at all
         # (see bridge.create_context_testseries). Individual series rely
         # on browse-based discovery per §4.
-        serializer.save(creator=self.request.user, source=TestSeries.Source.INDIVIDUAL)
+        classroom_id = serializer.validated_data.get("classroom_id")
+        if classroom_id is None:
+            serializer.save(creator=self.request.user, source=TestSeries.Source.INDIVIDUAL)
+            return
+
+        # TS3 - a test created INSIDE one of the creator's classrooms. Golden rule kept: this app never imports
+        # tuitionclass; "may this user add a test to that class?" is asked through the same resolver that already
+        # decides who may edit a class test (settings.TESTSERIES_CONTEXT_EDITORS -> teacher / co-teacher / moderator).
+        # A class that does not exist and a class the user does not teach give the SAME answer, so ids cannot be probed.
+        from .access import editable_context_ids, normalize_context_id
+
+        context_id = normalize_context_id(classroom_id)
+        if context_id is None or context_id not in editable_context_ids(self.request.user, "classroom"):
+            raise PermissionDenied("You can only add a test to a class you teach.")
+        # The serializer already forced free; save() + policy defend it again for source=tuitionclass.
+        serializer.save(
+            creator=self.request.user,
+            source=TestSeries.Source.TUITIONCLASS,
+            context_type="classroom",
+            context_id=context_id,
+        )
 
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
@@ -217,7 +248,7 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
     # get a link — otherwise 400 so the app hides the button.
     @action(detail=True, methods=["get"], url_path="refer-link")
     def refer_link(self, request, pk=None):
-        from .access import referral_code_for_user, referral_percent, series_is_referable
+        from .access import referral_code_for_user, series_is_referable, series_referral_percent
 
         series = self.get_object()
         if series.status != TestSeries.Status.PUBLISHED or not series_is_referable(series):
@@ -233,7 +264,7 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
         if not base:
             raise ValidationError("This test series has no share link yet.")
         web_url = f"{base}{'&' if '?' in base else '?'}ref={code}"
-        pct = referral_percent()
+        pct = series_referral_percent(series)
         return Response(
             {
                 "referral_code": code,
@@ -454,6 +485,10 @@ class TestAttemptViewSet(
                 attempt = TestAttempt.objects.create(
                     series=series, student=request.user, attempt_number=attempt_number, **snapshot
                 )
+        except SpendLimitExceeded as exc:
+            # S9: user ki daily / monthly spend limit (ya minor cap). ValueError ka subclass hai, isliye ValueError se PEHLE
+            # pakadte hain - warna ye "coins kam hain" (402) dikhta. 400 + detail = app server ka message hi dikhata hai.
+            return Response({"detail": str(exc), "code": "spend_limit"}, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as exc:
             # Insufficient coin balance, per CoinLedger.record_transaction — §5/§6.
             return Response({"detail": str(exc)}, status=status.HTTP_402_PAYMENT_REQUIRED)

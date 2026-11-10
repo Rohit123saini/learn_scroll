@@ -166,6 +166,7 @@ class CandidateTests(ReelsBase):
         self.assertEqual(by_id[str(a.id)]["feed_source"], "recommended")
         self.assertEqual(by_id[str(b.id)]["feed_source"], "following")
 
+    @override_settings(FEED_REELS={"include_own_last_tier": False})
     def test_only_plain_public_approved_videos(self):
         ok = self.reel()
         excluded = [
@@ -315,6 +316,7 @@ class FallbackTests(ReelsBase):
         self.reel(duration=None)
         self.assertEqual(self.get().data["results"], [])
 
+    @override_settings(FEED_REELS={"include_own_last_tier": False})
     def test_safety_rules_are_never_loosened(self):
         blocked_author = User.objects.create_user(username="blk", password="x")
         BlockUser.objects.create(blocker=self.me, blocked=blocked_author)
@@ -645,7 +647,7 @@ class PayloadTests(ReelsBase):
     """Lean ReelSerializer payload - NOT the full PostListSerializer."""
 
     TOP = {"id", "video", "caption", "hashtags", "author", "counts",
-           "is_liked", "my_reaction", "is_saved", "feed_source"}
+           "is_liked", "my_reaction", "is_saved", "feed_source", "study"}
 
     def full_reel(self, user=None, **kw):
         kw.setdefault("hashtags", ["python", "dsa"])
@@ -671,7 +673,7 @@ class PayloadTests(ReelsBase):
     def test_video_block(self):
         p = self.full_reel(w=720, h=1280, duration=42)
         v = self.one(p)["video"]
-        self.assertEqual(set(v), {"url", "thumbnail", "duration", "width", "height", "blur_hash"})
+        self.assertEqual(set(v), {"media_id", "processing_status", "url", "hls_url", "hls_low_url", "sprite", "captions", "caption_tracks", "thumbnail", "duration", "width", "height", "blur_hash"})
         self.assertTrue(v["url"].startswith("http") and v["url"].endswith("x%d.mp4" % self._n))
         self.assertTrue(v["thumbnail"].startswith("http") and v["thumbnail"].endswith("t.jpg"))
         self.assertEqual((v["duration"], v["width"], v["height"]), (42, 720, 1280))
@@ -781,8 +783,11 @@ class PayloadTests(ReelsBase):
                 self.assertEqual(len(self.get(page_size=30).data["results"]), n)
             return len(ctx.captured_queries)
 
+        # A SMALL pool actually costs MORE queries (3 reels -> the feed runs its fallback/top-up tiers: 27,
+        # 24 reels -> 18), so equality was never the right check. The N+1 guard is: a bigger page must not
+        # cost more queries than a small one.
         few, many = count(3), count(24)
-        self.assertEqual(few, many, "queries grew with the page size (N+1)")
+        self.assertLessEqual(many, few, "queries grew with the page size (N+1)")
 
 
 class IsolationTests(ReelsBase):
@@ -837,6 +842,7 @@ class IsolationTests(ReelsBase):
         self.assertTrue(all(x["is_liked"] is False for x in r.data["results"]))
         self.assertTrue(mine)  # (the other user simply gets their own ranking)
 
+    @override_settings(FEED_REELS={"include_own_last_tier": False})
     def test_own_videos_are_never_recommended_to_me_but_are_to_others(self):
         mine = self.reel(self.me)
         self.assertNotIn(str(mine.id), self.feed_ids())
@@ -887,3 +893,82 @@ class CursorStabilityPayloadTests(ReelsBase):
                 self.assertEqual(set(x), PayloadTests.TOP)  # every page has the lean shape
                 seen_items[x["id"]] = x
         self.assertEqual(set(seen_items), {str(p.id) for p in posts})
+
+
+class OwnLastTierTests(ReelsBase):
+    """`FEED_REELS["include_own_last_tier"]` (default True): on a small user base the caller's
+    own public videos are appended LAST, so Reels is not empty when every video is theirs."""
+
+    def test_default_is_on(self):
+        self.assertTrue(reels.get_config()["include_own_last_tier"])
+
+    def test_only_my_own_videos_still_gives_a_page(self):
+        mine = self.reel(self.me)
+        self.assertEqual(self.ids(self.get()), [str(mine.id)])
+
+    def test_own_videos_come_after_everybody_elses(self):
+        other = self.reel(self.stranger)
+        mine_old = self.reel(self.me, likes=500)  # lots of likes must NOT lift it above the other video
+        mine_new = self.reel(self.me, w=1920, h=1080)  # any aspect is fine in this tier
+        ids = self.ids(self.get())
+        self.assertEqual(ids[0], str(other.id))
+        self.assertEqual(set(ids[1:]), {str(mine_old.id), str(mine_new.id)})
+        self.assertEqual(ids[1:], [str(mine_new.id), str(mine_old.id)])  # newest first
+
+    @override_settings(FEED_REELS={"include_own_last_tier": False})
+    def test_switch_off_never_serves_own(self):
+        self.reel(self.me)
+        self.assertEqual(self.ids(self.get()), [])
+
+    @override_settings(FEED_REELS={"min_pool": 2})
+    def test_not_used_when_the_pool_is_big_enough(self):
+        a, b = self.reel(self.stranger), self.reel(self.friend)
+        mine = self.reel(self.me)
+        got = self.feed_ids()
+        self.assertEqual(got, {str(a.id), str(b.id)})
+        self.assertNotIn(str(mine.id), got)
+
+    def test_safety_rules_still_apply_to_own_videos(self):
+        ok = self.reel(self.me)
+        bad = [
+            self.reel(self.me, visibility="private"),
+            self.reel(self.me, visibility="connections"),
+            self.reel(self.me, is_sensitive=True),
+            self.reel(self.me, moderation_status="pending"),
+            self.reel(self.me, is_deleted=True),
+            self.reel(self.me, is_archived=True),
+            self.reel(self.me, is_scheduled=True),
+            self.reel(self.me, media=False),
+            self.reel(self.me, post_type="image"),
+        ]
+        got = self.feed_ids()
+        self.assertEqual(got, {str(ok.id)})
+        for p in bad:
+            self.assertNotIn(str(p.id), got)
+
+    @override_settings(FEED_SEEN_LIMITS={"fill_min": 5})
+    def test_seen_own_video_is_used_for_the_final_top_up(self):
+        mine = self.reel(self.me)
+        PostView.objects.create(post=mine, user=self.me, is_counted=False)
+        self.assertEqual(self.ids(self.get()), [str(mine.id)])
+
+    @override_settings(FEED_SEEN_LIMITS={"fill_min": 0})
+    def test_seen_own_video_is_not_repeated_when_top_up_is_off(self):
+        mine = self.reel(self.me)
+        PostView.objects.create(post=mine, user=self.me, is_counted=False)
+        self.assertEqual(self.ids(self.get()), [])
+
+    def test_my_video_is_a_normal_reel_for_other_users(self):
+        mine = self.reel(self.me)
+        self.client.force_authenticate(self.stranger)
+        self.assertEqual(self.feed_ids(), {str(mine.id)})
+
+    def test_diagnose_reports_the_own_tier(self):
+        from .views import _home_base_qs
+
+        self.reel(self.me)
+        self.reel(self.me, visibility="private")
+        rows = dict(reels.diagnose(self.me, _home_base_qs(self.me), reels.get_config(), seen_ids=set()))
+        self.assertEqual(rows["video posts (all)"], 2)
+        self.assertEqual(rows["+ not own"], 0)  # the Home base drops own posts: the cause of "empty Reels"
+        self.assertEqual(rows["OWN videos, last tier [include_own_last_tier=ON]: candidates / unseen"], "1 / 1")

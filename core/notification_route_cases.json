@@ -1,0 +1,1463 @@
+[
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "join_request_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "join_request_received"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "join_request_accepted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "join_request_accepted"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "join_request_rejected"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "join_request_rejected"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "session_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "session_reminder"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "session_live"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "session_live"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "session_cancelled"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "session_cancelled"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "waitlist_promoted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "waitlist_promoted"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "classroom_flagged"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "classroom_flagged"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "staff_added"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "staff_added"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "review_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "review_posted"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "classroom_shared"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "classroom_shared"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "report_reviewed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "report_reviewed"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "classroom_created_by_followed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "classroom_created_by_followed"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "query_answered"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "query_answered"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "query_answered"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "certificate_issued"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "certificate_issued"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "certificates",
+  "target_id": "",
+  "type": "certificate_issued"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "notice_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "notice_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "assigments_graded"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "assigments_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "submission_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "assigments_posted_campus"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "assigments_due_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "assigments_due_soon"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "staff_assigments_approved"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "assignments",
+  "target_id": "",
+  "type": "staff_assigments_rejected"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroomTests",
+  "target_id": "1",
+  "type": "testseries_posted"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_posted"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_checked"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_checked"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_due_soon"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_due_soon"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_review_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_review_received"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_query_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_query_received"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_query_answered"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_query_answered"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_created_by_followed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "testseries_created_by_followed"
+ },
+ {
+  "data": {
+   "series_id": "1"
+  },
+  "in_app": false,
+  "route": "testSeries",
+  "target_id": "1",
+  "type": "testseries_payout_released"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "testseries_payout_released"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "pass_refunded"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "pass_gift_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "pass_gift_claimed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "pass_auto_renewed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "sessions",
+  "target_id": "",
+  "type": "new_device_login"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "purchase_receipt"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "auto_renew_failed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "pass_gift_expired"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "withdrawal_approved"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "withdrawal_rejected"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "withdrawal_paid"
+ },
+ {
+  "data": {
+   "kind": "video_processing_failed",
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "reel",
+  "target_id": "1",
+  "type": "generic"
+ },
+ {
+  "data": {
+   "kind": "referral_commission"
+  },
+  "in_app": false,
+  "route": "wallet",
+  "target_id": "",
+  "type": "generic"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "generic"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "copyrightComplaints",
+  "target_id": "",
+  "type": "copyright_notice"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "copyrightComplaints",
+  "target_id": "",
+  "type": "copyright_decision"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "copyrightStrikes",
+  "target_id": "",
+  "type": "copyright_standing"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "copyright_staff"
+ },
+ {
+  "data": {
+   "conversation_id": "1"
+  },
+  "in_app": false,
+  "route": "chat",
+  "target_id": "1",
+  "type": "chat_message"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "chat_message"
+ },
+ {
+  "data": {
+   "conversation_id": "1"
+  },
+  "in_app": false,
+  "route": "chat",
+  "target_id": "1",
+  "type": "mention"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "mention"
+ },
+ {
+  "data": {
+   "conversation_id": "1"
+  },
+  "in_app": false,
+  "route": "chat",
+  "target_id": "1",
+  "type": "incoming_call"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "incoming_call"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "parentAccess",
+  "target_id": "",
+  "type": "parent_device_pending"
+ },
+ {
+  "data": {
+   "conversation_id": "1",
+   "group_id": "1"
+  },
+  "in_app": false,
+  "route": "doubt",
+  "target_id": "1",
+  "type": "doubt_answered"
+ },
+ {
+  "data": {
+   "conversation_id": "1"
+  },
+  "in_app": false,
+  "route": "chat",
+  "target_id": "1",
+  "type": "doubt_answered"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "doubt_answered"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "post_liked"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "post_liked"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "post_commented"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "post_commented"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "post_reposted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "post_reposted"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "new_post_from_followed"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "new_post_from_followed"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "feed_doubt_for_teacher"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "feed_doubt_for_teacher"
+ },
+ {
+  "data": {
+   "collab_invite": "true"
+  },
+  "in_app": false,
+  "route": "coAuthorInvites",
+  "target_id": "",
+  "type": "post_tag"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "post_tag"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "post_tag"
+ },
+ {
+  "data": {
+   "story_id": "1"
+  },
+  "in_app": false,
+  "route": "story",
+  "target_id": "1",
+  "type": "story_mention"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "story_mention"
+ },
+ {
+  "data": {
+   "story_id": "1"
+  },
+  "in_app": false,
+  "route": "story",
+  "target_id": "1",
+  "type": "story_reaction"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "story_reaction"
+ },
+ {
+  "data": {
+   "actor_username": "1"
+  },
+  "in_app": false,
+  "route": "followRequests",
+  "target_id": "",
+  "type": "follow_request_received"
+ },
+ {
+  "data": {
+   "actor_username": "1"
+  },
+  "in_app": true,
+  "route": "profile",
+  "target_id": "1",
+  "type": "follow_request_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "followRequests",
+  "target_id": "",
+  "type": "follow_request_received"
+ },
+ {
+  "data": {},
+  "in_app": true,
+  "route": "followRequests",
+  "target_id": "",
+  "type": "follow_request_received"
+ },
+ {
+  "data": {
+   "actor_username": "1"
+  },
+  "in_app": false,
+  "route": "profile",
+  "target_id": "1",
+  "type": "follow_request_accepted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "unavailable",
+  "target_id": "",
+  "type": "follow_request_accepted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "creatorInsights",
+  "target_id": "",
+  "type": "creator_feedback"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "home",
+  "target_id": "",
+  "type": "streak_milestone_reached"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "home",
+  "target_id": "",
+  "type": "streak_at_risk"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "home",
+  "target_id": "",
+  "type": "study_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "home",
+  "target_id": "",
+  "type": "revision_deck_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "weeklyRecap",
+  "target_id": "",
+  "type": "weekly_recap_ready"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "referrals",
+  "target_id": "",
+  "type": "referral_reward"
+ },
+ {
+  "data": {
+   "ticket_id": "1"
+  },
+  "in_app": false,
+  "route": "supportTicket",
+  "target_id": "1",
+  "type": "support_reply"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "support_reply"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "report_outcome"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "content_digest"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_session_scheduled"
+ },
+ {
+  "data": {
+   "live_session_id": "1",
+   "mode": "x"
+  },
+  "in_app": false,
+  "route": "campusLive",
+  "target_id": "1",
+  "type": "campus_session_live"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_session_live"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_class_starting"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "low_attendance_alert"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_reward_earned"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_doubt_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_doubt_replied"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_substitute_assigned"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_class_substituted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_substitute_cancelled"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_emergency"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_safety"
+ },
+ {
+  "data": {
+   "student_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChild",
+  "target_id": "1",
+  "type": "result_published"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "result_published"
+ },
+ {
+  "data": {
+   "student_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChild",
+  "target_id": "1",
+  "type": "fee_due_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "fee_due_reminder"
+ },
+ {
+  "data": {
+   "student_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChild",
+  "target_id": "1",
+  "type": "fee_overdue_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "fee_overdue_reminder"
+ },
+ {
+  "data": {
+   "student_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChild",
+  "target_id": "1",
+  "type": "campus_fee_paid"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_fee_paid"
+ },
+ {
+  "data": {
+   "student_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChild",
+  "target_id": "1",
+  "type": "campus_student_absent"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_student_absent"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "parentWeekly",
+  "target_id": "",
+  "type": "campus_parent_weekly"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "section_id": "1"
+  },
+  "in_app": false,
+  "route": "homeworkDiary",
+  "target_id": "1",
+  "type": "homework_diary_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "homework_diary_posted"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "section_id": "1"
+  },
+  "in_app": false,
+  "route": "homeworkDiary",
+  "target_id": "1",
+  "type": "homework_diary_due"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "homework_diary_due"
+ },
+ {
+  "data": {
+   "campus_id": "1"
+  },
+  "in_app": false,
+  "route": "staffLeave",
+  "target_id": "1",
+  "type": "campus_leave_requested"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_leave_requested"
+ },
+ {
+  "data": {
+   "campus_id": "1"
+  },
+  "in_app": false,
+  "route": "staffLeave",
+  "target_id": "1",
+  "type": "campus_leave_decided"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_leave_decided"
+ },
+ {
+  "data": {
+   "event_id": "1"
+  },
+  "in_app": false,
+  "route": "ptm",
+  "target_id": "1",
+  "type": "campus_ptm_scheduled"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_ptm_scheduled"
+ },
+ {
+  "data": {
+   "event_id": "1"
+  },
+  "in_app": false,
+  "route": "ptm",
+  "target_id": "1",
+  "type": "campus_ptm_booked"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_ptm_booked"
+ },
+ {
+  "data": {
+   "event_id": "1"
+  },
+  "in_app": false,
+  "route": "ptm",
+  "target_id": "1",
+  "type": "campus_ptm_cancelled"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_ptm_cancelled"
+ },
+ {
+  "data": {
+   "event_id": "1"
+  },
+  "in_app": false,
+  "route": "ptm",
+  "target_id": "1",
+  "type": "campus_ptm_reminder"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_ptm_reminder"
+ },
+ {
+  "data": {
+   "thread_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChat",
+  "target_id": "1",
+  "type": "campus_parent_message"
+ },
+ {
+  "data": {
+   "campus_id": "1"
+  },
+  "in_app": false,
+  "route": "parentChatList",
+  "target_id": "1",
+  "type": "campus_parent_message"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_parent_message"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "folder_id": "1"
+  },
+  "in_app": false,
+  "route": "classResources",
+  "target_id": "1",
+  "type": "campus_resource_posted"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "section_id": "1"
+  },
+  "in_app": false,
+  "route": "classResources",
+  "target_id": "1",
+  "type": "campus_resource_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_resource_posted"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "recording_id": "1"
+  },
+  "in_app": false,
+  "route": "campusRecording",
+  "target_id": "1",
+  "type": "campus_recording_ready"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "live_session_id": "1"
+  },
+  "in_app": false,
+  "route": "campusRecording",
+  "target_id": "1",
+  "type": "campus_recording_ready"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "section_id": "1"
+  },
+  "in_app": false,
+  "route": "campusRecording",
+  "target_id": "1",
+  "type": "campus_recording_ready"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_recording_ready"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "section_id": "1"
+  },
+  "in_app": false,
+  "route": "campusNotes",
+  "target_id": "1",
+  "type": "campus_note_posted"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_note_posted"
+ },
+ {
+  "data": {
+   "campus_id": "1",
+   "kind": "follow_up_digest"
+  },
+  "in_app": false,
+  "route": "admissions",
+  "target_id": "1",
+  "type": "campus_admission"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "campus",
+  "target_id": "",
+  "type": "campus_admission"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "parent_message_received"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "parent_message_received"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "parent_message_replied"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "parent_message_replied"
+ },
+ {
+  "data": {
+   "conversation_id": "1"
+  },
+  "in_app": false,
+  "route": "chat",
+  "target_id": "1",
+  "type": "__unknown_type__"
+ },
+ {
+  "data": {
+   "post_id": "1"
+  },
+  "in_app": false,
+  "route": "post",
+  "target_id": "1",
+  "type": "__unknown_type__"
+ },
+ {
+  "data": {
+   "story_id": "1"
+  },
+  "in_app": false,
+  "route": "story",
+  "target_id": "1",
+  "type": "__unknown_type__"
+ },
+ {
+  "data": {
+   "classroom_id": "1"
+  },
+  "in_app": false,
+  "route": "classroom",
+  "target_id": "1",
+  "type": "__unknown_type__"
+ },
+ {
+  "data": {
+   "actor_username": "1"
+  },
+  "in_app": false,
+  "route": "profile",
+  "target_id": "1",
+  "type": "__unknown_type__"
+ },
+ {
+  "data": {},
+  "in_app": false,
+  "route": "notifications",
+  "target_id": "",
+  "type": "__unknown_type__"
+ }
+]

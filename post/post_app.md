@@ -5499,3 +5499,12 @@ endpoints `GET/PUT /post/close-friends/`, `POST/DELETE /post/close-friends/<user
 (`effective(user_id)`: every knob + A/B bucket), A/B sections `mix` / `diversity` / `author_cap` / `quality`,
 `manage.py feed_benchmark`, Celery `post.tasks.feed_daily_metrics`, staff-only `config` in `GET /post/<id>/why/`.
 Tests: `tests_feed_quality.py`, `tests_feed_gates.py`. No migrations. Details: `TASK_T1_678910_STATUS.md`.
+
+## Addendum - Post archive (feed card menu)
+`Post.is_archived` + `archived_at` (migration `0019_post_archive`). `POST /post/<id>/archive/` archives one of MY posts
+(idempotent; also unpins; takes it out of `posts_count` + `Hashtag.posts_count`; 400 `post_not_archivable` for a scheduled
+post; 403 for non-owner / copyright hold), `DELETE /post/<id>/archive/` restores it (counts come back, not re-pinned),
+`GET /post/archived/` lists my archived posts (newest archive first, paginated, same row shape as `/post/list/`; rows carry
+`is_archived`). Hidden from everyone except the owner/staff: home feed, explore, reels, hashtag page, profile grid
+(own too), saved, tagged tab, direct link / react / comment (`moderation_guard.post_hidden_for`), reposts of it
+(`_without_superseded_reposts`; new reposts of it 404), leaderboard, doubts. Tests: `tests_post_archive.py` (not run).

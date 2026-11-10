@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Copyright moderation</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1b1f24;--mut:#6b7380;--line:#e1e4e9;--acc:#2563eb;--ok:#15803d;--okb:#dcfce7;--warn:#a16207;--warnb:#fef3c7;--bad:#b91c1c;--badb:#fee2e2;--wait:#475569;--waitb:#e2e8f0;--sel:#eef4ff}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1318;--card:#171c23;--ink:#e6e9ee;--mut:#8b94a3;--line:#262d37;--acc:#6aa0ff;--ok:#4ade80;--okb:#12301d;--warn:#fbbf24;--warnb:#3a2d0b;--bad:#f87171;--badb:#3b1414;--wait:#a8b3c4;--waitb:#232b36;--sel:#18253a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+a{color:var(--acc)}button,input,select,textarea{font:inherit;color:inherit}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+.top h1{font-size:17px;margin:0;display:inline}.top .who{color:var(--mut);margin-left:10px;font-size:13px}
+.top-actions{display:flex;gap:14px;align-items:center;color:var(--mut);font-size:13px}
+main{padding:16px 20px 90px;max-width:1500px;margin:0 auto}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:12px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer;text-align:left}
+.stat:hover{border-color:var(--acc)}.stat b{display:block;font-size:24px;line-height:1.1}.stat span{color:var(--mut);font-size:12px}
+.stat.bad b{color:var(--bad)}.stat.warn b{color:var(--warn)}.stat.on{outline:2px solid var(--acc)}
+.panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:12px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px}
+.panel h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+.panel .r{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.filters input[type=search]{flex:1 1 280px;min-width:200px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+.filters select{padding:7px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+.tog{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--card);cursor:pointer;font-size:13px}.tog.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.tablewrap{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:auto}
+table{border-collapse:collapse;width:100%;min-width:980px}
+th{position:sticky;top:0;background:var(--card);text-align:left;font-size:12px;color:var(--mut);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tbody tr{cursor:pointer}tbody tr:hover{background:var(--sel)}tbody tr.active{background:var(--sel);box-shadow:inset 3px 0 0 var(--acc)}
+tbody tr.breached td:first-child+td{font-weight:600}
+.muted{color:var(--mut)}.sm{font-size:12px}.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.sla,.chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;white-space:nowrap;font-weight:600}
+.sla.ok{background:var(--okb);color:var(--ok)}.sla.soon{background:var(--warnb);color:var(--warn)}.sla.breached{background:var(--badb);color:var(--bad)}.sla.wait{background:var(--waitb);color:var(--wait)}
+.chip{background:var(--waitb);color:var(--wait);font-weight:500}.chip.high{background:var(--warnb);color:var(--warn)}.chip.urgent,.chip.bad{background:var(--badb);color:var(--bad)}.chip.pub{background:var(--okb);color:var(--ok)}
+.pager{display:flex;justify-content:space-between;align-items:center;padding:10px 4px;color:var(--mut)}
+.btn{padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);cursor:pointer}.btn:hover{border-color:var(--acc)}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}.btn.danger{border-color:var(--bad);color:var(--bad)}.btn[disabled]{opacity:.5;cursor:default}
+.bulk{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;background:var(--card);border:1px solid var(--acc);border-radius:12px;padding:10px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;box-shadow:0 8px 30px rgba(0,0,0,.25);z-index:8;max-width:96vw}
+.bulk input{padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);min-width:200px}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(640px,100%);background:var(--card);border-left:1px solid var(--line);box-shadow:-10px 0 40px rgba(0,0,0,.2);z-index:10;overflow:auto;padding:0 0 30px}
+.dhead{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px;z-index:2}
+.dhead h2{margin:0 0 4px;font-size:16px}.dsec{padding:12px 16px;border-bottom:1px solid var(--line)}
+.dsec h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:13px}.kv dt{color:var(--mut)}.kv dd{margin:0;word-break:break-word}
+.txt{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:4px 0;font-size:13px}
+.acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}textarea{width:100%;min-height:62px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);margin-top:8px}
+.tl{list-style:none;margin:0;padding:0}.tl li{padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px}.tl li:last-child{border:0}
+.prev img,.prev video{max-width:100%;max-height:260px;border-radius:8px;display:block;margin:4px 0}
+.err{color:var(--bad)}
+#toast{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:20;display:flex;flex-direction:column;gap:6px;align-items:center}
+.toast{background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:13px;max-width:90vw}.toast.bad{background:var(--bad);color:#fff}
+.empty{padding:40px;text-align:center;color:var(--mut)}
+kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
+</style>
+</head>
+<body>
+<header class="top">
+  <div><h1>Copyright moderation</h1><span class="who" id="who"></span></div>
+  <div class="top-actions">
+    <span class="sm"><kbd>/</kbd> search &middot; <kbd>j</kbd><kbd>k</kbd> move &middot; <kbd>Enter</kbd> open &middot; <kbd>Esc</kbd> close</span>
+    <label><input type="checkbox" id="auto" checked> auto-refresh</label>
+    <span id="updated"></span>
+    <a id="adminlink" href="#">Django admin</a>
+  </div>
+</header>
+<main>
+  <section class="stats" id="stats"></section>
+  <section class="panels" id="panels"></section>
+  <section class="filters" id="filters">
+    <input type="search" id="q" placeholder="Search name, e-mail, organisation, owner username, target id, caption, claim id..." autocomplete="off">
+    <select id="f-status"></select>
+    <select id="f-sla"><option value="">SLA: any</option><option value="breached">Overdue</option><option value="soon">Due soon</option></select>
+    <select id="f-priority"></select>
+    <select id="f-level"><option value="">Level: any</option><option value="1">Needs L1</option><option value="2">Needs L2</option><option value="3">Needs L3</option></select>
+    <select id="f-type"></select>
+    <select id="f-tier"></select>
+    <select id="f-source"></select>
+    <select id="f-sort"><option value="">Sort: default</option><option value="sla">Deadline (urgent first)</option><option value="priority">Priority</option><option value="newest">Newest</option><option value="oldest">Oldest</option></select>
+    <button class="tog" id="t-mine">Mine</button><button class="tog" id="t-unassigned">Unassigned</button><button class="tog" id="t-escalated">Escalated</button>
+    <button class="btn" id="reset">Reset</button>
+  </section>
+  <section class="tablewrap">
+    <table>
+      <thead><tr><th><input type="checkbox" id="all" title="select page"></th><th>Deadline</th><th>Claim</th><th>Status</th><th>Priority</th><th>Lvl</th><th>Reported content</th><th>Claimant</th><th>Owner</th><th>Reviewer</th><th>Filed</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>Nothing matches these filters.</div>
+  </section>
+  <div class="pager"><span id="count"></span><span><button class="btn" id="prev">&larr; Prev</button> <span id="pg"></span> <button class="btn" id="next">Next &rarr;</button></span></div>
+</main>
+<div class="bulk" id="bulk" hidden></div>
+<aside class="drawer" id="drawer" hidden></aside>
+<div id="toast"></div>
+{{ cfg|json_script:"cfg" }}
+{% verbatim %}
+<script>
+(function () {
+'use strict';
+const CFG = JSON.parse(document.getElementById('cfg').textContent);
+const $ = (s) => document.querySelector(s);
+
+// ---------- tiny DOM helper: everything user-supplied goes through textContent (no innerHTML anywhere) ----------
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const k in (attrs || {})) {
+    const v = attrs[k];
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat(Infinity)) { if (c === null || c === undefined || c === false) continue; n.append(c); }
+  return n;
+}
+const safeUrl = (u) => (/^(https?:\/\/|\/)/i.test(u || '') ? u : '');
+const link = (u, text) => { const s = safeUrl(u); return s ? el('a', { href: s, target: '_blank', rel: 'noopener noreferrer' }, text || s) : (text || u || '-'); };
+function dur(sec) { sec = Math.abs(sec); const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  return d > 0 ? d + 'd ' + h + 'h' : h > 0 ? h + 'h ' + m + 'm' : m + 'm'; }
+const ago = (iso) => { const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? 'just now' : dur(s) + ' ago'; };
+const when = (iso) => iso ? new Date(iso).toLocaleString() : '-';
+const label = (list, v) => { const x = list.find((p) => p[0] === v); return x ? x[1] : v; };
+
+function toast(msg, bad) { const t = el('div', { class: 'toast' + (bad ? ' bad' : '') }, msg); $('#toast').append(t); setTimeout(() => t.remove(), bad ? 6000 : 3000); }
+
+async function api(path, opts) {
+  const o = Object.assign({ credentials: 'same-origin', headers: {} }, opts || {});
+  o.headers['X-CSRFToken'] = CFG.csrf;
+  if (o.body) o.headers['Content-Type'] = 'application/json';
+  const r = await fetch(CFG.base + path, o);
+  const ct = r.headers.get('content-type') || '';
+  if (!ct.includes('json')) throw new Error('Session expired - reload the page and log in again.');
+  const j = await r.json();
+  if (!r.ok || j.status === false) throw new Error(j.message || 'Request failed');
+  return j;
+}
+
+// ---------- state ----------
+const DEFAULTS = { q: '', status: 'open', sla: '', priority: '', level: '', type: '', tier: '', source: '', sort: '', mine: '', unassigned: '', escalated: '', page: 1 };
+let S = Object.assign({}, DEFAULTS);
+let data = { results: [], count: 0, page: 1, pages: 1 };
+let sel = new Set(), activeId = null, drawerId = null, seq = 0;
+
+// ---------- filters ----------
+function fillSelect(id, first, opts) { const s = $(id); s.append(el('option', { value: '' }, first)); opts.forEach(([v, l]) => s.append(el('option', { value: v }, l))); }
+(function initFilters() {
+  const st = $('#f-status');
+  [['open', 'Open (all)'], ['review', 'Waiting for review']].concat(CFG.statuses.map((x) => x)).concat([['closed', 'Closed (all)'], ['all', 'Everything']])
+    .forEach(([v, l]) => st.append(el('option', { value: v }, l)));
+  fillSelect('#f-priority', 'Priority: any', CFG.priorities);
+  fillSelect('#f-type', 'Type: any', CFG.types);
+  fillSelect('#f-tier', 'Claimant: any', CFG.tiers.map((t) => [t, t]));
+  fillSelect('#f-source', 'Source: any', CFG.sources);
+  $('#who').textContent = CFG.user + ' \u00b7 level L' + CFG.level;
+  $('#adminlink').href = CFG.admin_home || '#';
+})();
+const BIND = { q: '#q', status: '#f-status', sla: '#f-sla', priority: '#f-priority', level: '#f-level', type: '#f-type', tier: '#f-tier', source: '#f-source', sort: '#f-sort' };
+const TOG = { mine: '#t-mine', unassigned: '#t-unassigned', escalated: '#t-escalated' };
+function syncControls() {
+  for (const k in BIND) $(BIND[k]).value = S[k];
+  for (const k in TOG) $(TOG[k]).classList.toggle('on', S[k] === '1');
+}
+function setFilter(patch) { Object.assign(S, patch, { page: patch.page || 1 }); sel.clear(); syncControls(); load(); }
+let qTimer = null;
+$('#q').addEventListener('input', (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => setFilter({ q: e.target.value.trim() }), 300); });
+for (const k in BIND) if (k !== 'q') $(BIND[k]).addEventListener('change', (e) => setFilter({ [k]: e.target.value }));
+for (const k in TOG) $(TOG[k]).addEventListener('click', () => setFilter({ [k]: S[k] === '1' ? '' : '1' }));
+$('#reset').addEventListener('click', () => setFilter(Object.assign({}, DEFAULTS)));
+$('#prev').addEventListener('click', () => { if (S.page > 1) { S.page--; load(); } });
+$('#next').addEventListener('click', () => { if (S.page < data.pages) { S.page++; load(); } });
+
+// ---------- stats ----------
+function statCard(num, text, patch, cls) {
+  const on = Object.keys(patch).every((k) => S[k] === patch[k]);
+  return el('button', { class: 'stat ' + (cls || '') + (on ? ' on' : ''), onclick: () => setFilter(Object.assign({}, DEFAULTS, patch)) }, el('b', null, String(num)), el('span', null, text));
+}
+function renderStats(st) {
+  if (!st) return;
+  const box = $('#stats'); box.replaceChildren(
+    statCard(st.open, 'Open claims', { status: 'open' }),
+    statCard(st.breached, 'Overdue (SLA)', { status: 'review', sla: 'breached' }, st.breached ? 'bad' : ''),
+    statCard(st.soon, 'Due in ' + CFG.soon_hours + 'h', { status: 'review', sla: 'soon' }, st.soon ? 'warn' : ''),
+    statCard(st.unassigned, 'Unassigned', { status: 'review', unassigned: '1' }),
+    statCard(st.mine, 'Assigned to me', { status: 'open', mine: '1' }),
+    statCard(st.escalated, 'Escalated', { status: 'open', escalated: '1' }, st.escalated ? 'warn' : ''),
+    statCard(st.needs_l2, 'Needs L2', { status: 'open', level: '2' }),
+    statCard(st.needs_info, 'Waiting for claimant', { status: 'needs_info' }),
+    statCard(st.countered, 'Counter-notice running', { status: 'countered' }));
+  const p = [];
+  const perf = st.perf || {};
+  p.push(el('div', { class: 'panel' }, el('h3', null, 'Last 30 days'),
+    row('Decided', perf.decided_30d), row('Median time to decision', perf.median_hours === null || perf.median_hours === undefined ? '-' : perf.median_hours + ' h'),
+    row('Decided within SLA', perf.within_sla_pct === null || perf.within_sla_pct === undefined ? '-' : perf.within_sla_pct + '%')));
+  p.push(el('div', { class: 'panel' }, el('h3', null, 'Workload (open claims)'),
+    (st.workload || []).length ? st.workload.map((w) => row(w.who, w.n)) : el('div', { class: 'muted' }, 'Nothing open')));
+  if (st.orders) {
+    const lines = st.orders.map((o) => el('div', { class: 'r' }, link(o.url, o.reference + ' \u00b7 ' + o.authority.slice(0, 28)),
+      el('span', { class: 'sla ' + (o.seconds_left < 0 ? 'breached' : o.seconds_left < 12 * 3600 ? 'soon' : 'ok') }, o.seconds_left < 0 ? dur(o.seconds_left) + ' overdue' : dur(o.seconds_left) + ' left')));
+    p.push(el('div', { class: 'panel' }, el('h3', null, 'Court / government orders (36h rule)'), lines.length ? lines : el('div', { class: 'muted' }, 'No open orders'),
+      el('div', { class: 'r sm' }, el('span', null, 'Appeals waiting'), link(st.appeals_url, String(st.appeals_open)))));
+  }
+  $('#panels').replaceChildren(...p);
+}
+function row(k, v) { return el('div', { class: 'r' }, el('span', { class: 'muted' }, k), el('b', null, String(v === undefined || v === null ? '-' : v))); }
+
+// ---------- table ----------
+function slaChip(s) {
+  if (!s) return el('span', { class: 'muted' }, '-');
+  const left = Math.round((new Date(s.due_at) - Date.now()) / 1000);
+  let cls = 'sla ', txt;
+  if (s.kind === 'review') {
+    if (left < 0) { cls += 'breached'; txt = dur(left) + ' overdue'; }
+    else if (left <= CFG.soon_hours * 3600) { cls += 'soon'; txt = dur(left) + ' left'; }
+    else { cls += 'ok'; txt = dur(left) + ' left'; }
+  } else { cls += 'wait'; txt = (s.kind === 'claimant_reply' ? 'claimant: ' : 'auto-restore: ') + (left < 0 ? 'due now' : dur(left)); }
+  if (s.escalated) txt += ' \u2691';
+  return el('span', { class: cls, title: 'Deadline ' + when(s.due_at) + (s.escalated ? ' - escalated' : '') }, txt);
+}
+function chipFor(c) { return el('span', { class: 'chip ' + (c.priority === 'normal' ? '' : c.priority) }, c.priority); }
+function renderRows() {
+  const tb = $('#rows'); tb.replaceChildren();
+  data.results.forEach((c) => {
+    const tr = el('tr', { class: (c.id === activeId ? 'active ' : '') + (c.sla && c.sla.state === 'breached' ? 'breached' : ''), 'data-id': c.id, onclick: () => openClaim(c.id) },
+      el('td', { onclick: (e) => e.stopPropagation() }, el('input', { type: 'checkbox', checked: sel.has(c.id), onchange: (e) => { e.target.checked ? sel.add(c.id) : sel.delete(c.id); renderBulk(); } })),
+      el('td', null, slaChip(c.sla)),
+      el('td', { class: 'mono' }, c.short_id, c.bad_faith ? el('span', { class: 'chip bad', title: 'found to be bad faith' }, ' bad faith') : null, c.held ? el('span', { class: 'chip', title: 'legal hold' }, ' hold') : null),
+      el('td', null, c.status_label),
+      el('td', null, chipFor(c)),
+      el('td', null, 'L' + c.level),
+      el('td', null, el('div', null, c.target_label), el('div', { class: 'muted sm' }, c.snapshot || c.target_id)),
+      el('td', null, el('div', null, c.claimant_name), el('div', { class: 'muted sm' }, [c.organisation, c.tier && c.tier !== 'standard' ? c.tier : ''].filter(Boolean).join(' \u00b7 '))),
+      el('td', null, c.owner || '-'),
+      el('td', null, c.reviewer || el('span', { class: 'muted' }, 'unassigned')),
+      el('td', { class: 'muted sm', title: when(c.created_at) }, ago(c.created_at)));
+    tb.append(tr);
+  });
+  $('#empty').hidden = data.results.length > 0;
+  $('#count').textContent = data.count + ' claim' + (data.count === 1 ? '' : 's');
+  $('#pg').textContent = 'page ' + data.page + ' / ' + data.pages;
+  $('#prev').disabled = data.page <= 1; $('#next').disabled = data.page >= data.pages;
+  $('#all').checked = data.results.length > 0 && data.results.every((c) => sel.has(c.id));
+  renderBulk();
+}
+$('#all').addEventListener('change', (e) => { data.results.forEach((c) => e.target.checked ? sel.add(c.id) : sel.delete(c.id)); renderRows(); });
+
+async function load(quiet) {
+  const my = ++seq;
+  const qs = new URLSearchParams();
+  for (const k in S) if (S[k] !== '' && S[k] !== null) qs.set(k, S[k]);
+  try {
+    const j = await api('api/queue/?' + qs.toString());
+    if (my !== seq) return;
+    data = j; renderStats(j.stats); renderRows();
+    $('#updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) { if (!quiet) toast(e.message, true); else $('#updated').textContent = 'refresh failed'; }
+}
+
+// ---------- bulk ----------
+function renderBulk() {
+  const b = $('#bulk');
+  if (!sel.size) { b.hidden = true; return; }
+  b.hidden = false;
+  const note = el('input', { type: 'text', placeholder: 'Reason / message (needed for ask-info and reject)', id: 'bulknote' });
+  const run = (action, text, danger) => el('button', { class: 'btn' + (danger ? ' danger' : ''), onclick: () => bulk(action, text, danger) }, text);
+  b.replaceChildren(el('b', null, sel.size + ' selected'), note, run('take', 'Take for review'), run('info', 'Ask for info'), run('reject', 'Reject', true),
+    CFG.level >= 2 ? run('reject_bad_faith', 'Bad faith', true) : null, CFG.level >= 2 ? run('uphold', 'Uphold + strike', true) : null,
+    el('button', { class: 'btn', onclick: () => { sel.clear(); renderRows(); } }, 'Clear'));
+}
+async function bulk(action, text, danger) {
+  if (danger && !confirm(text + ' for ' + sel.size + ' claim(s)?')) return;
+  try {
+    const j = await api('api/bulk/', { method: 'POST', body: JSON.stringify({ action, ids: [...sel], note: ($('#bulknote') || {}).value || '' }) });
+    toast(text + ': ' + j.done + ' done' + (j.errors.length ? ', ' + j.errors.length + ' failed' : ''), j.errors.length > 0);
+    j.errors.slice(0, 3).forEach((m) => toast(m, true));
+    sel.clear(); load(true); if (drawerId) openClaim(drawerId);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- detail drawer ----------
+function kv(pairs) { const d = el('dl', { class: 'kv' }); pairs.forEach(([k, v]) => { if (v === null || v === undefined || v === '' || v === false) return; d.append(el('dt', null, k), el('dd', null, v)); }); return d; }
+const sec = (title, ...kids) => el('div', { class: 'dsec' }, el('h4', null, title), ...kids);
+const txt = (s) => s ? el('div', { class: 'txt' }, s) : null;
+function media(item) {
+  const u = safeUrl(item.value);
+  if (item.kind === 'text') return el('div', { class: 'txt' }, item.value);
+  if (!u) return el('div', { class: 'muted' }, '(file)');
+  if (item.kind === 'image') return el('a', { href: u, target: '_blank', rel: 'noopener' }, el('img', { src: u, alt: '' }));
+  if (item.kind === 'video') return el('video', { src: u, controls: true, preload: 'none' });
+  return link(u, 'open file');
+}
+function files(list) { return list.length ? list.map((f) => el('div', null, link(f.url, f.name), el('span', { class: 'muted sm' }, ' ' + f.kb + ' KB \u00b7 ' + f.kind))) : el('div', { class: 'muted' }, 'none'); }
+
+function renderDrawer(c) {
+  const d = $('#drawer'); d.hidden = false;
+  const note = el('textarea', { id: 'dnote', placeholder: 'Reason / message (needed for ask-info, reject, restore, hold). Optional for uphold.' });
+  const bar = el('div', { class: 'acts' });
+  c.actions.forEach((a) => bar.append(el('button', { class: 'btn' + (a.danger ? ' danger' : (a.key === 'take' ? ' pri' : '')), onclick: () => act(c.id, a, note) }, a.label)));
+  const ph = c.claimant_history;
+  d.replaceChildren(
+    el('div', { class: 'dhead' },
+      el('div', { style: 'float:right' }, el('button', { class: 'btn', onclick: closeDrawer }, 'Close'), ' ', link(CFG.claim_admin + c.id + '/change/', 'Django admin')),
+      el('h2', null, 'Claim ' + c.short_id), el('div', null, slaChip(c.sla), ' ', el('span', { class: 'chip' }, c.status_label), ' ', chipFor(c), ' ', el('span', { class: 'chip' }, 'L' + c.level),
+        c.bad_faith ? el('span', { class: 'chip bad' }, ' bad faith') : null, c.held ? el('span', { class: 'chip' }, ' legal hold') : null),
+      note, bar),
+    sec('Claim', kv([['Id', el('span', { class: 'mono' }, c.id)], ['Type', c.target_label], ['Target id', c.target_id], ['Filed', when(c.created_at)], ['Source', label(CFG.sources, c.source)],
+      ['Reviewer', c.reviewer || 'unassigned'], ['Escalated', c.escalated_at ? when(c.escalated_at) : ''], ['Decided', c.decided_at ? when(c.decided_at) : ''],
+      ['Decision note', c.decision_note], ['Info requested', c.needs_info_message], ['Duplicate of', c.duplicate_of],
+      ['Takedown', c.takedown ? c.takedown.state + (c.takedown.auto ? ' (automatic hold)' : '') : '']])),
+    sec('Claimant', c.pii_erased ? el('div', { class: 'muted' }, 'Personal details erased (DPDP retention period over).') : null,
+      kv([['Name', c.claimant_name], ['E-mail', c.pii_erased ? '' : c.claimant_email], ['Organisation', c.organisation], ['Acts as', c.is_rights_owner ? 'rights owner' : 'authorised agent'],
+        ['Tier', c.tier || '-'], ['Signature', c.pii_erased ? '' : c.signature], ['Statements', (c.good_faith ? 'good faith \u2713 ' : '') + (c.accuracy ? 'accuracy \u2713' : '')],
+        ['History', ph ? ph.total + ' filed \u00b7 ' + ph.upheld + ' upheld \u00b7 ' + ph.rejected + ' rejected \u00b7 ' + ph.withdrawn + ' withdrawn \u00b7 ' + ph.bad_faith_365d + ' bad-faith (365d)' : 'no account']])),
+    sec('Work claimed', txt(c.work_description), c.original_work_url ? el('div', null, 'Original: ', link(c.original_work_url)) : null, txt(c.infringement_details)),
+    sec('Reported content', el('div', { class: 'prev' }, c.preview.exists ? [c.preview.hidden ? el('div', { class: 'muted sm' }, 'Hidden now: ' + c.preview.hidden + (c.preview.quarantined ? ' (files quarantined)' : '')) : null, ...c.preview.items.map(media)]
+      : el('div', { class: 'muted' }, 'The content no longer exists - see the saved copy.')),
+      c.owner_info ? kv([['Owner', c.owner_info.username], ['Standing', c.owner_info.level + ' \u00b7 ' + c.owner_info.active_strikes + ' active strike(s)'], ['Other claims', c.owner_info.other_claims]]) : null,
+      el('div', { class: 'muted sm', style: 'margin-top:6px' }, 'Saved copy (taken when the notice arrived):'), files(c.snapshot_files)),
+    c.counter_notice ? sec('Counter-notice', kv([['Status', c.counter_notice.status], ['Filed', when(c.counter_notice.filed_at)], ['Restores on', when(c.counter_notice.restore_after)], ['Court action', c.counter_notice.court_note]]), txt(c.counter_notice.explanation)) : null,
+    sec('Claimant proof', files(c.proof)),
+    c.related.length ? sec('Other claims on the same content', c.related.map((r) => el('div', null, el('a', { href: '#', onclick: (e) => { e.preventDefault(); openClaim(r.id); } }, r.short_id), ' \u00b7 ' + r.status))) : null,
+    sec('Timeline', el('ul', { class: 'tl' }, c.timeline.length ? c.timeline.map((t) => el('li', null, el('b', null, t.action.replace(/_/g, ' ')), ' \u00b7 ', t.actor, el('span', { class: 'muted' }, ' \u00b7 ' + when(t.at)), t.note ? el('div', { class: 'muted' }, t.note) : null)) : el('li', { class: 'muted' }, 'No events'))));
+}
+async function openClaim(id) {
+  activeId = id; drawerId = id;
+  document.querySelectorAll('#rows tr').forEach((r) => r.classList.toggle('active', r.dataset.id === id));
+  try { const j = await api('api/claim/' + id + '/'); if (drawerId === id) renderDrawer(j.data); } catch (e) { toast(e.message, true); }
+}
+function closeDrawer() { $('#drawer').hidden = true; drawerId = null; activeId = null; document.querySelectorAll('#rows tr.active').forEach((r) => r.classList.remove('active')); }
+async function act(id, a, noteEl) {
+  const note = noteEl.value.trim();
+  if (a.note && !note && a.key !== 'uphold') { toast('Write a reason first.', true); noteEl.focus(); return; }
+  if (a.confirm && !confirm(a.confirm)) return;
+  try {
+    const j = await api('api/claim/' + id + '/action/', { method: 'POST', body: JSON.stringify({ action: a.key, note }) });
+    toast(a.label + ' - done'); renderDrawer(j.data); load(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- keyboard ----------
+document.addEventListener('keydown', (e) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || ''));
+  if (e.key === 'Escape') { if (typing) e.target.blur(); else closeDrawer(); return; }
+  if (typing || e.ctrlKey || e.metaKey) return;
+  if (e.key === '/') { e.preventDefault(); $('#q').focus(); return; }
+  if (e.key === 'j' || e.key === 'k') {
+    const ids = data.results.map((c) => c.id); if (!ids.length) return;
+    let i = ids.indexOf(activeId); i = e.key === 'j' ? Math.min(ids.length - 1, i + 1) : Math.max(0, i < 0 ? 0 : i - 1);
+    activeId = ids[i]; renderRows(); const r = document.querySelector('#rows tr.active'); if (r) r.scrollIntoView({ block: 'nearest' });
+  }
+  if (e.key === 'Enter' && activeId) openClaim(activeId);
+});
+
+// ---------- refresh ----------
+setInterval(() => { if ($('#auto').checked && document.visibilityState === 'visible') load(true); }, 60000);
+setInterval(() => { if (data.results.length) renderRows(); }, 30000);    // keeps the countdowns moving between refreshes
+syncControls(); load();
+})();
+</script>
+{% endverbatim %}
+</body>
+</html>

@@ -18,6 +18,7 @@ core/classroom_chat_bridge.py already calls in (tuitionclass/core -> message),
 just one hop shorter — tuitionclass calling message directly for this feature
 only, since it doesn't need the group-chat bridge in between.
 """
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import Count, Avg
@@ -49,6 +50,8 @@ from common.parent_invite_links import (
 
 User = __import__("django.contrib.auth", fromlist=["get_user_model"]).get_user_model()
 
+
+logger = logging.getLogger(__name__)
 
 def _get_managed_classroom_or_404(request, classroom_id):
     classroom = Classroom.objects.filter(id=classroom_id).first()
@@ -137,7 +140,7 @@ class ClassroomParentCodeGenerateView(APIView):
                 ),
             )
         except Exception:  # matches this app's own "never let a notify failure break the real action" rule
-            pass
+            logger.exception("parent access notify failed")
 
         return Response(
             {
@@ -225,7 +228,7 @@ class ReportCardViewSet(viewsets.ModelViewSet):
         try:
             self._notify_report_card_published(report_card)
         except Exception:
-            pass
+            logger.exception("report card published push failed")
 
         serializer = self.get_serializer(report_card)
         return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
@@ -253,7 +256,7 @@ class ReportCardViewSet(viewsets.ModelViewSet):
         # post-Task-12. No category filter: the unified model has no
         # homework/other distinction, so every assignment on this
         # classroom counts.
-        from assigments.models import assigmentsSubmission as UnifiedSubmission
+        from assignments.models import assigmentsSubmission as UnifiedSubmission
 
         from .bridge import get_assigments_submissions
 
@@ -378,7 +381,7 @@ class ParentQueryReplyView(APIView):
                     data={"type": "parent_query_reply", "query_id": str(query.id)},
                 )
         except Exception:
-            pass
+            logger.exception("parent query reply push failed")
 
         return Response({"detail": "Reply sent", "status": query.status})
 

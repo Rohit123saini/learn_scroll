@@ -87,14 +87,19 @@ def get(user_id, category: Optional[str], rec_ratio: float, salt: int = 0) -> Op
     """-> {"pools": {src: [UUID]}, "meta": {...}} or None."""
     if not is_enabled():
         return None
+    from . import feed_stats  # H2: opt-in hit/miss counters (no-op unless FEED_LOADTEST_STATS)
+
     try:
         raw = cache.get(_key(user_id, category, rec_ratio, salt))
         if not raw:
+            feed_stats.miss("cand")
             return None
         data = json.loads(raw)
         pools = {src: [uuid.UUID(x) for x in data["pools"].get(src, [])] for src in SOURCES}
+        feed_stats.hit("cand")
         return {"pools": pools, "meta": dict(data.get("meta") or {})}
     except Exception:
+        feed_stats.miss("cand")
         logger.warning("feed candidate cache read failed", exc_info=True)
         return None
 

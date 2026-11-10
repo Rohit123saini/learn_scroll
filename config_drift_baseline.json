@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "fingerprints": [
+    "11733810c983",
+    "4f0ec59331f5",
+    "7a279d98001d",
+    "7ed498ccc7f8",
+    "7ee2b5e114ed",
+    "a67166dd4173"
+  ],
+  "notes": {
+    "11733810c983": "stale_comment_path: assignments/tests_advanced.py — path:assigments/tests.py",
+    "4f0ec59331f5": "stale_comment_path: assignments/question_grading.py — path:testseries/grading.py",
+    "7a279d98001d": "stale_comment_path: LearnScroll/ws_auth.py — path:tuitionclass/ws_auth.py",
+    "7ed498ccc7f8": "stale_comment_path: message/routing.py — path:chat/routing.py",
+    "7ee2b5e114ed": "stale_comment_path: user_profile/tests_fraud.py — path:tests/test_fraud.py",
+    "a67166dd4173": "stale_comment_path: LearnScroll/ws_auth.py — path:message/Middleware.py"
+  }
+}

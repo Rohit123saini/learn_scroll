@@ -11,3 +11,6 @@ class UserProfileConfig(AppConfig):
         # Auto-moderation receivers (flag-only review queue) — see automod.py.
         from . import automod
         automod.connect()
+        # S12 - a new classroom takes its teacher's attendance defaults.
+        from . import role_settings
+        role_settings.connect()

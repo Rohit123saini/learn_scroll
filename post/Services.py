@@ -236,7 +236,52 @@ def download_storage_file_to_temp(file_field, suffix=""):
     return tmp.name
 
 
+# T6 - poster-frame offsets tried in order: 1 s (usually past a black first frame), then 0.5 s, then frame 0.
+# A video shorter than 1 s (or with a late first keyframe) makes `-ss 1` write NOTHING with exit code 0, so the old
+# single attempt left such posts without any thumbnail.
+THUMBNAIL_FALLBACK_OFFSETS = ("00:00:00.5", "00:00:00")
+
+
 def generate_video_thumbnail_file(video_path, time_offset="00:00:01", timeout=30):
+    """T6 - poster frame with fallbacks: tries `time_offset`, then 0.5 s, then the very first frame.
+    Returns the local JPEG path or None (every attempt failed). Same contract as `_thumbnail_at`."""
+    if shutil.which("ffmpeg") is None:
+        logger.error(
+            "ffmpeg binary not found on PATH — cannot generate video "
+            "thumbnails. Install ffmpeg in the app image/container."
+        )
+        return None
+    offsets = [time_offset]
+    offsets += [o for o in THUMBNAIL_FALLBACK_OFFSETS if o != time_offset]
+    for offset in offsets:
+        path = _thumbnail_at(video_path, offset, timeout)
+        if path is not None:
+            return path
+        logger.info("thumbnail at %s failed for %s, trying the next offset", offset, video_path)
+    return None
+
+
+def ensure_video_thumbnail(media):
+    """T6 - self-healing: a READY video row with no poster frame queues generation (at most once per 10 minutes per row,
+    so a feed full of such rows cannot flood the broker). Never raises, never blocks; the poster shows up on a later
+    request. Returns True when a task was queued."""
+    try:
+        if getattr(media, "media_type", None) != "video" or getattr(media, "thumbnail", None) or not getattr(media, "file", None):
+            return False
+        from django.core.cache import cache
+
+        if not cache.add(f"vthumb:{media.pk}", 1, 600):
+            return False
+        from .tasks import generate_video_thumbnail
+
+        generate_video_thumbnail.delay(str(media.pk))
+        return True
+    except Exception:
+        logger.warning("ensure_video_thumbnail: could not queue for %s", getattr(media, "pk", "?"), exc_info=True)
+        return False
+
+
+def _thumbnail_at(video_path, time_offset="00:00:01", timeout=30):
     """Run ffmpeg against a LOCAL video file path (already downloaded via
     `download_storage_file_to_temp` above — ffmpeg has no concept of S3)
     and return the local path to a generated JPEG thumbnail, or `None` if
@@ -248,17 +293,6 @@ def generate_video_thumbnail_file(video_path, time_offset="00:00:01", timeout=30
     Caller owns the returned path and MUST delete it once done, same as
     `download_storage_file_to_temp`.
     """
-    if shutil.which("ffmpeg") is None:
-        # Infra problem (ffmpeg not installed in the app image/container),
-        # not a per-file problem — log once per call so it's loud in
-        # aggregated logs, but don't raise: one video with no thumbnail
-        # yet is a much better failure mode than crashing the upload.
-        logger.error(
-            "ffmpeg binary not found on PATH — cannot generate video "
-            "thumbnails. Install ffmpeg in the app image/container."
-        )
-        return None
-
     thumb_fd, thumb_path = tempfile.mkstemp(suffix=".jpg")
     os.close(thumb_fd)  # ffmpeg writes the actual bytes; we only needed the path
 
@@ -465,6 +499,20 @@ def blurhash_for_image(img):
     sample.thumbnail((_BLURHASH_SAMPLE_SIZE, _BLURHASH_SAMPLE_SIZE), getattr(Image, "Resampling", Image).BILINEAR)
     components = (3, 4) if sample.height > sample.width else (4, 3)
     return encode_blurhash(list(sample.getdata()), sample.width, sample.height, *components)
+
+
+def blurhash_for_file(local_path):
+    """P-E2: BlurHash of the image file at `local_path` (a video's poster frame), or None when it cannot be read.
+    Never raises: a missing BlurHash only means the app draws the plain poster / black until the first frame."""
+    try:
+        from PIL import Image
+
+        with Image.open(local_path) as img:
+            img.load()
+            return blurhash_for_image(img)
+    except Exception:
+        logger.warning("blurhash_for_file: could not encode %s", local_path, exc_info=True)
+        return None
 
 
 def build_image_variants(local_path):
@@ -854,6 +902,8 @@ def notify_post_answered(post, answer):
     new PostAnswer is saved. Reuses core's existing QUERY_ANSWERED notif
     type (already used by the message-app "Doubt Queue" group feature)
     rather than adding a near-duplicate new one."""
+    from .doubts import answer_preview_text as _answer_preview_text
+
     if post.user_id == answer.user_id:
         return  # don't notify yourself for answering your own doubt
     if _Notification is None:
@@ -865,7 +915,7 @@ def notify_post_answered(post, answer):
         post.user,
         _Notification.NotifType.QUERY_ANSWERED,
         f"{actor_name} answered your doubt",
-        (answer.content or "")[:200],
+        _answer_preview_text(answer),
         data={
             "post_id": str(post.id), "answer_id": str(answer.id),
             "media_url": media_url, "media_type": media_type,
@@ -963,6 +1013,8 @@ def share_post_to_conversation(post, sender, conversation_id):
             "shared_post_id": str(post.id),
             "shared_post_author": post.user.username,
             "shared_post_title": post.title,
+            # the chat card opens a video in Reels and anything else in the single-post page
+            "shared_post_type": post.post_type,
         },
     )
 
@@ -992,7 +1044,8 @@ def exclude_hidden_and_muted(qs, user):
     from .models import MutedAccount, PostHide
 
     hidden = PostHide.objects.filter(user=user).values('post_id')
-    muted = MutedAccount.objects.filter(user=user).values('muted_user_id')
+    # P8: only accounts muted for POSTS (a stories-only mute must not hide their posts).
+    muted = MutedAccount.objects.filter(user=user, mute_posts=True).values('muted_user_id')
     # Block, EITHER direction, as sub-selects (no extra round trip). This
     # runs on every request — including when a frozen feed snapshot is
     # re-hydrated — so a block takes effect on the very next page instead of
@@ -1342,3 +1395,582 @@ def fill_media_metadata(media, *, allow_download=True, raise_errors=False):
     for key, value in updates.items():
         setattr(media, key, value)
     return updates
+
+
+# ---------------------------------------------------------------------------
+# V1 — "feed me video nahi chal rahi": make every uploaded video playable.
+#
+# Server `/media/...mp4` was already being served fine (200 + Range), so the
+# usual culprit is the FILE itself: a phone camera records H.265/HEVC (or
+# 10-bit / HDR), which many Android phones can't decode, or the MP4's `moov`
+# atom sits at the END of the file so streaming can't start until the whole
+# file is downloaded. This block probes an uploaded video and, if needed,
+# re-encodes / re-muxes it to the one format every phone plays:
+#
+#     MP4 container . H.264 (yuv420p) . AAC audio . `+faststart`
+#
+# Same split as the rest of this module: pure planning code (no ffmpeg, no DB
+# -> `plan_video_processing`, `mp4_moov_before_mdat`) and thin ffmpeg wrappers
+# (`remux_video_faststart`, `transcode_video_h264`) that work on LOCAL paths
+# only. Storage/DB glue lives in `post.tasks.process_video_for_streaming`.
+#
+# Tunables (all optional, read with getattr so settings.py needs no change):
+#   VIDEO_TRANSCODE_ENABLED          default True
+#   VIDEO_TRANSCODE_MAX_SIDE         default 1280  (longer side of the output)
+#   VIDEO_TRANSCODE_CRF              default 23
+#   VIDEO_TRANSCODE_PRESET           default "veryfast"
+#   VIDEO_TRANSCODE_TIMEOUT_SECONDS  default 1800
+# ---------------------------------------------------------------------------
+VIDEO_PLAYABLE_CODECS = ("h264",)
+VIDEO_PLAYABLE_PIX_FMTS = ("yuv420p", "yuvj420p")
+VIDEO_PLAYABLE_AUDIO_CODECS = ("aac", "mp3")
+# Anything with a longer side than this is re-encoded even if it is H.264 —
+# 4K H.264 stutters (or fails) on low/mid-range phones.
+VIDEO_MAX_PLAYABLE_SIDE = 1920
+
+
+def _video_setting(name, default):
+    return getattr(django_settings, name, default)
+
+
+def video_transcode_enabled():
+    return bool(_video_setting("VIDEO_TRANSCODE_ENABLED", True))
+
+
+def mp4_moov_before_mdat(path):
+    """True if the MP4/MOV `moov` atom comes BEFORE `mdat` (i.e. the file is
+    "faststart" and can begin playing while still downloading), False if it
+    comes after, None if `path` isn't a readable ISO-BMFF file / unknown.
+    Walks only the top-level box headers, so it reads a few bytes per box."""
+    try:
+        total = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            pos = 0
+            while pos < total:
+                fh.seek(pos)
+                head = fh.read(16)
+                if len(head) < 8:
+                    return None
+                size = int.from_bytes(head[0:4], "big")
+                kind = head[4:8]
+                header_len = 8
+                if size == 1:  # 64-bit "largesize"
+                    if len(head) < 16:
+                        return None
+                    size = int.from_bytes(head[8:16], "big")
+                    header_len = 16
+                elif size == 0:  # box runs to end of file
+                    size = total - pos
+                if size < header_len:
+                    return None
+                if kind == b"moov":
+                    return True
+                if kind == b"mdat":
+                    return False
+                pos += size
+    except OSError:
+        return None
+    return None
+
+
+def _first_stream(info, codec_type):
+    for stream in (info or {}).get("streams") or []:
+        if stream.get("codec_type") == codec_type and not (stream.get("disposition") or {}).get("attached_pic"):
+            return stream
+    return None
+
+
+def plan_video_processing(info, *, ext="", moov_first=None):
+    """Decide what a video needs, from ffprobe's JSON (`info`).
+
+    Returns {"action": ..., "reasons": [...], "audio_copy": bool} where action is
+      "none"       already plays everywhere -> nothing to do
+      "remux"      streams are fine; only the container / moov position / odd
+                   audio needs fixing (cheap, no video re-encode)
+      "transcode"  re-encode to H.264/AAC (HEVC, 10-bit, 4K, ...)
+      "skip"       no usable video stream (corrupt / not a video)
+    """
+    video = _first_stream(info, "video")
+    if video is None:
+        return {"action": "skip", "reasons": ["no video stream"], "audio_copy": True}
+
+    audio = _first_stream(info, "audio")
+    reasons = []
+    vcodec = (video.get("codec_name") or "").lower()
+    pix_fmt = (video.get("pix_fmt") or "").lower()
+
+    transcode = False
+    if vcodec not in VIDEO_PLAYABLE_CODECS:
+        transcode = True
+        reasons.append(f"video codec {vcodec or 'unknown'}")
+    if pix_fmt and pix_fmt not in VIDEO_PLAYABLE_PIX_FMTS:
+        transcode = True
+        reasons.append(f"pixel format {pix_fmt}")
+    width, height = _positive_int(video.get("width")), _positive_int(video.get("height"))
+    if width and height and max(width, height) > VIDEO_MAX_PLAYABLE_SIDE:
+        transcode = True
+        reasons.append(f"{width}x{height} is larger than {VIDEO_MAX_PLAYABLE_SIDE}px")
+
+    audio_copy = True
+    if audio is not None:
+        acodec = (audio.get("codec_name") or "").lower()
+        if acodec not in VIDEO_PLAYABLE_AUDIO_CODECS:
+            audio_copy = False
+            reasons.append(f"audio codec {acodec or 'unknown'}")
+
+    if transcode:
+        return {"action": "transcode", "reasons": reasons, "audio_copy": False}
+
+    ext = (ext or "").lower().lstrip(".")
+    if ext != "mp4":
+        reasons.append(f"container .{ext or '?'} -> mp4")
+    if moov_first is False:
+        reasons.append("moov atom at end of file")
+    if reasons:
+        return {"action": "remux", "reasons": reasons, "audio_copy": audio_copy}
+    return {"action": "none", "reasons": [], "audio_copy": True}
+
+
+def _run_ffmpeg(cmd, out_path, timeout, label):
+    """Run an ffmpeg command writing `out_path`. True on success; every failure
+    is logged (so it reaches Sentry) and the partial output removed."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg %s timed out (%ss): %s", label, timeout, cmd[-1])
+        _unlink_quiet(out_path)
+        return False
+    except OSError as exc:
+        logger.exception("ffmpeg %s failed to start: %s", label, exc)
+        _unlink_quiet(out_path)
+        return False
+    if result.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        logger.error(
+            "ffmpeg %s failed (rc=%s): %s", label, result.returncode,
+            result.stderr.decode(errors="replace")[-600:] if result.stderr else "",
+        )
+        _unlink_quiet(out_path)
+        return False
+    return True
+
+
+def _unlink_quiet(path):
+    try:
+        if path and os.path.exists(path):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def _new_mp4_temp_path():
+    fd, path = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
+    return path
+
+
+def remux_video_faststart(src_path, *, audio_copy=True):
+    """Copy the (already H.264) video stream into a fresh MP4 with `moov` first
+    — no video re-encode, so it takes about a second. Audio is copied when it
+    is AAC/MP3, otherwise re-encoded to AAC. Returns the temp output path or
+    None (caller owns/deletes it)."""
+    if shutil.which("ffmpeg") is None:
+        logger.error("ffmpeg binary not found on PATH — cannot process videos.")
+        return None
+    out = _new_mp4_temp_path()
+    cmd = [
+        "ffmpeg", "-y", "-nostdin", "-i", src_path,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "copy",
+    ]
+    cmd += ["-c:a", "copy"] if audio_copy else ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+    cmd += ["-movflags", "+faststart", out]
+    timeout = int(_video_setting("VIDEO_TRANSCODE_TIMEOUT_SECONDS", 1800))
+    return out if _run_ffmpeg(cmd, out, timeout, "remux") else None
+
+
+def transcode_video_h264(src_path):
+    """Re-encode to H.264 (yuv420p, even dimensions, longer side capped at
+    VIDEO_TRANSCODE_MAX_SIDE) + AAC + `+faststart`. ffmpeg auto-applies the
+    phone's rotation flag, so a portrait clip comes out upright with no
+    rotation metadata left. Returns the temp output path or None."""
+    if shutil.which("ffmpeg") is None:
+        logger.error("ffmpeg binary not found on PATH — cannot process videos.")
+        return None
+    max_side = max(240, int(_video_setting("VIDEO_TRANSCODE_MAX_SIDE", 1280)))
+    crf = str(int(_video_setting("VIDEO_TRANSCODE_CRF", 23)))
+    preset = str(_video_setting("VIDEO_TRANSCODE_PRESET", "veryfast"))
+    # Only ever scale DOWN; `-2` keeps the other side even (libx264 needs it).
+    scale = (
+        f"scale=w='if(gt(iw,ih),min({max_side},iw),-2)'"
+        f":h='if(gt(iw,ih),-2,min({max_side},ih))',format=yuv420p"
+    )
+    out = _new_mp4_temp_path()
+    cmd = [
+        "ffmpeg", "-y", "-nostdin", "-i", src_path,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", scale,
+        "-c:v", "libx264", "-preset", preset, "-crf", crf, "-profile:v", "high",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-movflags", "+faststart",
+        "-max_muxing_queue_size", "1024",
+        out,
+    ]
+    timeout = int(_video_setting("VIDEO_TRANSCODE_TIMEOUT_SECONDS", 1800))
+    return out if _run_ffmpeg(cmd, out, timeout, "transcode") else None
+
+
+def verify_streamable_video(path):
+    """Sanity-check an ffmpeg OUTPUT before it replaces the original: it must
+    probe as H.264 yuv420p with a real duration, and have `moov` first.
+    Returns the parsed {"width","height","duration_seconds"} dict, or None."""
+    info = _run_ffprobe(path)
+    if not info:
+        return None
+    video = _first_stream(info, "video")
+    if video is None or (video.get("codec_name") or "").lower() not in VIDEO_PLAYABLE_CODECS:
+        return None
+    if (video.get("pix_fmt") or "").lower() not in VIDEO_PLAYABLE_PIX_FMTS:
+        return None
+    if mp4_moov_before_mdat(path) is False:
+        return None
+    parsed = parse_ffprobe_output(info, "video")
+    return parsed if parsed.get("duration_seconds") else None
+
+
+# ---------------------------------------------------------------------------
+# Reel composer: optional custom cover (a frame picked in the app, sent as the
+# multipart file `reel_cover`) becomes the thumbnail of the post's first video.
+# Saved inside the create transaction, so generate_video_thumbnail (queued on
+# commit) sees a thumbnail already exists and leaves it alone.
+# ---------------------------------------------------------------------------
+REEL_COVER_MAX_BYTES = 5 * 1024 * 1024
+REEL_COVER_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+
+
+def attach_reel_cover(post, cover):
+    """True when `cover` was stored as the video thumbnail; False (and ignored) for a bad file / no video."""
+    ext = REEL_COVER_TYPES.get((getattr(cover, "content_type", "") or "").lower())
+    if ext is None or getattr(cover, "size", 0) > REEL_COVER_MAX_BYTES or not getattr(cover, "size", 0):
+        return False
+    media = post.media.filter(media_type="video").order_by("display_order").first()
+    if media is None:
+        return False
+    media.thumbnail.save(f"{media.id}_cover.{ext}", cover, save=True)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# HLS ADAPTIVE RENDITION (240p / 360p / 540p / 720p)
+#
+# P-E2: a small 240p rung (~380 kbps) sits at the BOTTOM of the ladder for Lite / data-saver phones and for the
+# "quick start" of a cold reel (the app plays the lowest rung first, then upgrades; see `lowest_hls_rung_name`).
+# Switch it off with VIDEO_HLS_LITE_RUNG=False (the ladder is then 360p / 540p / 720p again).
+#
+# The MP4 (`PostMedia.file`) stays the universal fallback. After it is ready,
+# `post.tasks.build_hls_rendition` builds an HLS ladder from it with ONE ffmpeg run
+# (split -> scale -> libx264 per rung, AAC audio, 4 s MPEG-TS segments, VOD playlists,
+# keyframes forced on the segment grid) and uploads the files to storage next to
+# each other, so the playlists' RELATIVE urls resolve on any storage (disk / S3):
+#
+#     posts/hls/<media_id>/<run>/master.m3u8
+#                               360p/index.m3u8  360p/seg_0000.ts ...
+#
+# A rung is named after the SHORT side of the frame (a portrait reel is 360x640), and
+# only rungs that do not upscale the source are built. Pure planning / command code
+# (`plan_hls_ladder`, `build_hls_command`) is separate from the ffmpeg + storage glue
+# so it is unit-tested without ffmpeg.
+#
+# Tunables (getattr, settings.py needs no change):
+#   VIDEO_HLS_ENABLED              default True
+#   VIDEO_HLS_MAX_SECONDS          default 900   (longer videos only get the MP4)
+#   VIDEO_HLS_SEGMENT_SECONDS      default 4
+#   VIDEO_HLS_TIMEOUT_SECONDS      default 3600
+#   VIDEO_HLS_LITE_RUNG            default True  (P-E2: add the 240p rung)
+#   VIDEO_TRANSCODE_PRESET         shared with the MP4 job (default veryfast)
+# ---------------------------------------------------------------------------
+# (short side px, video kbps, maxrate kbps, bufsize kbps)
+HLS_LITE_RUNG = (240, 380, 410, 600)  # P-E2: Lite / data-saver + quick-start rung
+HLS_LADDER = (
+    (360, 800, 856, 1200),
+    (540, 1400, 1498, 2100),
+    (720, 2800, 2996, 4200),
+)
+HLS_AUDIO_KBPS = 96
+
+
+def video_hls_enabled():
+    return bool(_video_setting("VIDEO_HLS_ENABLED", True))
+
+
+def video_hls_lite_rung_enabled():
+    return bool(_video_setting("VIDEO_HLS_LITE_RUNG", True))
+
+
+def hls_ladder():
+    """The rungs to build, lowest first: (short side px, video kbps, maxrate kbps, bufsize kbps)."""
+    return ((HLS_LITE_RUNG,) if video_hls_lite_rung_enabled() else ()) + HLS_LADDER
+
+
+def plan_hls_ladder(width, height):
+    """Pure: [{name, short, vbr, maxrate, bufsize, portrait}] for a frame of width x height
+    (DISPLAYED size). Rungs above the source's short side are dropped; a source smaller than 360p
+    still gets one rung (the lowest bitrates, scaled down by nothing: min(short, frame))."""
+    w, h = _positive_int(width) or 0, _positive_int(height) or 0
+    portrait = h > w if (w and h) else False
+    short = min(w, h) if (w and h) else 0
+    ladder = hls_ladder()
+    rungs = [r for r in ladder if not short or r[0] <= short]
+    if not rungs:
+        rungs = [ladder[0]]
+    out = []
+    for px, vbr, maxrate, bufsize in rungs:
+        out.append({
+            "name": f"{px}p", "short": px, "vbr": vbr, "maxrate": maxrate, "bufsize": bufsize,
+            "portrait": portrait,
+        })
+    return out
+
+
+def lowest_hls_rung_name(media):
+    """P-E2: folder name of the LOWEST rung that was built for `media` (`metadata["hls"]["rungs"]`, written by
+    post.tasks._attach_hls, lowest first), or None (no HLS / old row without the list)."""
+    meta = getattr(media, "metadata", None) or {}
+    rungs = (meta.get("hls") or {}).get("rungs") if isinstance(meta, dict) else None
+    if not rungs or not isinstance(rungs, (list, tuple)):
+        return None
+    name = str(rungs[0] or "")
+    return name if name and "/" not in name and ".." not in name else None
+
+
+def _hls_scale(rung):
+    n = rung["short"]
+    if rung["portrait"]:
+        return f"scale=w='min({n},iw)':h=-2:flags=bicubic,format=yuv420p"
+    return f"scale=w=-2:h='min({n},ih)':flags=bicubic,format=yuv420p"
+
+
+def build_hls_command(src_path, out_dir, rungs, *, has_audio, segment_seconds=4, preset="veryfast"):
+    """Pure: the ffmpeg argv that writes master.m3u8 + one folder per rung under `out_dir`."""
+    n = len(rungs)
+    if n == 1:
+        graph = f"[0:v:0]{_hls_scale(rungs[0])}[v0]"
+    else:
+        splits = "".join(f"[s{i}]" for i in range(n))
+        parts = [f"[0:v:0]split={n}{splits}"]
+        parts += [f"[s{i}]{_hls_scale(r)}[v{i}]" for i, r in enumerate(rungs)]
+        graph = ";".join(parts)
+
+    cmd = ["ffmpeg", "-y", "-nostdin", "-i", src_path, "-filter_complex", graph]
+    for i in range(n):
+        cmd += ["-map", f"[v{i}]"]
+    if has_audio:
+        for _ in range(n):
+            cmd += ["-map", "0:a:0"]
+    cmd += [
+        "-c:v", "libx264", "-preset", str(preset), "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-sc_threshold", "0",
+        "-force_key_frames", f"expr:gte(t,n_forced*{int(segment_seconds)})",
+    ]
+    for i, r in enumerate(rungs):
+        cmd += [
+            f"-b:v:{i}", f"{r['vbr']}k", f"-maxrate:v:{i}", f"{r['maxrate']}k", f"-bufsize:v:{i}", f"{r['bufsize']}k",
+        ]
+    if has_audio:
+        cmd += ["-c:a", "aac", "-b:a", f"{HLS_AUDIO_KBPS}k", "-ac", "2"]
+    var_map = " ".join(
+        (f"v:{i},a:{i},name:{r['name']}" if has_audio else f"v:{i},name:{r['name']}") for i, r in enumerate(rungs)
+    )
+    cmd += [
+        "-f", "hls", "-hls_time", str(int(segment_seconds)), "-hls_playlist_type", "vod",
+        "-hls_flags", "independent_segments", "-hls_segment_type", "mpegts",
+        "-hls_segment_filename", os.path.join(out_dir, "%v", "seg_%04d.ts"),
+        "-master_pl_name", "master.m3u8",
+        "-var_stream_map", var_map,
+        os.path.join(out_dir, "%v", "index.m3u8"),
+    ]
+    return cmd
+
+
+def transcode_video_hls(src_path, info):
+    """Build the HLS ladder for a LOCAL video. Returns {"dir", "rungs"} (caller deletes `dir`) or None."""
+    if shutil.which("ffmpeg") is None:
+        logger.error("ffmpeg binary not found on PATH — cannot build HLS.")
+        return None
+    video = _first_stream(info, "video")
+    if video is None:
+        return None
+    size = parse_ffprobe_output(info, "video")
+    rungs = plan_hls_ladder(size.get("width"), size.get("height"))
+    out_dir = tempfile.mkdtemp(prefix="hls_")
+    for r in rungs:
+        os.makedirs(os.path.join(out_dir, r["name"]), exist_ok=True)
+    cmd = build_hls_command(
+        src_path, out_dir, rungs,
+        has_audio=_first_stream(info, "audio") is not None,
+        segment_seconds=max(2, int(_video_setting("VIDEO_HLS_SEGMENT_SECONDS", 4))),
+        preset=str(_video_setting("VIDEO_TRANSCODE_PRESET", "veryfast")),
+    )
+    timeout = int(_video_setting("VIDEO_HLS_TIMEOUT_SECONDS", 3600))
+    master = os.path.join(out_dir, "master.m3u8")
+    if not _run_ffmpeg(cmd, master, timeout, "hls") or not verify_hls_output(out_dir, rungs):
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return None
+    return {"dir": out_dir, "rungs": rungs}
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail SPRITE (seek-bar preview): ONE jpeg that holds a grid of small frames, one every `interval` seconds.
+# The app cuts the tile under the finger out of it (tile i = column i % cols, row i // cols), so scrubbing shows a
+# picture without any extra request. Built after the MP4 is ready (post.tasks._attach_sprite), kept in
+# `PostMedia.metadata["sprite"]` (no new column) and exposed as `sprite` by the serializers.
+# ---------------------------------------------------------------------------
+SPRITE_DEFAULT_MAX_FRAMES = 100
+SPRITE_DEFAULT_COLS = 10
+SPRITE_DEFAULT_THUMB_WIDTH = 160
+
+
+def video_sprite_enabled():
+    return bool(_video_setting("VIDEO_SPRITE_ENABLED", True))
+
+
+def plan_video_sprite(duration, width=None, height=None, *, max_frames=None, cols=None, thumb_width=None):
+    """Pure. {interval, frames, cols, rows, thumb_w, thumb_h} for a video of `duration` seconds, or None (unknown /
+    zero length). One frame every whole `interval` seconds, never more than `max_frames` frames; the tile size keeps
+    the video's shape (both sides even, as x264-style filters like them)."""
+    import math
+
+    try:
+        dur = float(duration or 0)
+    except (TypeError, ValueError):
+        return None
+    if dur != dur or dur <= 0:
+        return None
+    max_frames = max(1, int(max_frames or _video_setting("VIDEO_SPRITE_MAX_FRAMES", SPRITE_DEFAULT_MAX_FRAMES)))
+    cols = max(1, int(cols or _video_setting("VIDEO_SPRITE_COLS", SPRITE_DEFAULT_COLS)))
+    tw = int(thumb_width or _video_setting("VIDEO_SPRITE_THUMB_WIDTH", SPRITE_DEFAULT_THUMB_WIDTH))
+    tw = max(40, tw - tw % 2)
+    interval = max(1, int(math.ceil(dur / max_frames)))
+    frames = max(1, min(max_frames, int(math.ceil(dur / interval))))
+    cols = min(cols, frames)
+    rows = int(math.ceil(frames / cols))
+    w, h = _positive_int(width) or 0, _positive_int(height) or 0
+    th = int(round(tw * h / w)) if (w and h) else int(round(tw * 16 / 9))
+    th = max(2, min(th, tw * 3))
+    th -= th % 2
+    return {"interval": interval, "frames": frames, "cols": cols, "rows": rows, "thumb_w": tw, "thumb_h": th}
+
+
+def build_sprite_command(src_path, out_path, plan):
+    """Pure: the ffmpeg argument list that writes the sprite jpeg for `plan` (see plan_video_sprite)."""
+    vf = "fps=1/{i},scale={w}:{h},tile={c}x{r}".format(
+        i=plan["interval"], w=plan["thumb_w"], h=plan["thumb_h"], c=plan["cols"], r=plan["rows"])
+    return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", src_path, "-an", "-sn", "-vf", vf,
+            "-frames:v", "1", "-q:v", "6", out_path]
+
+
+def generate_video_sprite_file(video_path, plan, timeout=None):
+    """Make the sprite for a LOCAL video. Returns the local jpeg path (caller deletes it) or None."""
+    if plan is None:
+        return None
+    if shutil.which("ffmpeg") is None:
+        logger.error("ffmpeg binary not found on PATH — cannot build the thumbnail sprite.")
+        return None
+    fd, out = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    timeout = int(timeout or _video_setting("VIDEO_SPRITE_TIMEOUT_SECONDS", 300))
+    if not _run_ffmpeg(build_sprite_command(video_path, out, plan), out, timeout, "sprite"):
+        return None
+    return out
+
+
+def sprite_info(media):
+    """The stored sprite description of a PostMedia, or None. {name, interval, frames, cols, rows, thumb_w, thumb_h}."""
+    meta = getattr(media, "metadata", None)
+    data = meta.get("sprite") if isinstance(meta, dict) else None
+    if not isinstance(data, dict) or not data.get("name"):
+        return None
+    try:
+        out = {k: int(data[k]) for k in ("interval", "frames", "cols", "rows", "thumb_w", "thumb_h")}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if min(out.values()) < 1:
+        return None
+    out["name"] = str(data["name"])
+    return out
+
+
+def verify_hls_output(out_dir, rungs):
+    """Master playlist + every rung's VOD playlist (ends with #EXT-X-ENDLIST) and at least one segment."""
+    if not os.path.exists(os.path.join(out_dir, "master.m3u8")):
+        return False
+    for r in rungs:
+        folder = os.path.join(out_dir, r["name"])
+        playlist = os.path.join(folder, "index.m3u8")
+        try:
+            with open(playlist, "r", encoding="utf-8", errors="replace") as fh:
+                if "#EXT-X-ENDLIST" not in fh.read():
+                    return False
+        except OSError:
+            return False
+        if not any(name.endswith(".ts") for name in os.listdir(folder)):
+            return False
+    return True
+
+
+def upload_hls_directory(storage, local_dir, prefix):
+    """Save every file under `local_dir` as `<prefix>/<relative path>`. Returns the master playlist's
+    storage name. A failure part-way deletes what was already uploaded and re-raises."""
+    from django.core.files import File
+
+    saved = []
+    master_name = None
+    try:
+        # segments first, master last: nothing points at the stream until all of it is there
+        files = []
+        for root, _dirs, names in os.walk(local_dir):
+            for fname in names:
+                full = os.path.join(root, fname)
+                files.append((os.path.relpath(full, local_dir).replace(os.sep, "/"), full))
+        files.sort(key=lambda item: (item[0] == "master.m3u8", item[0]))
+        for rel, full in files:
+            with open(full, "rb") as fh:
+                name = storage.save(f"{prefix}/{rel}", File(fh))
+            saved.append(name)
+            if rel == "master.m3u8":
+                master_name = name
+        if master_name is None:
+            raise RuntimeError("HLS output has no master playlist")
+        return master_name
+    except Exception:
+        for name in saved:
+            try:
+                storage.delete(name)
+            except Exception:
+                logger.warning("could not clean up partial HLS upload %s", name, exc_info=True)
+        raise
+
+
+def delete_storage_tree(storage, prefix):
+    """Delete every file below `prefix` (works on disk and S3 storages). Returns how many were deleted."""
+    count = 0
+    try:
+        dirs, files = storage.listdir(prefix)
+    except Exception:
+        return 0
+    for fname in files:
+        try:
+            storage.delete(f"{prefix}/{fname}")
+            count += 1
+        except Exception:
+            logger.warning("could not delete %s/%s", prefix, fname, exc_info=True)
+    for dname in dirs:
+        count += delete_storage_tree(storage, f"{prefix}/{dname}")
+    return count
+
+
+def hls_prefix_of(master_name):
+    """'posts/hls/<id>/<run>/master.m3u8' -> 'posts/hls/<id>/<run>' ('' when not an HLS name)."""
+    if not master_name or not master_name.endswith("/master.m3u8"):
+        return ""
+    return master_name[: -len("/master.m3u8")]

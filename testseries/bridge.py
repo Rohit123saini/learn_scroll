@@ -50,12 +50,10 @@ confirmed this pass against the real `message/models.py` and
 `ask_query_on_series()`/`answer_query_on_series()` below for detail):
   - `DoubtQuestion.context_type`/`context_id` exist as assumed. TRUE.
   - `answer_doubt_question()` accepts `answered_by=`. TRUE.
-One new gap surfaced in the process (not a `testseries`-side bug, but
-this file's `answer_query_on_series()` is the one exposed to it) —
-`answer_doubt_question()`'s own testseries-notify branch depends on
-`core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`, which
-is NOT confirmed to exist. See the ⚠️ note on `answer_query_on_series()`
-below.
+`answer_doubt_question()`'s testseries-notify branch depends on
+`core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED` — that
+member now exists in `core/models.py` (RESOLVED; earlier revisions of this
+note flagged it as unconfirmed).
 """
 import importlib
 import logging
@@ -397,23 +395,10 @@ def answer_query_on_series(*, doubt_id, teacher, answer_text: str):
     name as the reason that parameter exists. No longer an unverified
     assumption.
 
-    ⚠️ NEW GAP surfaced by this confirmation pass (not previously
-    flagged here) — `answer_doubt_question()` unconditionally notifies
-    the student when `doubt.context_type == 'testseries_attempt'`, via
-    `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`.
-    That enum member is flagged as NOT CONFIRMED to exist yet in
-    `message/services.py`'s own comment. If it's still missing, the call
-    below raises a plain `AttributeError` — *after* the doubt row has
-    already been saved as answered (fields commit first, notify is the
-    last step) — meaning this function can raise an undocumented,
-    unhandled `AttributeError` up to `views.py` even though the answer
-    itself succeeded. Deliberately NOT papered over with a try/except
-    here (same "flag the gap, don't guess" convention `models.py` uses
-    for its own unconfirmed `NotifType` members) — the real fix is
-    `core` adding `TESTSERIES_QUERY_ANSWERED`, not swallowing the error.
-    `views.py::TestAttemptViewSet.answer_query` should catch
-    `AttributeError` alongside `ValueError`/`PermissionError` until
-    that's confirmed, or callers will see an opaque 500.
+    `answer_doubt_question()` also notifies the student through
+    `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`; that
+    member exists in `core/models.py`, so the former `AttributeError` gap
+    is closed (the answer is saved before the notify step runs).
     """
     from message.models import DoubtQuestion
     from message.services import answer_doubt_question
@@ -436,3 +421,48 @@ def answer_query_on_series(*, doubt_id, teacher, answer_text: str):
     # fixed as part of the same Task 16 pass that added `answered_by` as
     # its own parameter to `answer_doubt_question()`).
     return answer_doubt_question(doubt=doubt, actor=None, answer_text=answer_text, answered_by=teacher)
+
+
+# ---------------------------------------------------------------------------
+# POLL -> TEST SERIES QUESTION (post app: "convert to Test Series question")
+# ---------------------------------------------------------------------------
+class SeriesNotFoundError(LookupError):
+    """No such test series."""
+
+
+class SeriesNotEditableError(PermissionError):
+    """The caller may not edit this series (not the creator / not context staff)."""
+
+
+class SeriesLockedError(ValueError):
+    """The series is no longer a draft - its question set is frozen (design doc §2)."""
+
+
+def append_question_to_series(*, series_id, user, question: dict) -> Question:
+    """Append ONE question to the end of a DRAFT series the user may edit, the same rules as
+    `QuestionViewSet` (creator or context staff, draft only), and return the saved `Question`.
+
+    Used by `post` to turn a quiz/poll into a test question without importing testseries models.
+    `question` takes `Question`'s writable fields (`_QUESTION_FIELDS`); anything else is ignored. The model's own
+    `clean()` validates the shape, so a bad payload raises `django.core.exceptions.ValidationError`.
+    The series row is locked, so two conversions racing for the same series get distinct `order`s.
+    """
+    from django.db.models import Max
+
+    from .access import user_can_edit_series
+
+    with transaction.atomic():
+        try:
+            series = TestSeries.objects.select_for_update().get(pk=series_id)
+        except (TestSeries.DoesNotExist, ValueError, DjangoValidationError):
+            raise SeriesNotFoundError("Test series not found.")
+        if not user_can_edit_series(user, series):
+            raise SeriesNotEditableError("Only the creator or this class/campus's teaching staff can modify questions.")
+        if series.status != TestSeries.Status.DRAFT:
+            raise SeriesLockedError("Questions can only be added while the series is a draft.")
+        fields = {k: v for k, v in question.items() if k in _QUESTION_FIELDS and k != "order"}
+        order = (series.questions.aggregate(m=Max("order"))["m"] or 0) + 1
+        saved = Question(series=series, order=order, **fields)
+        saved.save()  # full_clean() inside -> ValidationError on a bad shape
+        series.recompute_total_marks()
+    return saved

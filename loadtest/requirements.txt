@@ -1,0 +1,3 @@
+# Load-test tooling only — NOT part of the app's runtime requirements.
+locust>=2.29,<3
+websocket-client>=1.7,<2

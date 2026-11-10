@@ -1,0 +1,15 @@
+[Unit]
+Description=LearnScroll weekly restore drill
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=learnscroll
+Group=learnscroll
+WorkingDirectory=/srv/learnscroll/backend
+EnvironmentFile=/srv/learnscroll/.env
+ExecStart=/srv/learnscroll/backend/deploy/backup/restore_drill.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3h

@@ -41,6 +41,9 @@ from common.question_grading import parse_bool, parse_number
 #   * tuitionclass — created from a tuition class: always FREE too (TASK 9.1).
 #                   A class already sells access through its pass; the tests
 #                   inside it must never be charged for a second time.
+# NOTE (T3): this dict is only the hard fallback when Django settings are not available (pure unit tests). In the running
+# app `settings.TESTSERIES_PRICING_POLICY` is overlaid on top and now sets individual to "optional" (free or paid, the
+# creator chooses) - see LearnScroll/settings.py.
 DEFAULT_PRICING_POLICY: dict[str, dict[str, Any]] = {
     "individual": {"mode": "required", "min_coins": 1, "max_coins": 100_000},
     "campus": {"mode": "forbidden"},

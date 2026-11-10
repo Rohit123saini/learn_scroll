@@ -29,6 +29,8 @@ from django.db import transaction
 from login.models import User
 
 from .models import Notification, NotificationMute, NotificationPreference
+from . import notification_rich as rich  # N7 - image / avatar urls, Mark as read + Join now buttons
+from .notification_routes import route_for  # N2 - one deep-link table for push + list
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,18 @@ def create_notification(
         if actor_username:
             payload.setdefault("actor_username", actor_username)
 
+    # N1 - the user switched the In-app chip off for this type: no bell row at all (silent no-op, like mute/restrict).
+    if not in_app_allowed(recipient_id, notif_type):
+        return None
+
+    # N9b - the user muted this class / chat / post / campus section WITH "hide from the bell too": no row at all.
+    from . import notification_center as _center
+
+    if _center.bell_hidden_user_ids(
+        [recipient_id], notif_type, payload, classroom_id=getattr(classroom, "id", classroom)
+    ):
+        return None
+
     try:
         # Own savepoint: this is called from inside @transaction.atomic
         # views (follow/accept/comment...). Without it, a DB error here is
@@ -179,6 +193,47 @@ def publish_unread_badge(user_id) -> None:
         logger.exception("publish_unread_badge could not schedule (user=%s)", user_id)
 
 
+def in_app_allowed(recipient, notif_type: str) -> bool:
+    """N1 - may a bell row be created for (recipient, notif_type)? False only when the user switched the "In-app"
+    chip off for that type (locked / safety types always True). One light query; any error => True (never lose a row
+    because of a settings glitch)."""
+    recipient_id = getattr(recipient, "id", recipient)
+    try:
+        overrides = (
+            NotificationPreference.objects.filter(user_id=recipient_id)
+            .values_list("channel_overrides", flat=True).first()
+        )
+        if not overrides:
+            return True
+        if notif_type in NotificationPreference.NEVER_MUTE_TYPES:
+            return True
+        ov = overrides.get(str(notif_type)) if isinstance(overrides, dict) else None
+        return not (isinstance(ov, dict) and ov.get("in_app", True) is False)
+    except Exception:  # pragma: no cover
+        logger.exception("in_app_allowed failed (user=%s)", recipient_id)
+        return True
+
+
+def in_app_blocked_ids(recipient_ids, notif_type: str) -> set:
+    """N1b - the subset of `recipient_ids` who switched the "In-app" chip off for `notif_type`, found with ONE query
+    (a fan-out to thousands of followers must not cost one query per recipient). Locked types are never blocked; any
+    error => empty set (never lose a row because of a settings glitch)."""
+    ids = {rid for rid in recipient_ids if rid is not None}
+    if not ids or notif_type in NotificationPreference.NEVER_MUTE_TYPES:
+        return set()
+    try:
+        blocked = set()
+        rows = NotificationPreference.objects.filter(user_id__in=ids).values_list("user_id", "channel_overrides")
+        for user_id, overrides in rows:
+            ov = overrides.get(str(notif_type)) if isinstance(overrides, dict) else None
+            if isinstance(ov, dict) and ov.get("in_app", True) is False:
+                blocked.add(user_id)
+        return blocked
+    except Exception:  # pragma: no cover
+        logger.exception("in_app_blocked_ids failed")
+        return set()
+
+
 def channels_for(recipient, notif_type: str) -> list:
     """Channels a call-site may use for (recipient, notif_type) right now —
     mute + per-channel toggles + quiet hours/DND (urgent types bypass the
@@ -205,6 +260,28 @@ def channels_for(recipient, notif_type: str) -> list:
 PUSH_DATA_KEYS = (
     "post_id", "comment_id", "story_id", "series_id", "conversation_id",
     "message_id", "follow_id", "actor_id", "actor_username",
+    "claim_id",  # copyrights: opens the notice / claim screen
+    # T1.2 doubt_answered: tap -> that group's Doubts screen (doubt_id lets
+    # the client scroll to / open the doubt, answer_id highlights the answer).
+    "doubt_id", "answer_id", "group_id",
+    # T2.9 — streak-at-risk + class-starting reminder deep links.
+    "type", "streak_days", "mode", "live_session_id", "timetable_entry_id",
+    "section_id", "subject_id", "starts_at",
+    # Push for notice / absent-to-parent / fee due / assignment due: ids a tap can
+    # deep-link with (campus notice, which child, which day).
+    "notice_id", "student_id", "attendance_date", "campus_id",
+    # Parents se baat (PTM + teacher<->parent chat): a tap opens that chat /
+    # meeting. `kind` tells the client which flavour (flagged / digest /
+    # published / booked / cancelled / reminder_24h ...).
+    "thread_id", "event_id", "booking_id", "kind",
+    # Class resources: a tap opens that folder / the resource (subject_id +
+    # section_id are already in the list above).
+    "resource_id", "folder_id",
+    # C3 fee-paid push: a tap opens that child's fees.
+    "invoice_id", "payment_id",
+    # N2 - keys core/notification_routes.py needs for a tap (without these the push tap lands on the fallback):
+    # support_reply -> ticket, recorded class -> recording, staff leave -> leave, post_tag + collab_invite -> invites.
+    "ticket_id", "recording_id", "leave_id", "collab_invite", "note_id",
 )
 
 # notif_type -> action buttons. Each action: `id` (the client switches on
@@ -246,13 +323,21 @@ for _name in ("POST_COMMENT", "COMMENT", "POST_COMMENTED", "COMMENT_REPLY"):
         )
 
 
+# N6 - every reminder type gets "Snooze" + "Turn off" buttons (core/notification_reminders.py). A type that already has
+# its own buttons keeps them (setdefault); locked types never get Turn off (reminder_types() excludes them).
+from . import notification_reminders as _reminders  # noqa: E402  (after PUSH_ACTIONS, needs Notification above)
+
+for _rtype in _reminders.reminder_types():
+    PUSH_ACTIONS.setdefault(_rtype, _reminders.REMINDER_ACTIONS)
+
+
 def _public_image_url(value) -> str | None:
     """FCM/APNs fetch the image themselves, so it must be an absolute
-    http(s) URL. A relative path (e.g. a bare /media/... string) is
-    dropped rather than sent broken."""
-    if isinstance(value, str) and value.startswith(("https://", "http://")):
-        return value
-    return None
+    http(s) URL. N7: a root-relative path (\"/media/x.jpg\", what
+    post.services._absolute_media_url returns when MEDIA_ABSOLUTE_BASE_URL is
+    unset) is now joined to MEDIA_ABSOLUTE_BASE_URL / SITE_URL instead of being
+    dropped; with neither configured it is still dropped rather than sent broken."""
+    return rich.absolute_url(value)
 
 
 def build_push_payload(notification) -> dict:
@@ -267,6 +352,13 @@ def build_push_payload(notification) -> dict:
         data["classroom_id"] = notification.classroom_id
     if notification.session_id:
         data["session_id"] = notification.session_id
+    # N2 - server-decided deep link ({route, target_type, target_id}); the app still has its own table, this lets an
+    # older app route a type it does not know and gives analytics one name per destination. Strings only (FCM data).
+    data.update(
+        {k: str(v) for k, v in route_for(
+            notification.notif_type, raw, classroom_id=notification.classroom_id, session_id=notification.session_id,
+        ).as_dict().items()}
+    )
 
     actions = []
     for spec in PUSH_ACTIONS.get(notification.notif_type, ()):
@@ -280,11 +372,18 @@ def build_push_payload(notification) -> dict:
             action["input"] = True
         actions.append(action)
 
+    # N7 - "Join now" (live class pushes, only when the N2 route really is a class / live room) + "Mark as read"
+    # (reply / informational pushes), capped at 3 buttons (Android).
+    actions = rich.finalize_actions(actions, notification.notif_type, data)
+
     return {
         "recipient_id": notification.recipient_id,
         "title": notification.title,
         "body": notification.message or notification.title,
-        "image_url": _public_image_url(raw.get("media_url")),
+        # N7 - big picture: first usable of media_url / thumbnail_url / cover_url ... (absolute); small round avatar =
+        # the actor's photo (shown as the large icon next to / instead of the picture).
+        "image_url": rich.thumbnail_url(raw),
+        "avatar_url": rich.avatar_url(raw, actor_id=raw.get("actor_id")),
         "actions": actions,
         "data": data,
     }
@@ -307,6 +406,8 @@ def create_bulk_notifications(
     as an enrolled student)."""
     recipient_ids = {getattr(r, "id", r) for r in recipients}
     recipient_ids.discard(None)
+    if recipient_ids:  # N1 - drop people who switched the In-app chip off for this type
+        recipient_ids -= in_app_blocked_ids(recipient_ids, notif_type)  # one query, not one per recipient
     if not recipient_ids:
         return
     try:

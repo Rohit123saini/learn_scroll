@@ -322,6 +322,11 @@ def check_referral_abuse(referrer, referee, *, coins=0):
         return False, "self_referral"
     if not getattr(referrer, "is_active", True):
         return False, "referrer_inactive"
+    # P-F16: a minor never earns referral rewards / commission (every attribution + payout path calls this function).
+    from common import minor_policy
+
+    if minor_policy.blocked(referrer, minor_policy.REFERRAL):
+        return False, minor_policy.MINOR_REFERRER_REASON
 
     from tuitionclass.models import Referral, ReferralAttribution, ReferralCommission
 

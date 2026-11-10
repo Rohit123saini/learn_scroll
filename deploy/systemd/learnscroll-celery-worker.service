@@ -1,0 +1,33 @@
+# Celery WORKER -- executes tasks (copyright automations, notifications, ...).
+# Install:  sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#           sudo systemctl enable --now learnscroll-celery-worker learnscroll-celery-beat
+# Adjust User / WorkingDirectory / the virtualenv path to your server.
+#
+# V1 (video playback): the worker runs `ffmpeg` + `ffprobe` (post.tasks.process_video_for_streaming
+# converts every uploaded video to H.264/AAC + faststart, and makes thumbnails). Install them on
+# THIS host:  sudo apt install ffmpeg   -- without them videos stay `pending`/`failed` and phones that
+# can't decode HEVC show "video chal nahi paayi". Old videos: python manage.py process_videos --all
+[Unit]
+Description=LearnScroll Celery worker
+After=network-online.target redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=learnscroll
+Group=learnscroll
+WorkingDirectory=/srv/learnscroll/backend
+EnvironmentFile=/srv/learnscroll/.env
+# Non-fatal boot warning (shows in `journalctl -u learnscroll-celery-worker`) if ffmpeg/ffprobe are missing.
+ExecStartPre=/bin/sh -c 'command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null || echo "WARNING: ffmpeg/ffprobe not on PATH - video processing will fail (sudo apt install ffmpeg)" >&2'
+ExecStart=/srv/learnscroll/venv/bin/celery -A LearnScroll worker --loglevel=INFO --concurrency=4 --max-tasks-per-child=500
+# Warm shutdown: finish running tasks (acks_late is on, so an interrupted task is re-delivered anyway).
+KillSignal=SIGTERM
+TimeoutStopSec=120
+# A crashed worker must come back by itself -- otherwise legal deadlines silently stop being processed.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

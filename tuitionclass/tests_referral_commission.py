@@ -102,13 +102,15 @@ class FraudTests(TestCase):
 
 @override_settings(TESTSERIES_REFERRAL_COMMISSION_PERCENT="10", TESTSERIES_REFERRAL_MAX_PERCENT="50")
 class TestSeriesCommissionTests(TestCase):
-    def _series(self, creator, price=100, source="individual"):
+    def _series(self, creator, price=100, source="individual", **kw):
         from testseries.models import TestSeries
 
-        return TestSeries.objects.create(
+        base = dict(
             creator=creator, title="T", source=source, is_paid=price > 0, price_coins=price,
-            status=TestSeries.Status.PUBLISHED,
+            status=TestSeries.Status.PUBLISHED, referral_enabled=True, referral_commission_percent=10,
         )
+        base.update(kw)
+        return TestSeries.objects.create(**base)
 
     def test_snapshot_only_with_active_attribution(self):
         from testseries.access import referral_snapshot
@@ -116,9 +118,48 @@ class TestSeriesCommissionTests(TestCase):
         creator, ref, buyer = _user("creator"), _user("ref"), _user("buyer")
         s = self._series(creator)
         self.assertEqual(referral_snapshot(buyer=buyer, series=s)[0], None)
-        ReferralAttribution.claim(referee=buyer, referrer=ref)
+        # attribution must come from THIS series' own link (source_type + source_id), not a bare / app link
+        ReferralAttribution.claim(referee=buyer, referrer=ref, source_type="testseries", source_id=str(s.id))
         rid, pct, coins = referral_snapshot(buyer=buyer, series=s)
         self.assertEqual((rid, coins), (ref.id, 10))
+
+    def test_no_platform_default_when_creator_percent_is_zero(self):
+        # T-REF: the old fallback (0% -> platform 10%) is gone. Opt-in at 0% pays nothing, even with a valid link.
+        from testseries.access import referral_snapshot
+
+        creator, ref, buyer = _user("creator"), _user("ref"), _user("buyer")
+        s = self._series(creator, referral_commission_percent=0)
+        ReferralAttribution.claim(referee=buyer, referrer=ref, source_type="testseries", source_id=str(s.id))
+        self.assertEqual(referral_snapshot(buyer=buyer, series=s), (None, 0, 0))
+
+    def test_creator_percent_is_what_is_paid_not_platform_percent(self):
+        from testseries.access import referral_snapshot
+
+        creator, ref, buyer = _user("creator"), _user("ref"), _user("buyer")
+        s = self._series(creator, referral_commission_percent=25)
+        ReferralAttribution.claim(referee=buyer, referrer=ref, source_type="testseries", source_id=str(s.id))
+        rid, pct, coins = referral_snapshot(buyer=buyer, series=s)
+        self.assertEqual((rid, int(pct), coins), (ref.id, 25, 25))  # NOT the platform 10%
+
+    def test_snapshot_ignores_attribution_from_another_series_or_a_class(self):
+        from testseries.access import referral_snapshot
+
+        creator, ref, b1, b2 = _user("creator"), _user("ref"), _user("b1"), _user("b2")
+        s, other = self._series(creator), self._series(creator)
+        ReferralAttribution.claim(referee=b1, referrer=ref, source_type="testseries", source_id=str(other.id))
+        ReferralAttribution.claim(referee=b2, referrer=ref, source_type="classroom", source_id=str(s.id))
+        self.assertIsNone(referral_snapshot(buyer=b1, series=s)[0])
+        self.assertIsNone(referral_snapshot(buyer=b2, series=s)[0])
+
+    def test_snapshot_accepts_share_slug_as_source_id(self):
+        # The shared link is /test-series/<share_slug>/ and the app records the last path segment (the slug).
+        from testseries.access import referral_snapshot
+
+        creator, ref, buyer = _user("creator"), _user("ref"), _user("buyer")
+        s = self._series(creator)
+        slug = s.ensure_share_slug(save=True)
+        ReferralAttribution.claim(referee=buyer, referrer=ref, source_type="testseries", source_id=slug)
+        self.assertEqual(referral_snapshot(buyer=buyer, series=s)[0], ref.id)
 
     def test_percent_is_capped(self):
         from testseries.access import referral_percent

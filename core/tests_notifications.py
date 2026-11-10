@@ -57,7 +57,17 @@ VALID_CATEGORIES = {"mentions", "follows", "classroom", "tests", "other"}
 # nothing. A type may only land in "other" if it is listed HERE, i.e. a human
 # said so. Add a NotifType without mapping it => test_no_silent_other fails
 # and prints the line to paste if "other" really is right.
-INTENTIONALLY_OTHER: set = set()  # first run will list the current candidates
+# Chat, calls, likes / comments, streaks, recap, receipts, copyright, parent / device and support notices have no inbox
+# filter chip (core/models.py CATEGORY_TYPES says so: "Chat messages, calls, likes/comments, streaks, recap, generic...
+# stay in 'other'"), so "other" is right for all of these. A NEW type must still be mapped or added here on purpose.
+INTENTIONALLY_OTHER: set = {
+    "campus_admission", "chat_message", "content_digest", "copyright_decision", "copyright_notice", "copyright_staff",
+    "copyright_standing", "creator_feedback", "feed_doubt_for_teacher", "generic", "incoming_call", "new_device_login",
+    "parent_device_pending", "parent_message_received", "parent_message_replied", "post_commented", "post_liked",
+    "post_reposted", "purchase_receipt", "referral_reward", "report_outcome", "revision_deck_reminder",
+    "story_reaction", "streak_at_risk", "streak_milestone_reached", "study_reminder", "support_reply",
+    "weekly_recap_ready",
+}
 
 
 class CategoryMapTests(SimpleTestCase):

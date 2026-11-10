@@ -151,12 +151,27 @@ class LastResortFillTests(SeenLogicBase):
             pools = self.pools()
         self.assertEqual(set(pools["trending"]) | set(pools["recommended"]), {p.id for p in posts})
 
-    def test_no_fill_when_pool_big_enough(self):
+    def test_seen_only_tops_up_a_pool_with_too_few_unseen_and_only_at_the_tail(self):
+        # Documented design (feed_mix module docstring): the last-resort top-up is decided PER discovery
+        # pool. Here "trending" gets the 3 fresh posts, "recommended" has no unseen post left, so it is
+        # topped up with the seen post. What must hold: unseen posts are never displaced, and a seen post
+        # only ever sits at the TAIL of a pool. (Old version of this test assumed one combined pool.)
+        fresh = [self.post(self.stranger, f"fresh{i}", days_old=1) for i in range(3)]
+        seen_post = self.post(self.stranger, "seen")
+        self.see(seen_post)
+        with override_settings(FEED_SEEN_LIMITS={"fill_min": 3}):
+            pools = self.pools()
+        self.assertTrue({p.id for p in fresh} <= set(pools["trending"]) | set(pools["recommended"]))
+        for name in ("trending", "recommended"):
+            if seen_post.id in pools[name]:
+                self.assertEqual(pools[name][-1], seen_post.id, f"seen post must be last in {name}")
+
+    def test_no_top_up_at_all_when_fill_is_disabled(self):
         for i in range(3):
             self.post(self.stranger, f"fresh{i}", days_old=1)
         seen_post = self.post(self.stranger, "seen")
         self.see(seen_post)
-        with override_settings(FEED_SEEN_LIMITS={"fill_min": 3}):
+        with override_settings(FEED_SEEN_LIMITS={"fill_min": 0}):
             pools = self.pools()
         self.assertNotIn(seen_post.id, set(pools["trending"]) | set(pools["recommended"]))
 

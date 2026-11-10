@@ -44,3 +44,14 @@ class LeaderboardEntrySerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         return bool(user and getattr(user, "is_authenticated", False) and obj.user_id == user.id)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # P-F16 -- on a PUBLIC board a minor's name / photo are hidden from adult strangers (view passes the id set in
+        # context; empty / missing = nobody masked, e.g. campus-section boards where everybody is a classmate).
+        masked = self.context.get("masked_minor_ids") or ()
+        if instance.user_id in masked and isinstance(data.get("user"), dict):
+            from common.minor_policy import masked_person
+
+            data["user"] = {"id": data["user"].get("id"), **masked_person(instance.user)}
+        return data

@@ -1,4 +1,4 @@
-# tuitionclass/management/commands/migrate_tuitionclass_assigmentss_to_unified.py
+# tuitionclass/management/commands/migrate_tuitionclass_assignments_to_unified.py
 """
 Task 12 — one-off DATA migration (no schema/`makemigrations` involved):
 copies every existing `tuitionclass.assigments`/`assigmentsSubmission` row
@@ -85,8 +85,8 @@ class Command(BaseCommand):
         # assigmentsSubmission and assigments.models are both only ever
         # needed inside this one-off command, never at tuitionclass import
         # time.
-        from assigments.models import assigments as Unifiedassigments
-        from assigments.models import assigmentsSource, assigmentsSubmission as UnifiedSubmission
+        from assignments.models import assigments as Unifiedassigments
+        from assignments.models import assigmentsSource, assigmentsSubmission as UnifiedSubmission
 
         from tuitionclass.models import assigments as Legacyassigments
         from tuitionclass.models import PassPurchase
@@ -235,8 +235,8 @@ class Command(BaseCommand):
     # ROLLBACK
     # -----------------------------------------------------------------
     def _rollback(self, log_path: str):
-        from assigments.models import assigments as Unifiedassigments
-        from assigments.models import assigmentsSubmission as UnifiedSubmission
+        from assignments.models import assigments as Unifiedassigments
+        from assignments.models import assigmentsSubmission as UnifiedSubmission
 
         try:
             with open(log_path) as fh:

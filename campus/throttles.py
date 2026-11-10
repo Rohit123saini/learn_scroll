@@ -30,7 +30,18 @@ request to that action, exactly the bug class already fixed repeatedly
 elsewhere in settings.py for `session_join`, `coin_withdrawal`,
 `chat_reaction`, etc.
 """
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
+
+
+class _FixedScopeThrottle(SimpleRateThrottle):
+    """Per-user (or per-IP when anonymous) throttle with a hard-coded `scope`.
+    Unlike `ScopedRateThrottle`, it never reads `view.throttle_scope`, so it
+    enforces its own rate even when the view defines no `throttle_scope`."""
+    scope = None
+
+    def get_cache_key(self, request, view):
+        ident = request.user.pk if request.user and request.user.is_authenticated else self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
 
 
 class CampusFeePaymentThrottle(ScopedRateThrottle):
@@ -67,6 +78,13 @@ class CampusNoticePostThrottle(ScopedRateThrottle):
     stands in for that missing scope restriction until role-to-scope
     rules are confirmed."""
     scope = "campus_notice_post"
+
+
+class CampusEmergencyBroadcastThrottle(ScopedRateThrottle):
+    """NoticeViewSet.emergency — an emergency alert buzzes every phone in scope and bypasses quiet
+    hours, so even a legitimate admin gets only a handful per hour (stops a double-tap storm or a
+    compromised admin account turning it into a spam cannon)."""
+    scope = "campus_emergency_broadcast"
 
 
 class CampusParentLinkVerifyThrottle(ScopedRateThrottle):
@@ -108,3 +126,137 @@ class CampusDoubtPostThrottle(ScopedRateThrottle):
     each of which fans out a push. Same shape as `CampusNoticePostThrottle`
     above, rated per-user."""
     scope = "campus_doubt_post"
+
+
+class CampusHomeworkDiaryPostThrottle(ScopedRateThrottle):
+    """HomeworkDiaryViewSet.create — every post fans a push out to a whole
+    section (students + parents). A class-teacher legitimately posts one line
+    per subject per day (~8-10), so the cap is per hour with headroom; it
+    only stops a scripted/compromised staff account from buzzing a roster in
+    a loop."""
+    scope = "campus_homework_diary_post"
+
+
+class CampusStaffLeaveApplyThrottle(ScopedRateThrottle):
+    """StaffLeaveViewSet.create — every application pushes every admin /
+    principal of the campus. Generous for real use (a few per month), tight
+    enough to stop a scripted account from buzzing the office."""
+    scope = "campus_staff_leave_apply"
+
+
+class CampusSubstituteAssignThrottle(ScopedRateThrottle):
+    """SubstituteAssignmentViewSet.create / TeacherAbsenceViewSet.create —
+    every assignment pushes the substitute AND a whole section (students +
+    parents). A busy morning is one absent teacher x ~8 periods, so the cap is
+    per hour with headroom; it only stops a scripted/compromised admin account
+    from buzzing rosters in a loop."""
+    scope = "campus_substitute_assign"
+
+
+class CampusResultsPublishThrottle(_FixedScopeThrottle):
+    """ResultEntryViewSet.publish / .bulk(publish=true) / .import(commit) —
+    every publish fans a push out to students + parents of a whole section,
+    so cap it the same way as the homework diary. A teacher publishes a
+    handful of subject sheets per exam; the cap only stops a scripted or
+    compromised staff account from buzzing a roster in a loop."""
+    scope = "campus_results_publish"
+
+
+class CampusResultsImportThrottle(_FixedScopeThrottle):
+    """ResultEntryViewSet.import (preview + commit) — parses an uploaded
+    CSV, so each hit costs CPU and DB lookups; preview is retried while the
+    teacher fixes their file, hence a per-hour cap with headroom."""
+    scope = "campus_results_import"
+
+
+class CampusPTMBookThrottle(_FixedScopeThrottle):
+    """PTMBookingViewSet.create / .reschedule — a parent books a handful of
+    slots per event; the cap only stops a script from grabbing every slot of a
+    school (booking is first-come-first-served)."""
+    scope = "campus_ptm_book"
+
+
+class CampusPTMManageThrottle(_FixedScopeThrottle):
+    """PTMEventViewSet.create / .publish / .cancel and slot opening — publishing
+    or cancelling fans a push out to every invited parent of the campus."""
+    scope = "campus_ptm_manage"
+
+
+class CampusParentChatSendThrottle(_FixedScopeThrottle):
+    """ParentChatViewSet.send — every message pushes the other side. The
+    unanswered-in-a-row rule limits one conversation; this limits one account
+    across all of its conversations (a teacher with 40 parents, a parent with
+    3 teachers)."""
+    scope = "campus_parent_chat_send"
+
+
+class CampusResourceUploadThrottle(_FixedScopeThrottle):
+    """ClassResourceViewSet.create / edits that replace the file — uploads are
+    the heaviest writes in the campus app (a video can be 200 MB). A teacher
+    sharing a chapter posts a handful of files at a time, so 60/hour leaves
+    headroom; it stops a scripted or compromised staff account from filling
+    storage in a loop."""
+    scope = "campus_resource_upload"
+
+
+class CampusResourceFolderThrottle(_FixedScopeThrottle):
+    """ResourceFolderViewSet.create — folders are cheap, but an unbounded
+    create loop would still bloat every student's folder list."""
+    scope = "campus_resource_folder"
+
+
+class CampusRecordingControlThrottle(_FixedScopeThrottle):
+    """CampusLiveSessionViewSet.start_recording / .stop_recording and the recording
+    hide / show action — each start calls the video service (an egress job that costs
+    money); a stuck app tapping Start in a loop must not spawn jobs."""
+    scope = "campus_recording_control"
+
+
+class CampusNoteWriteThrottle(_FixedScopeThrottle):
+    """ClassNoteViewSet / StudentNoteViewSet writes — a teacher posts a few notes a
+    day and a student jots a lot more; this only stops a scripted loop."""
+    scope = "campus_note_write"
+
+
+class CampusFinanceExportThrottle(_FixedScopeThrottle):
+    """FINANCE — report / CSV / XLSX exports. Each one scans many rows, so cap per user."""
+    scope = "campus_finance_export"
+
+
+class CampusFinanceReconcileThrottle(_FixedScopeThrottle):
+    """FINANCE — reconciliation runs (CSV import / Razorpay API pull / internal checks)."""
+    scope = "campus_finance_reconcile"
+
+
+class CampusReportExportThrottle(_FixedScopeThrottle):
+    """REPORTS / EXPORT — attendance / marks / fees exports (CSV, Excel, PDF). Each one scans many rows,
+    so cap per user."""
+    scope = "campus_report_export"
+
+
+class CampusSafetyWriteThrottle(_FixedScopeThrottle):
+    """Safety — create a backup / record consent for someone / decide a deletion request. Rare admin actions;
+    the limit only exists to stop a script from filling the disk with backups."""
+    scope = "campus_safety_write"
+
+
+class CampusSettingsWriteThrottle(_FixedScopeThrottle):
+    """Campus Settings — profile / grading / working days / bulk holidays / slot generation. Rare admin saves;
+    the limit only stops a script from hammering the bulk endpoints."""
+    scope = "campus_settings_write"
+
+
+class CampusSafetyRestoreThrottle(_FixedScopeThrottle):
+    """Safety — restore (dry-run included: it reads and checks the whole file)."""
+    scope = "campus_safety_restore"
+
+
+class CampusDataRequestThrottle(_FixedScopeThrottle):
+    """Safety — a user filing / cancelling a data-deletion request or changing a consent."""
+    scope = "campus_data_request"
+
+
+class CampusAdmissionWriteThrottle(ScopedRateThrottle):
+    """AdmissionViewSet.create / edit / move / enroll / import — office staff typing in enquiries all day;
+    generous for real use, tight enough to stop a scripted account from filling the table."""
+    scope = "campus_admission_write"

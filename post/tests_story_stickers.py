@@ -339,9 +339,9 @@ class StoryStickerCreateTests(APITestCase):
                 self._assert_rejected(self._create(raw=raw))
 
     def test_unknown_kinds_are_rejected(self):
-        # mention / link / poll / question are the supported kinds (poll and
+        # mention / link / poll / question (+ the F3 kinds, tests_story_f3.py) are supported (poll and
         # question are covered in tests_story_poll_question.py).
-        for kind in ("gif", "music", "", None):
+        for kind in ("music", "sticker", "", None):
             with self.subTest(kind=kind):
                 self._assert_rejected(self._create([{"kind": kind}]))
 

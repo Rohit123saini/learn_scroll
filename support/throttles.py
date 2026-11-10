@@ -29,3 +29,7 @@ class FeatureRequestThrottle(_WritesOnly):
 
 class FeatureVoteThrottle(_WritesOnly):
     scope = "support_vote"
+
+
+class FaqFeedbackThrottle(_WritesOnly):
+    scope = "support_faq"

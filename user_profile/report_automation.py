@@ -1,26 +1,35 @@
 """
 user_profile/report_automation.py - what happens AFTER a ContentReport is filed.
 
-Before this module reports only landed in a table: `Post.reported_count` was
-never updated (so feed_quality's "heavily reported" rule never fired), nothing
-was hidden however many people reported, and moderators had no way to act from
-the report itself.
-
   on_report_created(report)   called by services.file_report (never raises)
       1. keeps Post.reported_count exact (distinct, reliable reporters)
-      2. AUTO-HOLD: enough distinct reporters -> post goes to 'flagged'
+      2. child_safety reports go to user_profile/child_safety.py (instant hold, urgent case)
+      3. AUTO-HOLD: enough distinct, trusted reporters -> post goes to 'flagged'
          (invisible in every feed), comment gets is_hidden=True, and a HIGH/MEDIUM
-         AutoModerationFlag lands in the moderator queue. Stories / accounts are
-         only flagged (stories expire by themselves; accounts need a human).
-      3. unreliable reporters (many dismissed reports, none ever actioned) are
-         still stored but no longer count towards a threshold - stops report-bombing.
+         AutoModerationFlag lands in the moderator queue. Everything else (story,
+         account, DM, class chat, live class, profile photo) is only flagged.
+      4. the OWNER is told (notice + appeal button) and the hold is written to the
+         audit trail (ModerationAction).
+      5. BRIGADING (audit item 19) - see analyse_reports().
 
   resolve_reports(reports, action, actor)   used by the Django-admin actions
       'hide' (content removed, all sibling reports actioned) or 'dismiss'
-      (false alarm; auto-held content comes back).
+      (false alarm; auto-held content comes back). Both are audited.
 
-Thresholds: settings.REPORT_HOLD_THRESHOLD_SEVERE (3, nudity/violence/self-harm/hate/
-harassment), REPORT_HOLD_THRESHOLD_ANY (8, any reason), REPORT_UNRELIABLE_DISMISSED (10).
+THRESHOLDS (settings.py, all env-tunable; tune them with `manage.py report_stats`):
+  REPORT_HOLD_THRESHOLD_SEVERE   3   distinct severe-reason reporters
+  REPORT_HOLD_THRESHOLD_ANY      8   distinct reporters, any reason
+  REPORT_UNRELIABLE_DISMISSED   10   reporter whose reports were all dismissed -> ignored
+BRIGADING knobs:
+  REPORT_NEW_ACCOUNT_DAYS        3   reporter accounts younger than this ...
+  REPORT_NEW_ACCOUNT_WEIGHT    0.5   ... count only this much
+  REPORT_PERSISTENT_DISMISSED    2   reporter who already had this many reports against
+                                     the SAME person dismissed counts 0 against them again
+  REPORT_BURST_MIN              10   this many reports ...
+  REPORT_BURST_MINUTES          10   ... inside this window = a burst
+  REPORT_NEW_SHARE             0.7   share of new accounts among reporters that looks coordinated
+  REPORT_BRIGADE_MODE      "review"  "review" = suspected brigade is NOT auto-held, it goes to
+                                     a human (high-severity flag); "off" = ignore these signals
 Copyright reports never auto-hold: they go through the formal notice in the copyrights app.
 """
 
@@ -31,16 +40,23 @@ from django.conf import settings
 from django.db.models import Count, Q
 from django.utils import timezone
 
+from . import moderation_log as mlog
+from . import report_targets as rt
+
 logger = logging.getLogger(__name__)
 
-SEVERE_REASONS = ("nudity", "violence", "self_harm", "hate", "harassment")
+SEVERE_REASONS = ("nudity", "violence", "self_harm", "hate", "harassment", "child_safety")
 FLAG_HASH = "user-reports"
+BRIGADE_HASH = "user-reports-brigade"
 
 
 def _cfg(name, default):
     return getattr(settings, name, default)
 
 
+# --------------------------------------------------------------------------
+# who counts
+# --------------------------------------------------------------------------
 def _unreliable_reporters(reporter_ids):
     from .models import ContentReport
 
@@ -56,43 +72,128 @@ def _unreliable_reporters(reporter_ids):
     return {r["reporter_id"] for r in stats if r["dismissed"] >= limit and r["actioned"] == 0}
 
 
+def _persistent_complainants(reporter_ids, owner_id, target_type, target_id):
+    """Reporters who already had >= N reports against THIS PERSON dismissed (other
+    content): the same people coming back again and again to get one account hidden."""
+    from .models import ContentReport
+
+    if not reporter_ids or not owner_id:
+        return set()
+    since = timezone.now() - timedelta(days=90)
+    rows = (
+        ContentReport.objects.filter(reporter_id__in=reporter_ids, reported_user_id=owner_id, status="dismissed",
+                                     created_at__gte=since)
+        .exclude(target_type=target_type, target_id=str(target_id))
+        .values("reporter_id").annotate(n=Count("id"))
+    )
+    limit = _cfg("REPORT_PERSISTENT_DISMISSED", 2)
+    return {r["reporter_id"] for r in rows if r["n"] >= limit}
+
+
 def reporter_is_reliable(reporter) -> bool:
     return getattr(reporter, "id", reporter) not in _unreliable_reporters([getattr(reporter, "id", reporter)])
 
 
-def count_reports(target_type, target_id):
-    """(all_count, severe_count) of DISTINCT reliable reporters, dismissed reports ignored."""
+def analyse_reports(target_type, target_id):
+    """Everything the hold decision (and `report_stats`) needs, with the reasons.
+
+    -> {"count": int, "severe": int,            weighted, rounded DOWN
+        "raw_count": int,                       distinct reporters, no discounts
+        "brigading": bool, "signals": [str]}
+
+    Weights: 1.0 normal | REPORT_NEW_ACCOUNT_WEIGHT for a brand-new account |
+             0 for an 'unreliable' reporter or a persistent complainant.
+    Signals (only when REPORT_BRIGADE_MODE == "review"):
+      burst              >= REPORT_BURST_MIN reports inside REPORT_BURST_MINUTES
+      mostly_new         >= REPORT_NEW_SHARE of >=4 reporters are brand-new accounts
+    A suspected brigade is never auto-held (child safety excepted) - a person decides.
+    Honest limit: this catches lazy / mass-created-account brigades, not a patient group
+    of established accounts. Review `report_stats` output regularly.
+    """
     from .models import ContentReport
 
     rows = list(
         ContentReport.objects.filter(target_type=target_type, target_id=str(target_id))
-        .exclude(status="dismissed").exclude(reason="copyright").values_list("reporter_id", "reason")
+        .exclude(status="dismissed").exclude(reason="copyright")
+        .values_list("reporter_id", "reason", "created_at", "reporter__date_joined", "reported_user_id")
     )
-    bad = _unreliable_reporters({r for r, _ in rows})
-    all_ids = {r for r, _ in rows if r not in bad}
-    severe_ids = {r for r, reason in rows if r not in bad and reason in SEVERE_REASONS}
-    return len(all_ids), len(severe_ids)
+    now = timezone.now()
+    ids = {r[0] for r in rows}
+    owner_id = next((r[4] for r in rows if r[4]), None)
+    bad = _unreliable_reporters(ids) | _persistent_complainants(ids, owner_id, target_type, target_id)
+    new_cut = now - timedelta(days=_cfg("REPORT_NEW_ACCOUNT_DAYS", 3))
+    new_w = float(_cfg("REPORT_NEW_ACCOUNT_WEIGHT", 0.5))
+
+    weight, is_new = {}, set()
+    for rid, _reason, _at, joined, _o in rows:
+        if rid in bad:
+            weight[rid] = 0.0
+        elif joined and joined >= new_cut:
+            weight[rid] = new_w
+            is_new.add(rid)
+        else:
+            weight[rid] = 1.0
+    all_w = sum(weight.values())
+    severe_ids = {rid for rid, reason, *_ in rows if reason in SEVERE_REASONS}
+    severe_w = sum(w for rid, w in weight.items() if rid in severe_ids)
+
+    signals = []
+    if _cfg("REPORT_BRIGADE_MODE", "review") == "review" and rows:
+        times = sorted(r[2] for r in rows)
+        need, win = int(_cfg("REPORT_BURST_MIN", 10)), timedelta(minutes=_cfg("REPORT_BURST_MINUTES", 10))
+        if len(times) >= need and any(times[i + need - 1] - times[i] <= win for i in range(len(times) - need + 1)):
+            signals.append("burst")
+        if len(ids) >= 4 and len(is_new) / len(ids) >= float(_cfg("REPORT_NEW_SHARE", 0.7)):
+            signals.append("mostly_new")
+
+    return {
+        "count": int(all_w + 1e-9), "severe": int(severe_w + 1e-9), "raw_count": len(ids),
+        "brigading": bool(signals), "signals": signals,
+    }
 
 
-def _flag(report, count, severe):
+def count_reports(target_type, target_id):
+    """(all_count, severe_count) of DISTINCT trusted reporters, dismissed reports ignored."""
+    a = analyse_reports(target_type, target_id)
+    return a["count"], a["severe"]
+
+
+# --------------------------------------------------------------------------
+def _flag(report, count, severe, *, brigade=False, note=""):
     from .models import AutoModerationFlag
 
-    AutoModerationFlag.objects.get_or_create(
-        target_type=report.target_type, target_id=str(report.target_id), text_hash=FLAG_HASH,
+    return AutoModerationFlag.objects.get_or_create(
+        target_type=report.target_type, target_id=str(report.target_id),
+        text_hash=BRIGADE_HASH if brigade else FLAG_HASH,
         defaults={
-            "user": report.reported_user, "reason": "user_reports", "source": AutoModerationFlag.Source.REPORTS,
-            "severity": "high" if severe else "medium", "snippet": f"{count} reporters ({severe} severe)"[:200],
+            "user": report.reported_user,
+            "reason": "report_brigading" if brigade else "user_reports",
+            "source": AutoModerationFlag.Source.REPORTS,
+            # a suspected brigade is high: somebody must look at it soon, in BOTH directions
+            "severity": "high" if (severe or brigade) else "medium",
+            "snippet": (note or f"{count} reporters ({severe} severe)")[:200],
         },
     )
 
 
 def on_report_created(report):
     """Never raises. Returns what it did, e.g. {"count": 3, "held": True}."""
-    out = {"count": 0, "held": False}
+    from .models import ContentReport, ModerationAction
+
+    out = {"count": 0, "held": False, "brigading": False}
     try:
         if report.reason == "copyright":
             return out
-        count, severe = count_reports(report.target_type, report.target_id)
+        if report.reason == "child_safety":
+            from . import child_safety
+
+            res = child_safety.handle_report(report)
+            out["held"] = res["held"]
+            out["child_safety"] = True
+            return out
+
+        a = analyse_reports(report.target_type, report.target_id)
+        count, severe = a["count"], a["severe"]
         out["count"] = count
         if report.target_type == "post":
             from post.models import Post
@@ -103,19 +204,41 @@ def on_report_created(report):
         if not hold:
             return out
 
-        if report.target_type == "post":
-            from post.models import Post
+        if a["brigading"]:
+            # Threshold reached, but it looks coordinated -> a person decides, nothing is hidden.
+            out["brigading"] = True
+            ContentReport.objects.filter(
+                target_type=report.target_type, target_id=str(report.target_id)).update(brigading_suspected=True)
+            _, created = _flag(report, count, severe, brigade=True,
+                               note=f"possible brigading ({', '.join(a['signals'])}): {a['raw_count']} reporters")
+            if created:
+                mlog.log_action(
+                    ModerationAction.Action.BRIGADING_REVIEW, target_type=report.target_type,
+                    target_id=report.target_id, owner=report.reported_user, reason=report.reason, count=count,
+                    note=",".join(a["signals"]),
+                )
+            return out
 
-            out["held"] = Post.objects.filter(pk=report.target_id, moderation_status="approved").update(
-                moderation_status="flagged") > 0
-            _flag(report, count, severe)
-        elif report.target_type == "comment":
-            from post.models import PostComment
+        # What can be held automatically: only posts and comments. Others: flag for a person.
+        if report.target_type in rt.AUTO_HOLD_TARGETS:
+            changed, _ = rt.hide(report.target_type, report.target_id, mode="hold")
+            out["held"] = changed
+        _flag(report, count, severe)
+        from .report_sla import tighten  # P-F15: a flagged / held target is reviewed sooner
 
-            out["held"] = PostComment.objects.filter(pk=report.target_id, is_hidden=False).update(is_hidden=True) > 0
-            _flag(report, count, severe)
-        else:  # story / user: moderators decide
-            _flag(report, count, severe)
+        tighten(report.target_type, report.target_id)
+
+        if out["held"]:
+            row = mlog.log_action(
+                ModerationAction.Action.AUTO_HOLD, target_type=report.target_type, target_id=report.target_id,
+                owner=report.reported_user, reason=report.reason, count=count,
+                note=f"{count} reporters, {severe} severe", owner_visible=True, can_appeal=True,
+            )
+            mlog.tell_owner(
+                report.reported_user, row, f"Your {mlog.what(report.target_type)} is hidden for now",
+                f"Several people reported it, so we hid it while we review it. You didn't lose it. "
+                f"If you think this is a mistake, you can appeal in Settings > Notices.",
+            )
     except Exception:
         logger.exception("report automation failed (report=%s)", getattr(report, "pk", None))
     return out
@@ -124,72 +247,141 @@ def on_report_created(report):
 # --------------------------------------------------------------------------
 # moderator actions on reports (Django admin)
 # --------------------------------------------------------------------------
-def _notify(user, title, message):
+# H15: what the reporter is told once their report is decided (type `report_outcome`, data carries
+# {outcome, target_type, target_id} so the app can route / word it).
+OUTCOME_COPY = {
+    "actioned": ("Thanks for your report", "We reviewed it and took action."),
+    "dismissed": ("We reviewed your report", "We didn't find a rule violation this time."),
+    "reversed": ("Update on your report", "After an appeal, the earlier decision on your report was reversed."),
+}
+
+
+def _notify(user, title, message, *, outcome="", target_type="", target_id=""):
     try:
         from core.services import create_notification
 
-        create_notification(user, "generic", title, message, data={"kind": "report_outcome"})
+        create_notification(
+            user, "report_outcome", title, message,
+            data={"kind": "report_outcome", "outcome": outcome, "target_type": target_type, "target_id": str(target_id)},
+        )
     except Exception:
         logger.exception("report outcome notification failed")
 
 
+def notify_reporters(reports, outcome):
+    """Tell each reporter ONCE per target how their report ended (outcome: actioned | dismissed | reversed).
+
+    `reports` = ContentReport rows (or a queryset) captured BEFORE their status was changed. Only the rows that
+    were still undecided (open / reviewed) get a message, except outcome 'reversed' (an appeal undid a decision, so
+    the earlier 'actioned' reporters are told). Used by resolve_reports, child_safety, appeals and the admin edit, so
+    a report can never produce two messages for the same decision. Never raises."""
+    try:
+        title, message = OUTCOME_COPY[outcome]
+        seen = set()
+        for r in reports:
+            if outcome != "reversed" and r.status not in ("open", "reviewed"):
+                continue
+            if outcome == "reversed" and r.status != "actioned":
+                continue
+            key = (r.reporter_id, r.target_type, str(r.target_id))
+            if not r.reporter_id or key in seen:
+                continue
+            seen.add(key)
+            _notify(r.reporter, title, message, outcome=outcome, target_type=r.target_type, target_id=r.target_id)
+    except Exception:
+        logger.exception("notify_reporters failed")
+
+
+def notify_outcome(reporters, outcome, target_type, target_id):
+    """P-F15: the same "how did my report end" message for the report systems that are NOT ContentReport rows
+    (study-room reports, classroom chat reports, live-class reports, sound reports). `reporters` = users (or user ids);
+    each is told once. outcome: actioned | dismissed. Never raises."""
+    from types import SimpleNamespace
+
+    try:
+        rows, seen = [], set()
+        for r in reporters:
+            uid = getattr(r, "pk", r)
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
+            user = r if hasattr(r, "pk") else None
+            if user is None:
+                from django.contrib.auth import get_user_model
+
+                user = get_user_model().objects.filter(pk=uid).first()
+            if user is not None:
+                rows.append(SimpleNamespace(status="open", reporter_id=uid, reporter=user,
+                                            target_type=target_type, target_id=str(target_id)))
+        notify_reporters(rows, outcome)
+        return len(rows)
+    except Exception:
+        logger.exception("notify_outcome failed")
+        return 0
+
+
 def _hide_target(target_type, target_id):
-    if target_type == "post":
-        from post.models import Post
-
-        # never overwrite a copyright state (that has its own undo)
-        Post.objects.filter(pk=target_id).exclude(
-            moderation_status__in=("copyright_hold", "copyright_removed")).update(moderation_status="rejected")
-    elif target_type == "comment":
-        from post.models import PostComment
-
-        PostComment.objects.filter(pk=target_id).update(is_hidden=True)
-    elif target_type == "story":
-        from post.models import Story
-
-        Story.objects.filter(pk=target_id).update(is_deleted=True, deleted_at=timezone.now())
+    """Staff 'hide'. Returns the extra info hide() gives (photo quarantine path)."""
+    changed, extra = rt.hide(target_type, target_id, mode="staff")
+    return extra
 
 
 def _unhide_target(target_type, target_id):
-    if target_type == "post":
-        from post.models import Post
-
-        Post.objects.filter(pk=target_id, moderation_status="flagged").update(moderation_status="approved")
-    elif target_type == "comment":
-        from post.models import PostComment
-
-        PostComment.objects.filter(pk=target_id).update(is_hidden=False)
+    return rt.restore(target_type, target_id, held_only=True)
 
 
 def resolve_reports(reports, action, actor=None):
-    """action: 'hide' | 'dismiss'. Resolves every OPEN/REVIEWED report on the same targets too."""
-    from .models import AutoModerationFlag, ContentReport
+    """action: 'hide' | 'dismiss'. Resolves every OPEN/REVIEWED report on the same targets too.
+    Every call is written to the audit trail (ModerationAction) with the staff member."""
+    from .models import AutoModerationFlag, ContentReport, ModerationAction
 
+    A = ModerationAction.Action
     targets = {(r.target_type, r.target_id) for r in reports}
     done = 0
     for target_type, target_id in targets:
         siblings = ContentReport.objects.filter(
             target_type=target_type, target_id=target_id, status__in=("open", "reviewed"))
-        sibling_list = list(siblings.select_related("reporter"))
+        sibling_list = list(siblings.select_related("reporter", "reported_user"))
+        owner = sibling_list[0].reported_user if sibling_list else rt.owner_of(target_type, target_id)
+        reasons = sorted({r.reason for r in sibling_list})
+        flags = AutoModerationFlag.objects.filter(
+            target_type=target_type, target_id=target_id, text_hash__in=(FLAG_HASH, BRIGADE_HASH))
         if action == "hide":
-            _hide_target(target_type, target_id)
+            quarantine = _hide_target(target_type, target_id)
             siblings.update(status=ContentReport.Status.ACTIONED)
-            AutoModerationFlag.objects.filter(
-                target_type=target_type, target_id=target_id, text_hash=FLAG_HASH,
-            ).update(status=AutoModerationFlag.Status.ACTIONED)
-            for r in sibling_list:
-                _notify(r.reporter, "Thanks for your report", "We reviewed it and took action.")
-            if sibling_list and sibling_list[0].reported_user_id and target_type != "user":
-                _notify(sibling_list[0].reported_user, "Content removed",
-                        "We removed your content because it broke our community rules.")
+            flags.update(status=AutoModerationFlag.Status.ACTIONED)
+            notify_reporters(sibling_list, "actioned")  # sibling_list holds the pre-update (open / reviewed) rows
+            row = mlog.log_action(
+                A.PHOTO_REMOVED if target_type == "profile_photo" else A.HIDE,
+                target_type=target_type, target_id=target_id, actor=actor, owner=owner,
+                reason=",".join(reasons)[:20], count=len(sibling_list),
+                note=(f"quarantine:{quarantine}" if quarantine else f"{len(sibling_list)} report(s) actioned"),
+                owner_visible=target_type != "user", can_appeal=target_type != "user",  # P-LEFT: stories too (review request, see appeals.decide_appeal)
+            )
+            if owner is not None and target_type != "user":
+                mlog.tell_owner(owner, row, f"We removed your {mlog.what(target_type)}",
+                                "It broke our community rules."
+                                + ((" A story can't be put back once it is removed, but if you think we got this wrong you can ask for a "
+                                    "review in Settings > Notices and we will clear the decision from your record.")
+                                   if target_type == "story" and row is not None and row.can_appeal else
+                                   " If you think we got this wrong, you can appeal in Settings > Notices."
+                                   if row is not None and row.can_appeal else ""))
         else:
             siblings.update(status=ContentReport.Status.DISMISSED)
-            flags = AutoModerationFlag.objects.filter(
-                target_type=target_type, target_id=target_id, text_hash=FLAG_HASH, status="open")
-            if flags.exists():
-                _unhide_target(target_type, target_id)  # only auto-held content is 'flagged'/hidden by reports
-                flags.update(status=AutoModerationFlag.Status.DISMISSED)
-            for r in sibling_list:
-                _notify(r.reporter, "We reviewed your report", "We didn't find a rule violation this time.")
+            open_flags = flags.filter(status="open")
+            restored = False
+            if open_flags.exists():
+                restored = _unhide_target(target_type, target_id)  # only auto-held content is 'flagged'/hidden by reports
+                open_flags.update(status=AutoModerationFlag.Status.DISMISSED)
+            notify_reporters(sibling_list, "dismissed")
+            mlog.log_action(
+                A.DISMISS, target_type=target_type, target_id=target_id, actor=actor, owner=owner,
+                reason=",".join(reasons)[:20], count=len(sibling_list),
+                note="reports dismissed" + ("; auto-held content restored" if restored else ""),
+            )
+            if restored and owner is not None:
+                mlog.notify(owner, f"Your {mlog.what(target_type)} is visible again",
+                            "We reviewed the reports and found no rule violation.",
+                            data={"target_type": target_type, "target_id": target_id, "can_appeal": False})
         done += len(sibling_list)
     return done

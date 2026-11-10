@@ -111,7 +111,11 @@ groups/group-study — and per product decision it is no longer used
 anywhere in this view. `chat_group` below therefore only ever carries
 `group_name` + `assigmentss`, never an attendance field.
 """
+from datetime import timedelta
+from urllib.parse import quote
+
 from django.db.models import Count
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -500,6 +504,7 @@ class ParentVerifyCodeView(APIView):
     screen instead of assuming the dashboard is ready to load.
     """
     permission_classes = [AllowAny]
+    authentication_classes = []  # P-B3: a parent has no account; a stale JWT header must not 401 the code check
     throttle_classes = [ParentCodeVerifyThrottle]
 
     def post(self, request):
@@ -811,3 +816,214 @@ class ParentDashboardView(APIView):
             }
             for classroom_id, group in eligible.items()
         }
+
+
+# ======================================================================
+# TASK T2.5 — PARENT WEEKLY PROGRESS CARD + WHATSAPP SHARE (Loop 2)
+# ----------------------------------------------------------------------
+# One read-only "last 7 days" report-card for a student, in two audiences:
+#
+#   STUDENT (own login, IsAuthenticated) — the student forwards it to their
+#   parent on WhatsApp ("Mera weekly progress"):
+#     GET /message/parent/weekly-progress/        -> JSON + share_text + whatsapp_url
+#     GET /message/parent/weekly-progress/card/   -> image/png share card
+#
+#   PARENT (X-Parent-Token, approved device only) — the parent re-shares the
+#   same report with the other guardian ("<Name> ka weekly progress"):
+#     GET /message/parent/dashboard/weekly/       -> same JSON
+#     GET /message/parent/dashboard/weekly/card/  -> same PNG
+#
+# STRICT SCOPE (same rule as ParentDashboardView): aggregate, report-card
+# numbers only — classes attended, tests attempted + average %, homework
+# counts, attendance %, streak. Never chat content, never per-question data.
+# The share text carries NO parent access code (that stays behind
+# reveal/renew); the only link is the public app page, plus the student's
+# own referral code when the STUDENT is the one sharing.
+#
+# `tuitionclass` homework and message-app assigments counts are still never
+# summed (Gap 1) — only the tuitionclass `homework` totals are used here.
+# ======================================================================
+WEEKLY_WINDOW_DAYS = 7
+WEEKLY_CARD_PATH = '/message/parent/weekly-progress/card/'
+
+
+def _weekly_tests(student, start, end):
+    """(attempted, avg_percent|None) for tests SUBMITTED in the window. The
+    average only uses attempts with a final (checked) score so a half-graded
+    attempt can't drag the number down."""
+    from testseries.models import TestAttempt
+
+    attempts = list(
+        TestAttempt.objects.filter(
+            student=student, submitted_at__isnull=False, submitted_at__range=(start, end),
+        ).select_related('series').order_by('-submitted_at')[:200]
+    )
+    percents = [
+        100.0 * a.final_score / a.series.total_marks
+        for a in attempts
+        if a.final_score is not None and a.series.total_marks
+    ]
+    avg = round(sum(percents) / len(percents), 1) if percents else None
+    return len(attempts), avg
+
+
+def build_weekly_progress(student, *, audience='student', include_referral=False):
+    """The weekly card payload (see block comment above). `audience` is
+    'student' (first person) or 'parent' (third person) and only changes the
+    share wording. `include_referral=True` (student side only) appends the
+    student's own referral link so the share doubles as an invite."""
+    from django.conf import settings as dj_settings
+    from user_profile.models import Streak
+    from user_profile.recap import _count_classes_attended
+
+    end = timezone.now()
+    start = end - timedelta(days=WEEKLY_WINDOW_DAYS)
+    today = timezone.localdate()
+    first_day = today - timedelta(days=WEEKLY_WINDOW_DAYS - 1)
+    label = f"{first_day.strftime('%d %b')} \u2013 {today.strftime('%d %b')}"
+
+    tests_attempted, tests_avg = _weekly_tests(student, start, end)
+    classes_attended = _count_classes_attended(student, start, end)
+
+    classrooms = ParentDashboardView._classrooms(student)
+    attendance_values = [
+        float(c['attendance_percent']) for c in classrooms if c.get('attendance_percent') is not None
+    ]
+    attendance_percent = round(sum(attendance_values) / len(attendance_values), 1) if attendance_values else None
+    hw_pending = sum(c['homework']['pending'] for c in classrooms)
+    hw_submitted = sum(c['homework']['submitted'] for c in classrooms)
+    hw_total = sum(c['homework']['total'] for c in classrooms)
+
+    streak = Streak.objects.filter(user=student).only('current_streak').first()
+    streak_days = streak.current_streak if streak else 0
+
+    name = _display_name(student)
+    first_person = audience == 'student'
+
+    # ---- link: public app page, never a parent access code ----
+    base = (getattr(dj_settings, 'APP_WEB_BASE_URL', '') or '').rstrip('/')
+    link = base
+    if include_referral and base:
+        from tuitionclass.models import referral_code_for_user
+        link = f"{base}/signup?ref={referral_code_for_user(student.id)}"
+
+    # ---- share text (Hinglish, same register as the rest of this module) ----
+    head = (
+        f"\U0001F4CA Mera LearnScroll weekly progress ({label})"
+        if first_person else
+        f"\U0001F4CA {name} ka LearnScroll weekly progress ({label})"
+    )
+    lines = [head, f"\u2705 Classes attended: {classes_attended}"]
+    if tests_attempted:
+        avg_txt = f" (avg {tests_avg:g}%)" if tests_avg is not None else ""
+        lines.append(f"\U0001F4DD Tests attempted: {tests_attempted}{avg_txt}")
+    if attendance_percent is not None:
+        lines.append(f"\U0001F3AF Attendance: {attendance_percent:g}%")
+    if hw_total:
+        lines.append(f"\U0001F4DA Homework: {hw_submitted}/{hw_total} submitted")
+    if streak_days:
+        lines.append(f"\U0001F525 Streak: {streak_days} days")
+    if link:
+        lines.append(link)
+    share_text = "\n".join(lines)
+
+    return {
+        'student_name': name,
+        'window_days': WEEKLY_WINDOW_DAYS,
+        'label': label,
+        'week_start': first_day.isoformat(),
+        'week_end': today.isoformat(),
+        'classes_attended': classes_attended,
+        'tests_attempted': tests_attempted,
+        'tests_avg_percent': tests_avg,
+        'attendance_percent': attendance_percent,
+        'homework': {'pending': hw_pending, 'submitted': hw_submitted, 'total': hw_total},
+        'streak_days': streak_days,
+        'share_text': share_text,
+        'whatsapp_url': f"https://wa.me/?text={quote(share_text, safe='')}",
+    }
+
+
+def _weekly_card_rows(data):
+    rows = [('Classes attended', str(data['classes_attended']))]
+    if data['tests_attempted']:
+        avg = f" \u00b7 avg {data['tests_avg_percent']:g}%" if data['tests_avg_percent'] is not None else ''
+        rows.append(('Tests attempted', f"{data['tests_attempted']}{avg}"))
+    if data['attendance_percent'] is not None:
+        rows.append(('Attendance', f"{data['attendance_percent']:g}%"))
+    hw = data['homework']
+    if hw['total']:
+        rows.append(('Homework submitted', f"{hw['submitted']}/{hw['total']}"))
+    if data['streak_days']:
+        rows.append(('Day streak', str(data['streak_days'])))
+    return rows
+
+
+class _WeeklyProgressBase(APIView):
+    """Shared GET for the four routes above. Subclasses only decide WHO the
+    student is (`get_student`), the wording (`audience`) and JSON vs PNG
+    (`as_card`)."""
+    audience = 'student'
+    as_card = False
+    include_referral = False
+
+    def get_student(self, request):  # pragma: no cover — abstract
+        raise NotImplementedError
+
+    def get(self, request):
+        student = self.get_student(request)
+        data = build_weekly_progress(
+            student, audience=self.audience, include_referral=self.include_referral,
+        )
+        if not self.as_card:
+            return Response(data)
+
+        from .parent_card import ImageUnavailable, render_png
+        try:
+            png = render_png(
+                student_name=data['student_name'],
+                label=data['label'],
+                rows=_weekly_card_rows(data),
+            )
+        except ImageUnavailable as exc:
+            # Same 501 contract as the recap / certificate cards — the app
+            # falls back to sharing `share_text` (same numbers).
+            return Response({'detail': str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+        resp = HttpResponse(png, content_type='image/png')
+        resp['Content-Disposition'] = (
+            f'inline; filename="learnscroll_weekly_progress_{data["week_end"]}.png"'
+        )
+        resp['Cache-Control'] = 'private, no-store'
+        return resp
+
+
+class ParentWeeklyProgressView(_WeeklyProgressBase):
+    """GET /message/parent/weekly-progress/ — the logged-in STUDENT's own card."""
+    permission_classes = [IsAuthenticated]
+    audience = 'student'
+    include_referral = True
+
+    def get_student(self, request):
+        return request.user
+
+
+class ParentWeeklyProgressCardView(ParentWeeklyProgressView):
+    """GET /message/parent/weekly-progress/card/ — same, as image/png."""
+    as_card = True
+
+
+class ParentDashboardWeeklyView(_WeeklyProgressBase):
+    """GET /message/parent/dashboard/weekly/ (X-Parent-Token) — the linked
+    student's card from the PARENT's side. No referral code is added: a
+    parent device must not mint/expose the student's referral link."""
+    permission_classes = [HasValidParentToken]
+    audience = 'parent'
+
+    def get_student(self, request):
+        return request.parent_student
+
+
+class ParentDashboardWeeklyCardView(ParentDashboardWeeklyView):
+    """GET /message/parent/dashboard/weekly/card/ — same, as image/png."""
+    as_card = True

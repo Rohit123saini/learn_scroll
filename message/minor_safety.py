@@ -29,3 +29,14 @@ def dm_blocked_for_minor(sender, receiver) -> bool:
 
 
 MINOR_DM_BLOCKED_MESSAGE = "You can't start a chat with this user."
+
+
+# S1 — Study room (live audio/video room) bhi ek DM-jaisa live channel hai. Naya DM shuru karne ka
+# rule yahan join pe bhi lagta hai: adult <-> minor 1-1 study room tabhi jab minor ne adult ko
+# follow kiya ho. Dono direction check hote hain (kaun pehle join kare, usse farq nahi padta).
+def dm_pair_blocked_for_minor(user_a, user_b) -> bool:
+    """True if a 1-1 live room between these two users violates the minor DM rule."""
+    return dm_blocked_for_minor(user_a, user_b) or dm_blocked_for_minor(user_b, user_a)
+
+
+MINOR_STUDY_ROOM_BLOCKED_MESSAGE = "You can't join a study room with this user."

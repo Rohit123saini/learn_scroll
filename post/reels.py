@@ -46,6 +46,16 @@ account only for followers) are NEVER loosened. `FEED_REELS["fallback"] = False`
 keeps the strict behaviour only. `manage.py reels_diagnose` shows which filter
 empties the pool.
 
+LAST TIER = YOUR OWN VIDEOS (`FEED_REELS["include_own_last_tier"]`, default True):
+the Home base queryset drops the caller's own posts (`.exclude(user=user)`), so on
+a small user base (few creators) the pool is empty or tiny even though videos
+exist - they are all the caller's own. When the unseen pool is still smaller than
+`min_pool` after every media tier, the caller's OWN public, approved, not
+sensitive, non-archived videos are appended (newest first, any aspect / duration,
+same safety rules incl. heavily-reported gate). They are always behind everybody
+else's videos, so on a big user base they never show up. Seen own videos are also
+used for the final seen top-up. `False` = never recommend a user their own reels.
+
 SEEN: videos the caller already saw (`PostView`, incl. the batch
 `POST /post/feed/seen/`) are excluded BEFORE the pool cap; if the pool ends up
 smaller than `FEED_SEEN_LIMITS["fill_min"]` it is topped up with seen videos at
@@ -83,6 +93,7 @@ DEFAULT_REELS = {
     "max_page_size": 30,
     "fallback": True,  # loosen the media rules in tiers when the pool is small (never-empty)
     "min_pool": 10,  # unseen pool size below which the next tier is added
+    "include_own_last_tier": True,  # small user base: append the caller's OWN public videos last
 }
 
 TIER_LABELS = ("strict", "any_aspect", "any_duration", "any_video")
@@ -107,6 +118,7 @@ def get_config() -> dict:
     cfg["max_page_size"] = max(1, cfg["max_page_size"])
     cfg["min_pool"] = max(0, cfg["min_pool"])
     cfg["fallback"] = bool(cfg["fallback"])
+    cfg["include_own_last_tier"] = bool(cfg["include_own_last_tier"])
     cfg["page_size"] = max(1, min(cfg["page_size"], cfg["max_page_size"]))
     return cfg
 
@@ -176,6 +188,24 @@ def candidate_queryset(user, base_qs, cfg: Optional[dict] = None, tier: int = 0)
     if hidden:
         qs = qs.exclude(user_id__in=hidden)
     return qs
+
+
+def own_candidate_queryset(user, cfg: Optional[dict] = None):
+    """The caller's OWN videos that may fill the LAST tier (see the module
+    docstring): public, approved, not sensitive / deleted / archived / scheduled,
+    with ANY video media row (no aspect / duration rule), and not heavily
+    reported. Plain `Post` queryset (not the Home base, which drops own posts)."""
+    from django.db.models import Exists, OuterRef
+
+    from . import feed_quality
+    from .models import Post
+
+    cfg = cfg or get_config()
+    qs = Post.objects.filter(
+        user=user, post_type="video", visibility="public", is_deleted=False, is_archived=False,
+        moderation_status="approved", is_sensitive=False, is_scheduled=False,
+    ).filter(Exists(playable_media_queryset(cfg, 3).filter(post_id=OuterRef("pk"))))
+    return feed_quality.exclude_reported_heavy(qs)
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +283,17 @@ def build_pool_ids(user, base_qs, video_and_velocity_boost, seen_ids: Optional[s
         if len(pool) >= max(want, 1) or len(pool) >= cap:
             break
 
+    # Phase 1b: LAST TIER - still small -> the caller's own unseen videos, newest first,
+    # always behind everybody else's (small user base: otherwise Reels would be empty).
+    own_on = cfg["include_own_last_tier"]
+    if own_on and len(pool) < min(max(cfg["min_pool"], 1), cap):
+        own = own_candidate_queryset(user, cfg).order_by("-created_at", "-id")
+        if pool:
+            own = own.exclude(id__in=pool)
+        if seen_ids:
+            own = own.exclude(id__in=seen_ids)
+        pool += list(own.values_list("id", flat=True)[: cap - len(pool)])
+
     # Phase 2: still tiny -> top up with SEEN videos at the tail (same as Home).
     target = min(cap, fill_min)
     if seen_ids and len(pool) < target:
@@ -260,6 +301,11 @@ def build_pool_ids(user, base_qs, video_and_velocity_boost, seen_ids: Optional[s
         if pool:
             qs = qs.exclude(id__in=pool)
         pool += list(qs.values_list("id", flat=True)[: target - len(pool)])
+    if own_on and seen_ids and len(pool) < target:
+        own_seen = own_candidate_queryset(user, cfg).filter(id__in=seen_ids).order_by("-created_at", "-id")
+        if pool:
+            own_seen = own_seen.exclude(id__in=pool)
+        pool += list(own_seen.values_list("id", flat=True)[: target - len(pool)])
     return pool
 
 
@@ -315,6 +361,11 @@ def diagnose(user, base_qs, cfg: Optional[dict] = None, seen_ids: Optional[set] 
         total = cq.count()
         unseen = cq.exclude(id__in=seen_ids).count() if seen_ids else total
         rows.append((f"TIER {tier} ({TIER_LABELS[tier]}): candidates / unseen", f"{total} / {unseen}"))
+    own_qs = own_candidate_queryset(user, cfg)
+    own_total = own_qs.count()
+    own_unseen = own_qs.exclude(id__in=seen_ids).count() if seen_ids else own_total
+    state = "ON" if cfg["include_own_last_tier"] else "OFF"
+    rows.append((f"OWN videos, last tier [include_own_last_tier={state}]: candidates / unseen", f"{own_total} / {own_unseen}"))
     return rows
 
 
@@ -344,7 +395,7 @@ def watchable_queryset(user):
     qs = (
         Post.objects.select_related("user", "original_post__user")
         .prefetch_related("media", "original_post__media")
-        .filter(post_type="video", is_deleted=False, moderation_status="approved", is_sensitive=False)
+        .filter(post_type="video", is_deleted=False, is_archived=False, moderation_status="approved", is_sensitive=False, is_scheduled=False)
         .annotate(is_followed=_followed_annotation(user))
         .filter(
             Q(user=user)
@@ -365,7 +416,7 @@ def page_queryset(user):
     return (
         watchable_queryset(user)
         .select_related(None).select_related("user")
-        .prefetch_related(None).prefetch_related("media")
+        .prefetch_related(None).prefetch_related("media__caption_tracks")  # R-B3: ONE extra query for every page
     )
 
 

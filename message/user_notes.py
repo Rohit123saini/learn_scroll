@@ -35,7 +35,7 @@ SETTINGS (sab optional, defaults ke saath)
     MESSAGE_REQUESTS_FOLLOWER_FIELD    = "follower"
     MESSAGE_REQUESTS_FOLLOWING_FIELD   = "following"
     NOTES_CLOSE_FRIEND_MODEL           = "post.CloseFriend"
-    NOTES_CLOSE_FRIEND_OWNER_FIELD     = "user"     # list ka maalik (note ka author)
+    NOTES_CLOSE_FRIEND_OWNER_FIELD     = "owner"    # list ka maalik (note ka author) — post.CloseFriend.owner
     NOTES_CLOSE_FRIEND_MEMBER_FIELD    = "friend"   # list me shamil banda (viewer)
 """
 import logging
@@ -91,7 +91,9 @@ def _follow_exists(viewer_id):
 
 def _close_friend_exists(viewer_id):
     model = apps.get_model(getattr(settings, 'NOTES_CLOSE_FRIEND_MODEL', 'post.CloseFriend'))
-    owner_field = getattr(settings, 'NOTES_CLOSE_FRIEND_OWNER_FIELD', 'user')
+    # T0.3 — default pehle 'user' tha, par `post.CloseFriend` me field `owner` hai
+    # ("Cannot resolve keyword 'user_id'") => fail-closed => close-friends notes kisi ko nahi dikhte.
+    owner_field = getattr(settings, 'NOTES_CLOSE_FRIEND_OWNER_FIELD', 'owner')
     member_field = getattr(settings, 'NOTES_CLOSE_FRIEND_MEMBER_FIELD', 'friend')
     return Exists(model.objects.filter(**{
         f'{owner_field}_id': OuterRef('user_id'),   # note ka author list ka maalik

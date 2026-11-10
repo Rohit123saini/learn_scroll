@@ -11,13 +11,16 @@ from rest_framework import serializers
 
 from common.pagination import get_max_page_size
 
+from . import profile_header  # P1
 from .models import (
     BlockUser,
     ContentReport,
+    ModerationAppeal,
     CoinLedger,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
     Follow,
+    PrivacySettings,
     RestrictUser,
     Streak,
     UserPreference,
@@ -27,7 +30,91 @@ from .models import (
 User = get_user_model()
 
 
-class UserProfileSerializer(serializers.ModelSerializer):
+# ---------------------------------------------------------------------------------------------------------- P1 header
+def _viewer(serializer):
+    """Who is looking: context["viewer"] (profile-detail view) or the request's user; None = unknown (treated as a stranger)."""
+    v = serializer.context.get("viewer")
+    if v is not None:
+        return v
+    request = serializer.context.get("request")
+    return getattr(request, "user", None) if request is not None else None
+
+
+class VerifiedFieldsMixin(serializers.Serializer):
+    """verified_reason / verified_label / verified_explain - the tick always says WHY (profile_header.verified_info)."""
+
+    verified_reason = serializers.SerializerMethodField()
+    verified_label = serializers.SerializerMethodField()
+    verified_explain = serializers.SerializerMethodField()
+
+    def get_verified_reason(self, obj):
+        return profile_header.verified_info(obj)["reason"]
+
+    def get_verified_label(self, obj):
+        return profile_header.verified_info(obj)["label"]
+
+    def get_verified_explain(self, obj):
+        return profile_header.verified_info(obj)["explain"]
+
+
+class ProfileHeaderMixin(VerifiedFieldsMixin):
+    """Read-only header extras: joined_at, bio_entities and - for the OWNER only - completeness + username_change.
+    The writable header fields (pronouns, links, location, cover_photo ...) come from the model via Meta.fields."""
+
+    joined_at = serializers.SerializerMethodField()
+    bio_entities = serializers.SerializerMethodField()
+    completeness = serializers.SerializerMethodField()
+    username_change = serializers.SerializerMethodField()
+    birthday = serializers.SerializerMethodField()  # P7 - "MM-DD" only when the owner chose to show it (never for minors)
+    edit_info = serializers.SerializerMethodField()  # P7 - owner only (DOB row + bio limit for the edit screen)
+
+    def get_birthday(self, obj):
+        return profile_header.birthday_label(obj)
+
+    def get_edit_info(self, obj):
+        return profile_header.edit_info(obj) if self._is_owner(obj) else None
+
+    def get_joined_at(self, obj):
+        return obj.date_joined.date().isoformat() if obj.date_joined else None
+
+    def get_bio_entities(self, obj):
+        return profile_header.bio_entities(obj.bio)
+
+    def _is_owner(self, obj):
+        v = _viewer(self)
+        return v is not None and getattr(v, "pk", None) == obj.pk
+
+    def get_completeness(self, obj):
+        return profile_header.profile_completeness(obj) if self._is_owner(obj) else None
+
+    def get_username_change(self, obj):
+        return profile_header.username_limit_state(obj) if self._is_owner(obj) else None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if "links" in data:
+            data["links"] = profile_header.safe_links(data["links"])  # P11 - never hand out an unsafe stored link
+        if not self._is_owner(instance):
+            data.pop("completeness", None)  # owner-only
+            data.pop("username_change", None)
+            data.pop("edit_info", None)  # P7 - owner only
+            if profile_header.hide_private_header_fields(instance, _viewer(self)):
+                if "location" in data:
+                    data["location"] = ""
+                if "links" in data:
+                    data["links"] = []
+        return data
+
+
+HEADER_READ_FIELDS = [
+    "cover_photo", "pronouns", "category_label", "links", "location",
+    "joined_at", "bio_entities", "completeness", "username_change",
+    "verified_reason", "verified_label", "verified_explain",
+    "birthday", "edit_info",  # P7
+]
+
+
+class UserProfileSerializer(ProfileHeaderMixin, serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
@@ -36,6 +123,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "profile_photo",
+            "profile_photo_blurhash",  # P10b
             "bio",
             "is_private",
             "is_verified",
@@ -43,7 +131,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "following_count",
             "posts_count",
             "coin",
-        ]
+        ] + HEADER_READ_FIELDS
         # 🔥 FIX: these are denormalized counters + a balance maintained by
         # views/other apps — never writable from the profile-update
         # payload, so they belong in read_only_fields, not just left out
@@ -52,6 +140,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "id",
             "username",
             "coin",
+            "profile_photo_blurhash",
             "is_verified",
             "followers_count",
             "following_count",
@@ -198,10 +287,17 @@ class MessageContactSearchSerializer(serializers.ModelSerializer):
     fields, koi profile_photo/bio waghera nahi.
     """
     mutual_friends = serializers.SerializerMethodField()
+    # True only for chat-search rows that are a friend-of-friend (no direct
+    # follow-relation with the viewer). Other callers never annotate `_direct`
+    # so it is always False there.
+    is_friend_of_friend = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "first_name", "last_name", "mutual_friends"]
+        fields = ["id", "username", "first_name", "last_name", "mutual_friends", "is_friend_of_friend"]
+
+    def get_is_friend_of_friend(self, obj):
+        return getattr(obj, "_direct", 0) == 1
 
     def get_mutual_friends(self, obj):
         request = self.context.get("request")
@@ -266,7 +362,7 @@ class FollowListRowSerializer(MessageContactSearchSerializer):
         return follow_status_map.get(obj.id) or "none"
 
 
-class TargetUserProfileSerializer(serializers.ModelSerializer):
+class TargetUserProfileSerializer(ProfileHeaderMixin, serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
@@ -275,16 +371,17 @@ class TargetUserProfileSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "profile_photo",
+            "profile_photo_blurhash",  # P10b
             "bio",
             "is_private",
             "is_verified",
             "followers_count",
             "following_count",
             "posts_count",
-        ]
+        ] + HEADER_READ_FIELDS
 
 
-class RestrictedTargetUserProfileSerializer(serializers.ModelSerializer):
+class RestrictedTargetUserProfileSerializer(VerifiedFieldsMixin, serializers.ModelSerializer):
     """
     🔥 NEW: what a private account shows to a viewer who isn't an accepted
     follower (and isn't the account owner) — Instagram-style "this account
@@ -296,10 +393,11 @@ class RestrictedTargetUserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "username", "first_name", "last_name", "is_private", "is_verified"]
+        fields = ["id", "username", "first_name", "last_name", "is_private", "is_verified",
+                  "verified_reason", "verified_label", "verified_explain"]
 
 
-class BlockedTargetUserProfileSerializer(serializers.ModelSerializer):
+class BlockedTargetUserProfileSerializer(VerifiedFieldsMixin, serializers.ModelSerializer):
     """
     Card shown to the BLOCKER when they open a profile they blocked
     (Instagram: photo + name, no bio/counts/posts, "Unblock" button).
@@ -308,7 +406,9 @@ class BlockedTargetUserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "username", "first_name", "last_name", "profile_photo", "is_private", "is_verified"]
+        fields = ["id", "username", "first_name", "last_name", "profile_photo", "profile_photo_blurhash",
+                  "is_private", "is_verified",
+                  "verified_reason", "verified_label", "verified_explain"]
         read_only_fields = fields
 
 
@@ -346,6 +446,8 @@ class UserProfileDetailResponseSerializer(serializers.Serializer):
     # never reveal whether *they* are restricting *me*, or whether I am
     # restricted by them.
     am_i_restricting = serializers.BooleanField()
+    # P10: ok | private | blocked_by_me | suspended (see profile_state.py). Blocked-ME / no such user = 404.
+    profile_state = serializers.CharField(required=False)
     data = serializers.DictField()
 
 
@@ -364,9 +466,11 @@ class SafeProfilePhotoField(serializers.ImageField):
     """
 
     _ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
+    _max_bytes_setting = "PROFILE_PHOTO_MAX_BYTES"  # P1: the cover photo subclass overrides these two
+    _max_bytes_default = 5 * 1024 * 1024
 
     def to_internal_value(self, data):
-        max_bytes = getattr(settings, "PROFILE_PHOTO_MAX_BYTES", 5 * 1024 * 1024)
+        max_bytes = getattr(settings, self._max_bytes_setting, self._max_bytes_default)
         allowed_ext = {
             e.lower().lstrip(".")
             for e in getattr(settings, "PROFILE_PHOTO_ALLOWED_EXTENSIONS", ("jpg", "jpeg", "png", "webp"))
@@ -398,27 +502,124 @@ class SafeProfilePhotoField(serializers.ImageField):
         return value
 
 
-class ProfileUpdateSerializer(serializers.ModelSerializer):
-    # Explicit (instead of the auto ImageField) so uploads are validated —
+class SafeCoverPhotoField(SafeProfilePhotoField):
+    """P1 - cover / banner: same checks as the avatar (extension, real format, pixel cap) but a bigger size cap."""
+
+    _max_bytes_setting = "PROFILE_COVER_MAX_BYTES"
+    _max_bytes_default = 8 * 1024 * 1024
+
+
+class ProfileLinksField(serializers.Field):
+    """`links`: a list of {title, url}, or (multipart forms can't send lists) a JSON string of that list.
+    Cleaned through login.models.clean_profile_links - the SAME function the model validator uses."""
+
+    default_error_messages = {"invalid": "links must be a list of {title, url} objects."}
+
+    def to_internal_value(self, data):
+        import json
+
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from login.models import clean_profile_links
+
+        if isinstance(data, str):
+            text = data.strip()
+            if not text:
+                data = []
+            else:
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    self.fail("invalid")
+        try:
+            return clean_profile_links(data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+
+    def to_representation(self, value):
+        return value or []
+
+
+class ProfileUpdateSerializer(ProfileHeaderMixin, serializers.ModelSerializer):
+    # Explicit (instead of the auto ImageField) so uploads are validated -
     # `max_length=100` mirrors the model field's filename limit.
     profile_photo = SafeProfilePhotoField(required=False, allow_null=True, max_length=100)
+    cover_photo = SafeCoverPhotoField(required=False, allow_null=True, max_length=100)  # P1
+    links = ProfileLinksField(required=False)  # P1 (max 5)
+    # P1 - explicit "remove" switches (a multipart form can't send null). Write-only.
+    remove_profile_photo = serializers.BooleanField(required=False, write_only=True, default=False)
+    remove_cover_photo = serializers.BooleanField(required=False, write_only=True, default=False)
 
     class Meta:
         model = User
-        # 🔥 FIX: `is_private` is a user-facing privacy toggle — it was
+        # 🔥 FIX: `is_private` is a user-facing privacy toggle - it was
         # defined on the model and referenced everywhere in views, but
         # there was no way for a user to actually flip it via the API.
-        fields = ["username", "first_name", "last_name", "bio", "profile_photo", "is_private"]
+        fields = [
+            "username", "first_name", "last_name", "bio", "profile_photo", "is_private",
+            "pronouns", "category_label", "links", "location", "cover_photo",
+            "remove_profile_photo", "remove_cover_photo",
+            "date_of_birth", "show_birthday",  # P7 (write: DOB only while empty; birthday never for minors)
+        ] + [f for f in HEADER_READ_FIELDS if f not in ("cover_photo", "pronouns", "category_label", "links", "location")]
         extra_kwargs = {
-            "username": {"required": False},
+            # P1: validators=[] drops the stock case-sensitive UniqueValidator + Unicode validator - validate_username()
+            # below applies every rule (format, reserved, case-insensitive taken, 14-day limit) with ONE message set.
+            "username": {"required": False, "validators": []},
             "first_name": {"required": False},
             "last_name": {"required": False},
             # 🔥 FIX: unbounded TextField + MultiPartParser form field with
             # no cap is an easy abuse/DoS vector. 500 chars is a reasonable
-            # Instagram-style bio limit — adjust to taste.
+            # Instagram-style bio limit - adjust to taste.
             "bio": {"required": False, "max_length": 500},
             "is_private": {"required": False},
+            "pronouns": {"required": False},
+            "category_label": {"required": False},
+            "location": {"required": False},
+            "date_of_birth": {"required": False, "allow_null": False},  # P7
+            "show_birthday": {"required": False},  # P7
         }
+
+    def validate_bio(self, value):
+        # P7 - 150 chars (300 for verified accounts). Only when the bio CHANGES, so an old longer bio never blocks
+        # saving some other field.
+        user = self.context["request"].user
+        value = value or ""
+        limit = profile_header.bio_limit(user)
+        if value.strip() != (user.bio or "").strip() and len(value.strip()) > limit:
+            raise serializers.ValidationError(f"Bio can be at most {limit} characters.", code="bio_too_long")
+        return value
+
+    def validate_date_of_birth(self, value):
+        # P7 - set once. A minor must not become an adult (or the other way round) by retyping the date here.
+        from login.age import dob_problem
+
+        user = self.context["request"].user
+        if user.date_of_birth is not None:
+            if value == user.date_of_birth:
+                return value
+            raise serializers.ValidationError(
+                "Your date of birth is already set. Contact support to correct it.", code="dob_locked"
+            )
+        problem = dob_problem(value)
+        if problem is not None:
+            code, message = problem
+            raise serializers.ValidationError(message, code=code)
+        return value
+
+    def validate(self, attrs):
+        from login.age import is_minor_dob
+
+        attrs = super().validate(attrs)
+        if attrs.get("show_birthday") is True:
+            user = self.context["request"].user
+            dob = attrs.get("date_of_birth") or user.date_of_birth
+            if dob is None:
+                raise serializers.ValidationError({"show_birthday": ["Add your date of birth first."]}, code="birthday_no_dob")
+            if is_minor_dob(dob):
+                raise serializers.ValidationError(
+                    {"show_birthday": ["Birthdays of accounts under 18 are never shown."]}, code="birthday_minor"
+                )
+        return attrs
 
     def validate_is_private(self, value):
         # Minor-safety: under-18 accounts are private and can't go public.
@@ -431,12 +632,59 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 
     def validate_username(self, value):
         user = self.context["request"].user
-        # 🔥 FIX: case-sensitive uniqueness lets "Sam" and "sam" coexist,
-        # which is a common source of impersonation/confusion complaints
-        # in production. Compare case-insensitively.
-        if User.objects.filter(username__iexact=value).exclude(pk=user.pk).exists():
-            raise serializers.ValidationError("Ye username already taken hai.")
+        value = (value or "").strip()
+        if value == user.username:
+            return value  # unchanged
+        # One place for every rule (format, reserved, case-insensitive uniqueness, 1 change / 14 days).
+        # A change of only capital letters ("sam" -> "Sam") is allowed and does not use up the 14 days.
+        result = profile_header.check_username(user, value)
+        if not result["available"]:
+            code = result["code"]
+            if code == "taken":
+                raise serializers.ValidationError(profile_header.username_message("taken"), code="taken")
+            raise serializers.ValidationError(result["message"], code=code)
         return value
+
+    def validate_pronouns(self, value):
+        return " ".join((value or "").split())
+
+    def validate_location(self, value):
+        value = " ".join((value or "").split())
+        if any(ch in value for ch in "<>") or re.search(r"https?://|www\.", value, re.IGNORECASE):
+            raise serializers.ValidationError("Enter a place name, not a link.")
+        return value
+
+    def validate_category_label(self, value):
+        value = " ".join((value or "").split())
+        user = self.context["request"].user
+        if value and profile_header.category_label_claims_badge(value) and not user.is_verified:
+            raise serializers.ValidationError(
+                "This label looks like a verification badge. Only verified accounts can use it."
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        remove_photo = validated_data.pop("remove_profile_photo", False)
+        remove_cover = validated_data.pop("remove_cover_photo", False)
+        # "remove" wins over nothing, never over a new upload sent in the same request
+        if remove_photo and validated_data.get("profile_photo") is None:
+            validated_data["profile_photo"] = None
+        if remove_cover and validated_data.get("cover_photo") is None:
+            validated_data["cover_photo"] = None
+        # P7 - a date of birth that makes the account a minor locks the safe defaults at once (private, birthday hidden).
+        new_dob = validated_data.get("date_of_birth")
+        if new_dob is not None:
+            from login.age import is_minor_dob
+
+            if is_minor_dob(new_dob):
+                validated_data["is_private"] = True
+                validated_data["show_birthday"] = False
+        new_username = validated_data.get("username")
+        if new_username and new_username != instance.username and not profile_header.is_case_only_change(instance, new_username):
+            from django.utils import timezone
+
+            validated_data["username_changed_at"] = timezone.now()
+        return super().update(instance, validated_data)
 
 
 # 🔥 Block / Unblock user
@@ -649,6 +897,18 @@ class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
     # amount/coins fields give.
     coins = serializers.IntegerField(min_value=1)
 
+    # S9: display-only fields (masked payout line + whether a PDF payout slip can be downloaded).
+    payout_summary = serializers.SerializerMethodField()
+    receipt_available = serializers.SerializerMethodField()
+
+    def get_payout_summary(self, obj):
+        from .wallet_receipt_pdf import payout_summary
+
+        return payout_summary(obj.payout_method, obj.payout_details)
+
+    def get_receipt_available(self, obj):
+        return obj.status == CoinWithdrawalRequest.Status.SUCCESS
+
     class Meta:
         model = CoinWithdrawalRequest
         fields = [
@@ -660,8 +920,14 @@ class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
             "failure_reason",
             "created_at",
             "updated_at",
+            # S9 (read-only, display): INR value snapshot, review time, masked payout, PDF slip available
+            "amount_inr",
+            "reviewed_at",
+            "payout_summary",
+            "receipt_available",
         ]
-        read_only_fields = ["id", "status", "failure_reason", "created_at", "updated_at"]
+        read_only_fields = ["id", "status", "failure_reason", "created_at", "updated_at",
+                            "amount_inr", "reviewed_at", "payout_summary", "receipt_available"]
         # The MODEL keeps `payout_method` blank=True (internal/admin callers
         # of request_withdrawal() may omit it), which makes the auto-generated
         # serializer field optional + blank-allowed — so an API caller could
@@ -821,17 +1087,131 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
         max_length=10,
     )
 
+    # S8 -- Learning preferences. Time 'HH:MM' (user ka local time); days 0=Mon .. 6=Sun, [] = har din.
+    study_reminder_time = serializers.TimeField(
+        format="%H:%M", input_formats=["%H:%M", "%H:%M:%S"], required=False,
+    )
+    study_reminder_days = serializers.ListField(
+        child=serializers.IntegerField(min_value=0, max_value=6), required=False, allow_empty=True, max_length=7,
+    )
+    # [{"days": [0..6], "start": "HH:MM", "end": "HH:MM"}, ...] max 3 (learning_prefs.normalize_focus_windows).
+    focus_schedule = serializers.JSONField(required=False)
+    content_languages = serializers.ListField(
+        child=serializers.CharField(max_length=10), required=False, allow_empty=True, max_length=3,
+    )
+    # READ-ONLY: abhi (user ke local time par) focus-schedule ki window chal rahi hai? / Exam Mode ya window - kuch bhi.
+    focus_schedule_active = serializers.SerializerMethodField()
+    focus_now = serializers.SerializerMethodField()
+
+    # S2 / R14 -- account-level Appearance + Data & storage (schema + merge: user_profile/pref_sync.py).
+    # PATCH me sirf badli hui keys; server stored dict me merge karta hai.
+    appearance = serializers.JSONField(required=False)
+    data_storage = serializers.JSONField(required=False)
+
     class Meta:
         model = UserPreference
         fields = [
             "theme", "language", "font_scale", "updated_at",
             "exam_target", "class_level", "focus_subjects", "exam_date",
-            "exam_mode", "exam_mode_active",
+            "exam_mode", "exam_mode_active", "login_alerts",
+            # S8 learning preferences
+            "study_reminder_enabled", "study_reminder_time", "study_reminder_days",
+            "focus_schedule_enabled", "focus_schedule", "focus_schedule_active", "focus_now",
+            "content_level", "content_languages",
+            # S2 / R14 account-level sync
+            "appearance", "data_storage",
         ]
-        read_only_fields = ["updated_at", "exam_mode_active"]
+        read_only_fields = ["updated_at", "exam_mode_active", "focus_schedule_active", "focus_now"]
 
     # Feed ko in fields se farak padta hai — view inhe dekh ke feed cache invalidate karta hai.
-    STUDY_PROFILE_FIELDS = ("exam_target", "class_level", "focus_subjects", "exam_date", "exam_mode")
+    STUDY_PROFILE_FIELDS = (
+        "exam_target", "class_level", "focus_subjects", "exam_date", "exam_mode",
+        # S8: level / language boost aur focus window feed badalte hain.
+        "content_level", "content_languages", "focus_schedule", "focus_schedule_enabled",
+    )
+
+    def _focus_tz(self, obj):
+        from . import learning_prefs
+
+        return learning_prefs.user_tz(obj.user_id)
+
+    def get_focus_schedule_active(self, obj):
+        try:
+            return bool(obj.focus_schedule_active(tz=self._focus_tz(obj)))
+        except Exception:  # noqa: BLE001 - settings screen ko kabhi 500 nahi
+            return False
+
+    def get_focus_now(self, obj):
+        try:
+            return bool(obj.focus_now(tz=self._focus_tz(obj)))
+        except Exception:  # noqa: BLE001
+            return bool(getattr(obj, "exam_mode_active", False))
+
+    def validate_study_reminder_days(self, value):
+        from . import learning_prefs
+
+        try:
+            return learning_prefs.normalize_days(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+
+    def validate_focus_schedule(self, value):
+        from . import learning_prefs
+
+        try:
+            return learning_prefs.normalize_focus_windows(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+
+    def validate_content_languages(self, value):
+        from . import learning_prefs
+
+        try:
+            return learning_prefs.normalize_languages(
+                value, getattr(settings, "SUPPORTED_LANGUAGES", ("en",)),
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+
+    @staticmethod
+    def _validate_sync_dict(value, schema):
+        from . import pref_sync
+
+        try:
+            return pref_sync.normalize_partial(value, schema)
+        except pref_sync.PrefSyncError as exc:
+            # Nested errors: {"appearance": {"accent": ["Allowed: ..."]}} -> client kaun si key rejected hui wahi wapas karta hai.
+            raise serializers.ValidationError({k: [msg] for k, msg in exc.errors.items()})
+
+    def validate_appearance(self, value):
+        from . import pref_sync
+
+        return self._validate_sync_dict(value, pref_sync.APPEARANCE_SCHEMA)
+
+    def validate_data_storage(self, value):
+        from . import pref_sync
+
+        return self._validate_sync_dict(value, pref_sync.DATA_STORAGE_SCHEMA)
+
+    def update(self, instance, validated_data):
+        # S2 / R14: appearance / data_storage MERGE hote hain (replace nahi) - do device alag keys badlein to ek doosre
+        # ko overwrite na karein.
+        from . import pref_sync
+
+        for name, schema in pref_sync.SYNC_FIELDS.items():
+            if name in validated_data:
+                validated_data[name] = pref_sync.merge_stored(getattr(instance, name, None), validated_data[name], schema)
+        return super().update(instance, validated_data)
+
+    def validate(self, attrs):
+        # Schedule ON hai to kam se kam ek window honi chahiye (PATCH partial ho sakta hai: stored value bhi dekho).
+        enabled = attrs.get("focus_schedule_enabled", getattr(self.instance, "focus_schedule_enabled", False))
+        windows = attrs.get("focus_schedule", getattr(self.instance, "focus_schedule", []))
+        if enabled and not windows:
+            raise serializers.ValidationError(
+                {"focus_schedule": ["Schedule chalu karne se pehle kam se kam ek window jodo."]}
+            )
+        return attrs
 
     def validate_focus_subjects(self, value):
         # Strip + case-insensitive de-dupe, order preserved.
@@ -941,3 +1321,69 @@ class SimilarUsersResponseSerializer(serializers.Serializer):
 
     status = serializers.BooleanField()
     suggested_users = UserSearchSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# Trust & safety: notices, appeals, child-safety help
+# ---------------------------------------------------------------------------
+class ModerationNoticeSerializer(serializers.Serializer):
+    """One row of Settings > Notices: what was done to MY content and whether I may appeal."""
+
+    id = serializers.IntegerField()
+    action = serializers.CharField()
+    target_type = serializers.CharField()
+    target_id = serializers.CharField()
+    reason = serializers.CharField()
+    note = serializers.CharField()
+    created_at = serializers.DateTimeField()
+    can_appeal = serializers.BooleanField()
+    appeal_status = serializers.CharField(allow_null=True)
+
+
+class ModerationAppealSerializer(serializers.ModelSerializer):
+    notice_id = serializers.IntegerField(source="action_id", read_only=True)
+
+    class Meta:
+        model = ModerationAppeal
+        fields = ["id", "notice_id", "target_type", "target_id", "message", "status",
+                  "decision_note", "created_at", "decided_at"]
+
+
+class ModerationAppealCreateSerializer(serializers.Serializer):
+    notice_id = serializers.IntegerField()
+    message = serializers.CharField(min_length=10, max_length=1000)
+
+
+class PrivacySettingsSerializer(serializers.ModelSerializer):
+    """S4 -- GET/PATCH /profile/privacy/. Every field optional on PATCH (send only what changed)."""
+
+    class Meta:
+        model = PrivacySettings
+        fields = [
+            "message_from", "call_from", "tag_from", "mention_from", "group_add_from",
+            "online_status_from", "followers_list_from",
+            "hide_from_search", "find_by_phone", "find_by_email",
+            # S4b - defaults for new posts / stories
+            "default_story_audience", "default_post_visibility", "default_comments_limit",
+            "default_allow_reshare", "default_allow_save",
+            "updated_at",
+        ]
+        read_only_fields = ["updated_at"]
+
+
+# P8 - POST /profile/follow-requests/bulk/
+class BulkFollowRequestSerializer(serializers.Serializer):
+    """{"action": "accept"|"decline", "follow_ids": [..]}  or  {"action": ..., "select_all": true}.
+    Max 100 ids per call (`relationships.BULK_MAX`); with select_all the newest 100 are used and the reply's
+    `remaining` tells the app whether to call again."""
+
+    action = serializers.ChoiceField(choices=["accept", "decline"])
+    follow_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_empty=True, max_length=100
+    )
+    select_all = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs):
+        if not attrs.get("select_all") and not attrs.get("follow_ids"):
+            raise serializers.ValidationError("Send follow_ids or select_all.")
+        return attrs

@@ -1,48 +1,125 @@
 # login/serializers.py
 from rest_framework import serializers
+from rest_framework.exceptions import ErrorDetail
+from django.contrib.auth.password_validation import validate_password as django_validate_password
 from .models import User, OTPVerification, phone_validator
 from .age import is_minor_dob
+from .disposable import (  # L1 gap 18 -- disposable email / virtual phone block
+    CODE_DISPOSABLE_PHONE,
+    FIELD_EMAIL_DISPOSABLE,
+    FIELD_PHONE_DISPOSABLE,
+    FIELD_PHONE_INVALID,
+    MSG_DISPOSABLE_EMAIL,
+    is_disposable_email,
+    phone_problem,
+)
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 import re
 
 
-def validate_strong_password(value):
+def password_problem_pairs(value, user=None, phone=None):
     """
-    Shared password-strength rule used by both signup and change-password,
-    so the two never silently drift apart.
+    Run Django's AUTH_PASSWORD_VALIDATORS (L1 gap 15) and return
+    ``(message, code)`` pairs (empty list = fine). The code (``password_too_common``,
+    ``password_too_similar``, ``password_contains_phone``...) is what the app
+    translates into Hindi/English (L1 gap 17); the message is the English fallback.
+    ``password_problems()`` below returns just the messages.
+
+    Before this, nothing ever called ``validate_password()``, so the validators
+    configured in settings.py -- the common-password list, "entirely numeric",
+    similarity to username/name/email, and the staff policy -- were dead
+    config: "P@ssw0rd" (upper + lower + digit + symbol, yet on every common-
+    password list) sailed through signup.
+
+    ``user`` may be an unsaved ``User(...)`` built from the signup form (so the
+    similarity check works before the account exists). ``phone`` additionally
+    stops a password that simply contains the person's own phone number, which
+    is the first thing someone who knows them would try.
+    """
+    problems = []
+    try:
+        django_validate_password(value, user=user)
+    except DjangoValidationError as exc:
+        for err in exc.error_list:
+            problems.append((err.messages[0], err.code or "password_invalid"))
+
+    phone_digits = re.sub(r"\D", "", phone or getattr(user, "phone", "") or "")
+    if len(phone_digits) >= 8 and phone_digits[-8:] in re.sub(r"\D", "", value):
+        problems.append(("Password cannot contain your phone number.", "password_contains_phone"))
+    return problems
+
+
+def password_problems(value, user=None, phone=None):
+    """Just the messages of ``password_problem_pairs`` (empty list = fine)."""
+    return [message for message, _code in password_problem_pairs(value, user=user, phone=phone)]
+
+
+def validate_strong_password(value, user=None, phone=None):
+    """
+    Shared password-strength rule used by signup, change-password and
+    reset-password, so they never silently drift apart.
+
+    The composition rules below are mirrored by the app's strength meter
+    (lib/login/password_strength.dart) -- change one, change the other.
     """
     if value != value.strip():
         raise serializers.ValidationError(
-            "Password cannot start or end with spaces."
+            "Password cannot start or end with spaces.",
+            code="password_edge_spaces",
         )
 
     if len(value) < 8:
         raise serializers.ValidationError(
-            "Password must be at least 8 characters."
+            "Password must be at least 8 characters.",
+            code="password_min_length",
         )
 
     if not re.search(r"[A-Z]", value):
         raise serializers.ValidationError(
-            "Password must contain one uppercase letter."
+            "Password must contain one uppercase letter.",
+            code="password_no_upper",
         )
 
     if not re.search(r"[a-z]", value):
         raise serializers.ValidationError(
-            "Password must contain one lowercase letter."
+            "Password must contain one lowercase letter.",
+            code="password_no_lower",
         )
 
     if not re.search(r"[0-9]", value):
         raise serializers.ValidationError(
-            "Password must contain one number."
+            "Password must contain one number.",
+            code="password_no_digit",
         )
 
-    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
+    # Any symbol counts (it used to be a fixed list, so "_" or "-" or "~" were
+    # refused while the staff policy accepted them). Whitespace does not count.
+    if not re.search(r"[^A-Za-z0-9\s]", value):
         raise serializers.ValidationError(
-            "Password must contain one special character."
+            "Password must contain one special character.",
+            code="password_no_special",
         )
+
+    # L1 gap 15 -- Django's validators (common list, numeric-only, similarity...).
+    pairs = password_problem_pairs(value, user=user, phone=phone)
+    if pairs:
+        raise serializers.ValidationError([ErrorDetail(m, code=c) for m, c in pairs])
 
     return value
+
+
+def raise_if_bad_new_phone(value):
+    """L1 gap 18 -- refuse a NEW number that is fake-looking or in a blocked virtual
+    range. ``value`` is already normalised. Same rules as send-otp, minus the paid
+    carrier lookup (that ran when the code was requested)."""
+    problem = phone_problem(value)
+    if problem:
+        code, message = problem
+        raise serializers.ValidationError(
+            message,
+            code=FIELD_PHONE_DISPOSABLE if code == CODE_DISPOSABLE_PHONE else FIELD_PHONE_INVALID,
+        )
 
 
 def validate_phone_format(value):
@@ -101,12 +178,12 @@ class SignupSerializer(serializers.ModelSerializer):
         style={"input_type": "password"},
     )
 
-    # Optional now — a signup with no phone must go through cleanly.
-    # allow_null covers a client sending JSON `null`; allow_blank covers
-    # an empty string ("") from a form field. Either way it ends up as
-    # None (see validate_phone below / models.User.save()'s blank->None
-    # normalization), never as ''.
-    phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    # L1 gaps 4 + 12 -- phone-first signup: the phone is REQUIRED and must have
+    # been verified with an OTP (validate() below checks the verified
+    # OTPVerification row). Email is now optional, and if it is sent it must be
+    # OTP-verified too, so nobody can attach someone else's address to an account.
+    phone = serializers.CharField(required=True, allow_blank=False)
+    email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
 
     # Minor-safety: required at signup. Under MIN_SIGNUP_AGE is refused;
     # under 18 the account is created private and stays private.
@@ -129,50 +206,70 @@ class SignupSerializer(serializers.ModelSerializer):
 
         value = value.strip()
 
+        # L1 gap 5: a username must never look like someone's email or phone
+        # number (it used to be possible to register "victim@gmail.com" and
+        # collide with / hijack that person's email login). See identifiers.py.
+        from .identifiers import username_problem
+
+        problem = username_problem(value)
+        if problem:
+            raise serializers.ValidationError(problem[1], code=problem[0])
+
         if User.objects.filter(username=value).exists():
             raise serializers.ValidationError(
-                "Username already exists."
+                "Username already exists.",
+                code="username_exists",
             )
 
         return value
 
     def validate_email(self, value):
 
-        value = value.strip().lower()
+        value = (value or "").strip().lower()
+        if not value:
+            return None
+
+        # L1 gap 18 -- no throw-away mailbox domains on a new account.
+        if is_disposable_email(value):
+            raise serializers.ValidationError(MSG_DISPOSABLE_EMAIL, code=FIELD_EMAIL_DISPOSABLE)
 
         if User.objects.filter(email=value).exists():
             raise serializers.ValidationError(
-                "Email already exists."
+                "Email already exists.",
+                code="email_exists",
             )
 
         return value
 
     def validate_phone(self, value):
 
-        value = (value or "").strip()
+        # Same normalisation SendOTPView / VerifyOTPView use, so the value here
+        # is exactly the OTPVerification.target that was verified.
+        from .identifiers import KIND_PHONE, normalize_identifier
 
-        # Phone is optional — no value means "skip validation, skip the
-        # uniqueness check, store as None" (User.save() also normalizes
-        # '' -> None, but returning None here up front keeps attrs["phone"]
-        # correct for the OTP lookup in validate() below too).
-        if not value:
-            return None
+        value, kind = normalize_identifier(value)
+        if kind != KIND_PHONE:
+            raise serializers.ValidationError(
+                "Enter a valid phone number in international format, e.g. +919876543210.",
+                code="phone_invalid_format",
+            )
 
-        value = validate_phone_format(value)
+        raise_if_bad_new_phone(value)  # L1 gap 18
 
         if User.objects.filter(phone=value).exists():
             raise serializers.ValidationError(
-                "Phone number already exists."
+                "Phone number already exists.",
+                code="phone_exists",
             )
 
         return value
 
     def validate_date_of_birth(self, value):
-        from .age import dob_error
+        from .age import dob_problem
 
-        error = dob_error(value)
-        if error:
-            raise serializers.ValidationError(error)
+        problem = dob_problem(value)
+        if problem:
+            raise serializers.ValidationError(problem[1], code=problem[0])
         return value
 
     def validate_password(self, value):
@@ -183,64 +280,72 @@ class SignupSerializer(serializers.ModelSerializer):
         if attrs["password"] != attrs["confirm_password"]:
 
             raise serializers.ValidationError({
-
-                "confirm_password":
-                    "Password and Confirm Password do not match."
-
+                "confirm_password": ErrorDetail(
+                    "Password and Confirm Password do not match.", code="passwords_mismatch"
+                )
             })
 
-        # Task 15 (server-side OTP-verified check): the comment two lines
-        # below this used to say "email OTP verify-otp step se pehle hi ho
-        # chuka hota hai" and set `is_verified=True` on that trust alone —
-        # but nothing here ever confirmed that step actually happened.
-        # /verify-otp/ and /signup/ were two independent endpoints linked
-        # only by the *frontend* calling them in order; hitting /signup/
-        # directly with no prior OTP step worked exactly the same. This
-        # now requires a real, unexpired, `is_verified=True`
-        # OTPVerification row (set by VerifyOTPView — see models.py
-        # OTPVerification.is_verified) for either the submitted email or
-        # phone before an account can be created at all.
-        email = attrs.get("email")
-        phone = attrs.get("phone")
-
-        otp_obj = (
-            OTPVerification.objects.filter(
-                Q(target=email) | Q(target=phone),
-                is_verified=True,
-            )
-            .order_by("-created_at")
-            .first()
+        # L1 gap 15 -- validate_password() with the person's own details, so a
+        # password built from their username / name / phone is refused. (The
+        # user-less checks already ran in validate_password() above.)
+        pairs = password_problem_pairs(
+            attrs["password"],
+            user=User(
+                username=attrs.get("username", ""),
+                first_name=attrs.get("first_name", ""),
+                last_name=attrs.get("last_name", ""),
+                email=attrs.get("email") or "",
+            ),
+            phone=attrs.get("phone"),
         )
+        if pairs:
+            raise serializers.ValidationError({"password": [ErrorDetail(m, code=c) for m, c in pairs]})
 
-        if not otp_obj or otp_obj.is_expired():
-            raise serializers.ValidationError(
-                "Please verify your email or phone with OTP before signing up."
-            )
+        # L1 gaps 4 + 12 -- the phone must have been verified by VerifyOTPView
+        # (a real, unexpired, is_verified=True OTPVerification row for exactly
+        # this number). Nothing else can create the account, so a phone can no
+        # longer be saved without its owner proving control of it.
+        phone = attrs["phone"]
+        email = attrs.get("email")
 
-        # Stashed for create() — consumed (deleted) once the account is
-        # actually made, so this same verified OTP can't be replayed for
-        # a second signup.
-        attrs["_otp_obj"] = otp_obj
+        phone_otp = OTPVerification.objects.filter(target=phone, is_verified=True).first()
+        if phone_otp is None or phone_otp.is_expired():
+            raise serializers.ValidationError({
+                "phone": ErrorDetail(
+                    "Please verify your phone number with OTP before signing up.", code="phone_not_verified"
+                )
+            })
+        otp_objs = [phone_otp]
+
+        if email:
+            email_otp = OTPVerification.objects.filter(target=email, is_verified=True).first()
+            if email_otp is None or email_otp.is_expired():
+                raise serializers.ValidationError({
+                    "email": ErrorDetail(
+                        "Verify this email with an OTP before adding it.", code="email_not_verified"
+                    )
+                })
+            otp_objs.append(email_otp)
+
+        # Stashed for create() -- consumed (deleted) once the account is
+        # actually made, so a verified OTP can't be replayed for a second signup.
+        attrs["_otp_objs"] = otp_objs
 
         return attrs
 
     def create(self, validated_data):
 
-        otp_obj = validated_data.pop("_otp_obj")
+        otp_objs = validated_data.pop("_otp_objs")
         validated_data.pop("confirm_password")
 
         user = User.objects.create_user(
 
             username=validated_data["username"],
-            email=validated_data["email"],
+            email=validated_data.get("email"),
             first_name=validated_data["first_name"],
             last_name=validated_data["last_name"],
-            # .get, not [...]: phone is optional now, so with
-            # required=False and no default, the key is simply absent
-            # from validated_data when the client omits it entirely
-            # (as opposed to sending "" / null, which validate_phone
-            # turns into None) — direct indexing would KeyError.
-            phone=validated_data.get("phone"),
+            phone=validated_data["phone"],
+            phone_verified=True,  # L1 gap 4 -- proven by the OTP row checked in validate()
             date_of_birth=validated_data["date_of_birth"],
             # Under-18 accounts start (and stay) private.
             is_private=is_minor_dob(validated_data["date_of_birth"]),
@@ -251,8 +356,9 @@ class SignupSerializer(serializers.ModelSerializer):
 
         )
 
-        # Consume the OTP row so it can't be reused for another signup.
-        otp_obj.delete()
+        # Consume the OTP rows so they can't be reused for another signup.
+        for otp_obj in otp_objs:
+            otp_obj.delete()
 
         return user
 
@@ -274,6 +380,12 @@ class VerifyOTPSerializer(serializers.Serializer):
 
 class ChangePasswordSerializer(serializers.Serializer):
 
+    # S3 -- re-auth. Checked in ChangePasswordAPIView (accounts WITHOUT a usable password, i.e. Google-only, have none).
+    current_password = serializers.CharField(
+        write_only=True, required=False, allow_blank=True,
+        style={"input_type": "password"},
+    )
+
     new_password = serializers.CharField(
         write_only=True,
         style={"input_type": "password"},required=True
@@ -285,14 +397,16 @@ class ChangePasswordSerializer(serializers.Serializer):
     )
 
     def validate_new_password(self, value):
-        return validate_strong_password(value)
+        # L1 gap 15: the view passes context={"user": request.user}.
+        return validate_strong_password(value, user=self.context.get("user"))
 
     def validate(self, attrs):
 
         if attrs["new_password"] != attrs["confirm_password"]:
             raise serializers.ValidationError({
-                "confirm_password":
-                    "Password and Confirm Password do not match."
+                "confirm_password": ErrorDetail(
+                    "Password and Confirm Password do not match.", code="passwords_mismatch"
+                )
             })
 
         return attrs
@@ -307,25 +421,40 @@ class SetDateOfBirthSerializer(serializers.Serializer):
     date_of_birth = serializers.DateField(required=True)
 
     def validate_date_of_birth(self, value):
-        from .age import dob_error
+        from .age import dob_problem
 
-        error = dob_error(value)
-        if error:
-            raise serializers.ValidationError(error)
+        problem = dob_problem(value)
+        if problem:
+            raise serializers.ValidationError(problem[1], code=problem[0])
         return value
 
 
 class CompleteProfileSerializer(serializers.Serializer):
     phone = serializers.CharField(required=True)
+    # L1 gap 4 -- the code that was sent to `phone` (via /auth/send-otp/). The
+    # view spends it; the number is only saved if it is correct.
+    otp = serializers.CharField(max_length=6, required=True)
 
     def validate_phone(self, value):
-        value = value.strip()
+        from .identifiers import KIND_PHONE, normalize_identifier
 
-        value = validate_phone_format(value)
-
-        if User.objects.filter(phone=value).exists():
+        value, kind = normalize_identifier(value)
+        if kind != KIND_PHONE:
             raise serializers.ValidationError(
-                "Phone number already exists."
+                "Enter a valid phone number in international format, e.g. +919876543210.",
+                code="phone_invalid_format",
+            )
+
+        raise_if_bad_new_phone(value)  # L1 gap 18
+
+        user = self.context.get("user")
+        others = User.objects.filter(phone=value)
+        if user is not None:
+            others = others.exclude(pk=user.pk)
+        if others.exists():
+            raise serializers.ValidationError(
+                "Phone number already exists.",
+                code="phone_exists",
             )
         return value
 
@@ -370,7 +499,8 @@ class ResetPasswordSerializer(serializers.Serializer):
     def validate(self, attrs):
         if attrs["new_password"] != attrs["confirm_password"]:
             raise serializers.ValidationError({
-                "confirm_password":
-                    "Password and Confirm Password do not match."
+                "confirm_password": ErrorDetail(
+                    "Password and Confirm Password do not match.", code="passwords_mismatch"
+                )
             })
         return attrs

@@ -1,0 +1,42 @@
+# P-C8 -- cache headers / CDN rules for nginx in front of Django (and the same rules for CloudFront / Cloudflare).
+# Include inside the `server {}` that proxies to Django. Paths follow LearnScroll/urls.py. NOT run/tested here.
+#
+# Policy
+#   /static/     fingerprinted by collectstatic (WhiteNoise)  -> 1 year, immutable
+#   /media/      filenames never reused (settings C5 block)   -> 1 year, immutable (Django sets it when MEDIA_CDN_ENABLED)
+#   *.m3u8       HLS playlist inside /media/                   -> short (a playlist can still change while transcoding)
+#   *.ts/*.m4s   HLS segments                                  -> 1 year, immutable
+#   /pmedia/     signed private media                          -> NEVER shared-cached
+#   everything else (API, admin, ws)                           -> never cached (Django sends private,no-store)
+
+location /static/ {
+    proxy_pass http://django_app;
+    proxy_hide_header Cache-Control;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+}
+
+location ~* ^/media/.+\.m3u8$ {
+    proxy_pass http://django_app;
+    proxy_hide_header Cache-Control;   # one header only (Django/WhiteNoise also set one)
+    add_header Cache-Control "public, max-age=30, s-maxage=30" always;   # never "immutable" for playlists
+}
+
+location ~* ^/media/.+\.(ts|m4s|mp4|webp|jpg|jpeg|png|gif|mp3|aac|woff2?)$ {
+    proxy_pass http://django_app;
+    proxy_hide_header Cache-Control;   # one header only (Django/WhiteNoise also set one)
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+}
+
+location /pmedia/ {
+    proxy_pass http://django_app;
+    proxy_no_cache 1;
+    proxy_cache_bypass 1;
+    add_header Cache-Control "private, no-store" always;
+}
+
+# API + admin: pass through, do not cache. Do not add `proxy_cache` here.
+location / {
+    proxy_pass http://django_app;
+    proxy_no_cache 1;
+    proxy_cache_bypass 1;
+}

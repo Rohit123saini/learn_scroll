@@ -1,0 +1,86 @@
+# PC2 - Prometheus alert rules for BACKUPS + RESTORE DRILL.
+# Metrics come from deploy/backup/*.sh via node_exporter's textfile collector (lib.sh `metrics_publish`):
+#   set NODE_EXPORTER_TEXTFILE_DIR=/var/lib/node_exporter/textfile_collector in /srv/learnscroll/.env, run node_exporter with
+#   --collector.textfile.directory=<same dir>. The learnscroll user needs write access to that directory.
+# Load with:   rule_files: [ "prometheus_backup_rules.yml" ]        (scrape = your normal node_exporter job)
+#
+# Metrics (label backup = postgres | media | restore_drill):
+#   learnscroll_backup_last_run_ok                      1 / 0   result of the LAST run
+#   learnscroll_backup_last_run_timestamp_seconds       when the last run ended
+#   learnscroll_backup_last_success_timestamp_seconds   last SUCCESSFUL run (kept across failed runs)
+#   learnscroll_backup_dump_bytes{backup="postgres"}    size of the newest dump
+#   learnscroll_backup_remote_uploaded{backup="postgres"} 1 = copied off-site
+#   learnscroll_restore_drill_restore_seconds           measured pg_restore time (= your RTO input)
+#   learnscroll_restore_drill_failed_checks             number of failed drill checks
+# Independent of Sentry on purpose: these alerts also fire when the backup job never starts at all.
+groups:
+  - name: learnscroll-backups
+    rules:
+      - alert: BackupPostgresLate
+        expr: time() - learnscroll_backup_last_success_timestamp_seconds{backup="postgres"} > 26 * 3600
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: "No successful Postgres backup for {{ $value | humanizeDuration }} (nightly job; limit 26h)"
+          runbook: "deploy/RESTORE_DRILL_CHECKLIST.md#when-an-alert-fires"
+
+      - alert: BackupMediaLate
+        expr: time() - learnscroll_backup_last_success_timestamp_seconds{backup="media"} > 26 * 3600
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: "No successful media backup for {{ $value | humanizeDuration }} (limit 26h)"
+          runbook: "deploy/RESTORE_DRILL_CHECKLIST.md#when-an-alert-fires"
+
+      - alert: BackupLastRunFailed
+        expr: learnscroll_backup_last_run_ok{backup=~"postgres|media"} == 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "The last {{ $labels.backup }} backup run FAILED (journalctl -u learnscroll-backup-{{ $labels.backup }})"
+          runbook: "deploy/RESTORE_DRILL_CHECKLIST.md#when-an-alert-fires"
+
+      - alert: BackupMetricsMissing
+        expr: absent(learnscroll_backup_last_success_timestamp_seconds{backup="postgres"})
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "No backup metrics at all: textfile collector not configured, or the backup job never ran on this host"
+
+      - alert: BackupNotOffsite
+        expr: learnscroll_backup_remote_uploaded{backup="postgres"} == 0
+        for: 1h
+        labels: { severity: page }
+        annotations:
+          summary: "The newest Postgres dump exists only on this server (BACKUP_REMOTE unset or the upload failed)"
+
+      - alert: BackupDumpShrunk
+        expr: >
+          learnscroll_backup_dump_bytes{backup="postgres"}
+          < 0.5 * avg_over_time(learnscroll_backup_dump_bytes{backup="postgres"}[7d] offset 1h)
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Postgres dump is less than half of its 7-day average size - data loss or wrong DATABASE_URL?"
+
+      - alert: RestoreDrillFailed
+        expr: learnscroll_backup_last_run_ok{backup="restore_drill"} == 0 or learnscroll_restore_drill_failed_checks > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "The weekly restore drill FAILED - treat the backups as UNVERIFIED (cat /var/backups/learnscroll/drills/LAST_DRILL.json)"
+          runbook: "deploy/RESTORE_DRILL_CHECKLIST.md#when-an-alert-fires"
+
+      - alert: RestoreDrillLate
+        expr: time() - learnscroll_backup_last_success_timestamp_seconds{backup="restore_drill"} > 8 * 86400
+        for: 1h
+        labels: { severity: ticket }
+        annotations:
+          summary: "No successful restore drill for {{ $value | humanizeDuration }} (weekly job; limit 8 days)"
+
+      - alert: RestoreDrillSlow
+        expr: learnscroll_restore_drill_restore_seconds > 3600
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "A restore now takes {{ $value | humanizeDuration }} - your RTO target needs a fresh look"

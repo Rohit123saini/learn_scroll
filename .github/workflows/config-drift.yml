@@ -1,0 +1,48 @@
+# T3.5 (R10) — blocks merges that reintroduce config drift:
+#   ALLOWED_HOSTS wildcard, DEBUG on / insecure default, missing throttle rates,
+#   unscheduled Celery tasks, unregistered admin models, unrouted APIViews,
+#   and NEW stale comments (existing ones are acknowledged in config_drift_baseline.json).
+#
+# This file lives in backend/.github (the Flutter app has its own, flutter/.github/...). If your
+# Git repository root is the PARENT of backend/, move it to <root>/.github/workflows/ and add
+# `defaults: run: working-directory: backend` plus the `backend/` prefix on `paths`.
+name: config-drift
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: config-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    # Pure stdlib — always runs, needs no dependencies.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python core/drift_scan.py --fail-on warning
+      - run: python -m unittest core.tests_drift_scan doubts.tests_hub loadtest.tests_sizing
+      - run: python deploy/tools/check_imports.py
+
+  django:
+    # Full management command. Needs the project's dependencies: add a requirements.txt (none is
+    # checked into backend/ today) and this job turns on automatically.
+    if: ${{ hashFiles('requirements.txt') != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: bash scripts/ci_config_drift.sh
+        env:
+          REQUIRE_DJANGO: "1"

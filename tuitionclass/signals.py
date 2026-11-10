@@ -708,3 +708,20 @@ def sync_chat_group_on_staff_remove(sender, instance, **kwargs):
             "Failed queueing moderator demotion for staff user %s in classroom %s.",
             instance.user_id, instance.classroom_id,
         )
+
+
+# ---------------------------------------------------------------------------
+# ClassSession <-> LIVE transition -> live-story signal (Home story ring, no 5s polling)
+# ---------------------------------------------------------------------------
+@receiver(post_save, sender=ClassSession, dispatch_uid="tuitionclass_live_story_signal")
+def signal_live_story_change(sender, instance, created, **kwargs):
+    """Entering or leaving LIVE changes who has a LIVE ring. `_previous_status` comes from
+    stash_previous_session_status above. Heartbeat-only changes use .update() (no signal) and a
+    silent heartbeat expiry has no event at all - the app keeps a slow fallback poll for that."""
+    previous = getattr(instance, "_previous_status", None)
+    live = ClassSession.Status.LIVE
+    if instance.status == live or previous == live:
+        if created or previous != instance.status:
+            from post.story_live import publish_live_stories_changed
+
+            publish_live_stories_changed()

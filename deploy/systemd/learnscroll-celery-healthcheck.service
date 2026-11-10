@@ -1,0 +1,11 @@
+# One-shot health probe (see the .timer): exits non-zero + logs an ERROR (-> Sentry) when the worker/beat
+# are down or a copyright task has not succeeded recently. OnFailure= lets you hook e-mail/pager too.
+[Unit]
+Description=LearnScroll copyright automation health check
+
+[Service]
+Type=oneshot
+User=learnscroll
+WorkingDirectory=/srv/learnscroll/backend
+EnvironmentFile=/srv/learnscroll/.env
+ExecStart=/srv/learnscroll/venv/bin/python manage.py check_copyright_automation --alert

@@ -1,0 +1,124 @@
+# P-J1 -- STAGING stack: Postgres + Redis + web (daphne) + Celery worker/beat + LiveKit + nginx.
+# A production-shaped copy of the real thing, small enough for ONE 4 GB VM.  Never point it at production data.
+#
+#   cp deploy/staging/env.staging.example deploy/staging/.env.staging   # then fill in the CHANGE_ME values
+#   IMAGE_TAG=$(git rev-parse --short HEAD) docker compose -f deploy/staging/docker-compose.staging.yml \
+#       --env-file deploy/staging/.env.staging up -d --build
+#   (or just:  bash deploy/staging/deploy.sh)   <- builds, migrates, starts, runs scripts/smoke_test.sh
+#
+# TLS: nginx listens on plain :80. Put your TLS terminator (host Caddy / cloud LB / Cloudflare) in front and let it
+# send X-Forwarded-Proto: https  -- settings.py trusts that header. For a quick no-TLS test set
+# SECURE_SSL_REDIRECT=false in .env.staging.
+name: learnscroll-staging
+
+x-backend: &backend
+  image: learnscroll-backend:${IMAGE_TAG:-staging}
+  build:
+    context: ../..            # the folder that holds manage.py + Dockerfile
+  env_file: [.env.staging]
+  restart: unless-stopped
+  depends_on:
+    db:    {condition: service_healthy}
+    redis: {condition: service_healthy}
+  volumes:
+    - media:/srv/learnscroll/backend/media
+  networks: [internal]
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: learnscroll
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.staging}
+      POSTGRES_DB: learnscroll
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U learnscroll -d learnscroll"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [internal]
+
+  # One-shot: apply migrations before web/worker start. `restart: "no"` + service_completed_successfully below.
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: ["python", "manage.py", "migrate", "--noinput"]
+
+  web:
+    <<: *backend
+    depends_on:
+      db:      {condition: service_healthy}
+      redis:   {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    expose: ["8000"]
+
+  worker:
+    <<: *backend
+    depends_on:
+      db:      {condition: service_healthy}
+      redis:   {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    command: ["celery", "-A", "LearnScroll", "worker", "--loglevel=INFO", "--concurrency=2", "--max-tasks-per-child=500"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A LearnScroll inspect ping -d celery@$$HOSTNAME --timeout 5 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  beat:
+    <<: *backend
+    depends_on:
+      db:      {condition: service_healthy}
+      redis:   {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    command: ["celery", "-A", "LearnScroll", "beat", "--loglevel=INFO", "--schedule=/var/lib/learnscroll/celerybeat-schedule"]
+    volumes:
+      - media:/srv/learnscroll/backend/media
+      - beatdata:/var/lib/learnscroll
+
+  # LiveKit for calls / study rooms / live classes. Staging uses a SMALL UDP range (50000-50100 ~ 50 participants).
+  # Key/secret MUST equal LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env.staging.
+  livekit:
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:latest}   # pin a tag once you pick one (see deploy/livekit/README.md)
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml", "--node-ip", "${LIVEKIT_NODE_IP:?set LIVEKIT_NODE_IP (public IP of this VM)}"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?}: ${LIVEKIT_API_SECRET:?}"
+    volumes: [./livekit-staging.yaml:/etc/livekit.yaml:ro]
+    ports:
+      - "7880:7880"                 # signalling (ws) -- put TLS in front for wss://
+      - "7881:7881"                 # ICE/TCP fallback
+      - "50000-50100:50000-50100/udp"
+    networks: [internal]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on: [web]
+    ports: ["80:80"]
+    volumes: [./nginx.staging.conf:/etc/nginx/conf.d/default.conf:ro]
+    networks: [internal]
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+  beatdata:
+
+networks:
+  internal:

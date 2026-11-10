@@ -24,7 +24,6 @@ been imported successfully by either task before this fix, meaning
 BOTH streak Celery tasks raised `ImportError` on every single run.
 That's the "abhi crash karte the" the Task 14 checklist refers to.
 """
-from django.db.models import Sum
 
 from .models import Attendance, ResultEntry
 
@@ -70,38 +69,58 @@ def compute_attendance_summary(enrollment, subject=None):
     }
 
 
-def generate_report_card_data(enrollment, exam_term):
+def generate_report_card_data(enrollment, exam_term, *, published_only=False):
     """
     On-demand aggregation of every `ResultEntry` for this enrollment
     within one `ExamTerm` — `ResultEntry` stays the single source of
     truth (design doc §7 — no separate `ReportCard` model/table).
-    """
-    entries = list(
-        ResultEntry.objects.filter(enrollment=enrollment, exam_term=exam_term).select_related("subject")
-    )
-    totals = ResultEntry.objects.filter(enrollment=enrollment, exam_term=exam_term).aggregate(
-        total_obtained=Sum("marks_obtained"), total_max=Sum("max_marks")
-    )
-    total_obtained = totals["total_obtained"] or 0
-    total_max = totals["total_max"] or 0
-    percentage = round(float(total_obtained) / float(total_max) * 100, 2) if total_max else 0.0
 
+    `published_only=True` is what students/parents get: draft marks are
+    invisible AND excluded from the totals, so a half-entered sheet can't
+    leak through the percentage. Grades are derived from the campus scale
+    on the fly (never stored).
+    """
+    from . import grading
+
+    campus = enrollment.section.school_class.campus
+    qs = ResultEntry.objects.filter(enrollment=enrollment, exam_term=exam_term)
+    if published_only:
+        qs = qs.filter(status=ResultEntry.Status.PUBLISHED)
+    entries = list(qs.select_related("subject"))
+    total_obtained = sum((e.marks_obtained for e in entries), 0)
+    total_max = sum((e.max_marks for e in entries), 0)
+    percentage = round(float(total_obtained) / float(total_max) * 100, 2) if total_max else 0.0
+    scale = grading.campus_scale(campus)
+    use_points = grading.uses_points(campus)
+    pass_percent = campus.pass_percent
+
+    subjects = []
+    for entry in entries:
+        pct = grading.percent_of(entry.marks_obtained, entry.max_marks)
+        subjects.append({
+            "subject": entry.subject_id,
+            "subject_name": entry.subject.name,
+            "marks_obtained": float(entry.marks_obtained),
+            "max_marks": float(entry.max_marks),
+            "remarks": entry.remarks,
+            "status": entry.status,
+            "grade": grading.grade_for_percent(pct, scale),
+            "grade_point": grading.grade_point_for_percent(pct, scale) if use_points else None,
+            "passed": grading.is_pass(pct, pass_percent),
+        })
     return {
         "enrollment": enrollment.id,
         "exam_term": exam_term.id,
-        "subjects": [
-            {
-                "subject": entry.subject_id,
-                "subject_name": entry.subject.name,
-                "marks_obtained": float(entry.marks_obtained),
-                "max_marks": float(entry.max_marks),
-                "remarks": entry.remarks,
-            }
-            for entry in entries
-        ],
+        "grading_system": campus.grading_system,
+        "gpa": grading.gpa_of(
+            [grading.percent_of(e.marks_obtained, e.max_marks) for e in entries], scale
+        ) if use_points else None,
+        "subjects": subjects,
         "total_obtained": float(total_obtained),
         "total_max": float(total_max),
         "percentage": percentage,
+        "grade": grading.grade_for_percent(percentage, scale) if total_max else None,
+        "passed": bool(subjects) and all(s["passed"] for s in subjects),
     }
 
 

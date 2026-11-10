@@ -6,7 +6,7 @@ rest_framework_simplejwt's stateless JWTAuthentication.
 WHY THIS EXISTS:
 SimpleJWT's access/refresh tokens are stateless — their lifetime is
 whatever's baked into SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"] /
-["REFRESH_TOKEN_LIFETIME"] (settings.py: 1 day / 30 days) at the moment
+["REFRESH_TOKEN_LIFETIME"] (settings.py: 15 min / 30 days, rotating) at the moment
 they're minted. There's no way to change "how long until this SPECIFIC
 token dies" afterwards, and no notion of "the user is still active, so
 keep it alive" — a refresh token issued today is dead in exactly 30
@@ -61,14 +61,20 @@ class TokenExpiredError(exceptions.AuthenticationFailed):
        meant to show a 3-second splash before redirecting for THIS case
        only, not for a generic auth failure.
     2. tuitionclass/exceptions.py's global error-envelope handler (the
-       project-wide EXCEPTION_HANDLER, despite the module name) can
-       stamp a stable "TOKEN_EXPIRED" `code` onto the JSON body instead
-       of the generic "authentication_failed" every other
-       AuthenticationFailed gets — see that file's _CODE_BY_EXC.
+       project-wide EXCEPTION_HANDLER, despite the module name) stamps a
+       stable "TOKEN_EXPIRED" `code` onto the JSON body instead of the
+       generic "authentication_failed" every other AuthenticationFailed
+       gets — via the `machine_code` attribute below.
     """
 
     default_detail = "Your session has expired. Please log in again."
     default_code = "token_expired"
+    # L1 gap 16 -- the project-wide handler (tuitionclass/exceptions.py) reads
+    # `machine_code` off the exception for the body's `code`. Without this line
+    # every expired session answered "authentication_failed" and the app's
+    # TOKEN_EXPIRED splash never fired (login/exceptions.py had the entry, but
+    # that module was a stale copy nothing imported).
+    machine_code = "TOKEN_EXPIRED"
 
 
 class SlidingSessionAuthentication(JWTAuthentication):

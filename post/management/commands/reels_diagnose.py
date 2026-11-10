@@ -48,7 +48,8 @@ class Command(BaseCommand):
         self.stdout.write(
             f"config: enabled={cfg['enabled']} min_aspect={cfg['min_aspect']} "
             f"max_duration={cfg['max_duration_seconds']}s fallback={cfg['fallback']} "
-            f"min_pool={cfg['min_pool']} pool_cap={cfg['pool_cap']}  seen={len(seen)}"
+            f"min_pool={cfg['min_pool']} pool_cap={cfg['pool_cap']} "
+            f"include_own_last_tier={cfg['include_own_last_tier']}  seen={len(seen)}"
         )
         if not cfg["enabled"]:
             self.stdout.write(self.style.WARNING("FEED_REELS['enabled'] is False -> endpoint returns an empty page."))
@@ -62,3 +63,14 @@ class Command(BaseCommand):
         pool = reels.build_pool_ids(user, _home_base_qs(user), _video_and_velocity_boost, seen_ids=seen)
         style = self.style.SUCCESS if pool else self.style.ERROR
         self.stdout.write(style(f"\nFinal pool served to the user: {len(pool)} reels"))
+        own_total = reels.own_candidate_queryset(user, cfg).count()
+        if not pool:
+            self.stdout.write(self.style.WARNING(
+                "Empty pool. Read the list above top to bottom: the first line whose number drops to 0 is the "
+                "filter that removed everything (e.g. '+ not own' = all videos belong to this user)."
+            ))
+        if own_total and not cfg["include_own_last_tier"]:
+            self.stdout.write(self.style.WARNING(
+                f"This user has {own_total} own public video(s) that are never shown. Set "
+                "FEED_REELS['include_own_last_tier']=True (env REELS_INCLUDE_OWN_LAST_TIER=1) to add them as the last tier."
+            ))

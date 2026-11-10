@@ -1,7 +1,7 @@
 # testseries/throttling.py
 """
 Rate limits for the two UNAUTHENTICATED surfaces of this app. Same reasoning
-as `assigments/throttling.py`: the slug / certificate code is unguessable
+as `assignments/throttling.py`: the slug / certificate code is unguessable
 (entropy), but entropy does not stop a bot hammering the endpoint with volume.
 
 Each scope needs a rate in `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]`

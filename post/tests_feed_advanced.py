@@ -373,6 +373,9 @@ class ExplorationFeedTests(APITestCase):
         self.assertIn("exploration_slot", r.data["stages"][2]["rules"])
 
 
+# Exploration injects a RANDOM post into the recommended pool. With only two posts that made the
+# ordering asserts below pass/fail ~50/50 -> pin it off so these tests are deterministic.
+@override_settings(FEED_EXPLORE={"enabled": False})
 class BehaviourSignalTests(APITestCase):
     def setUp(self):
         cache.clear()

@@ -346,14 +346,35 @@ def send_due_reminders():
                 f"{session.classroom.title} starts at "
                 f"{timezone.localtime(session.scheduled_start):%d %b, %I:%M %p}."
             )
-            ok = send_notification(
-                reminder.user, title, message, channel=reminder.channel,
-                data={
-                    "type": "session_reminder",
-                    "session_id": str(session.id),
-                    "classroom_id": str(session.classroom_id),
-                },
-            )
+            data = {
+                "type": "session_reminder",
+                "session_id": str(session.id),
+                "classroom_id": str(session.classroom_id),
+            }
+            # T2.9 — a PUSH reminder honours the user's mute list / push
+            # toggle / quiet hours / DND (core.services.channels_for). The
+            # reminder is still marked sent below (it must never be retried
+            # into the user's morning), and the in-app bell row is written
+            # either way so a reminder that arrived in quiet hours isn't lost.
+            ok = False
+            if reminder.channel == "push":
+                from core.models import Notification
+                from core.services import channels_for, create_notification
+
+                create_notification(
+                    reminder.user, Notification.NotifType.SESSION_REMINDER, title, message,
+                    classroom=session.classroom, session=session, data=data,
+                )
+                if "push" in channels_for(reminder.user, Notification.NotifType.SESSION_REMINDER):
+                    from core import notification_center  # N9 - this class is muted by the user: bell row only
+
+                    if notification_center.filter_unmuted_users(
+                        [reminder.user.id], notification_center.SCOPE_CLASS, session.classroom_id,
+                        Notification.NotifType.SESSION_REMINDER,
+                    ):
+                        ok = send_notification(reminder.user, title, message, channel="push", data=data)
+            else:
+                ok = send_notification(reminder.user, title, message, channel=reminder.channel, data=data)
             reminder.is_sent = True
             reminder.save(update_fields=["is_sent"])
             if ok:
@@ -646,7 +667,7 @@ def send_notification_digests():
         digest_frequency=NotificationPreference.DigestFrequency.OFF
     ).select_related("user")
 
-    sent, skipped_not_due, skipped_empty, failed = 0, 0, 0, 0
+    sent, skipped_not_due, skipped_empty, skipped_gate, failed = 0, 0, 0, 0, 0
     for pref in due_prefs:
         interval = intervals.get(pref.digest_frequency)
         if interval is None:
@@ -663,7 +684,9 @@ def send_notification_digests():
         window_start = since or (now - interval)
         notifs = list(
             Notification.objects.filter(recipient_id=pref.user_id, created_at__gt=window_start, created_at__lte=now)
-            .exclude(notif_type__in=(pref.muted_types or []))
+            .exclude(notif_type__in=pref.types_blocked_for("email"))  # N1: muted + per-type email off
+            # P-F3_F4: a weekly recap that already went out as its own report e-mail is not repeated in the summary
+            .exclude(notif_type=Notification.NotifType.WEEKLY_RECAP_READY, data__emailed=True)
             .order_by("-created_at")[:50]
         )
         if not notifs:
@@ -677,19 +700,27 @@ def send_notification_digests():
             skipped_empty += 1
             continue
 
-        if not pref.user.email:
+        # N8: only a VERIFIED address, never a bounced / complained one. The digest is its own opt-in (digest_frequency),
+        # so the per-event e-mail switch and the daily cap do not apply (respect_master=False, apply_caps=False).
+        from core import channel_policy as policy
+        from core.channel_templates import language_for, render_digest_email
+
+        decision = policy.decide(pref.user, "email", None, respect_master=False, apply_caps=False)
+        if not decision.allowed:
+            skipped_gate += 1
             continue
 
         try:
-            plural = "" if len(notifs) == 1 else "s"
-            subject = f"Your {pref.get_digest_frequency_display().lower()} TuitionClass digest ({len(notifs)} update{plural})"
-            lines = [f"- {n.title}" + (f": {n.message}" if n.message else "") for n in notifs]
-            body = "Here's what you missed:\n\n" + "\n".join(lines)
-            EmailMultiAlternatives(
-                subject=subject,
-                body=body,
-                to=[pref.user.email],
-            ).send(fail_silently=False)
+            url = policy.unsubscribe_url(pref.user, "email", "digest")
+            subject, body, html = render_digest_email(
+                notifs, pref.digest_frequency, language_for(pref.user), url,
+            )
+            msg = EmailMultiAlternatives(
+                subject=subject, body=body, to=[decision.address], headers=policy.email_headers(url),
+            )
+            msg.attach_alternative(html, "text/html")
+            msg.send(fail_silently=False)
+            policy.record_send(pref.user, "email", "digest")
             # Only advance the window on a SUCCESSFUL send — same
             # fail-closed-and-retry-next-tick discipline as every other
             # sweep here (e.g. reconcile_stuck_coin_purchases): a send
@@ -707,7 +738,8 @@ def send_notification_digests():
             "send_notification_digests: sent %s, failed %s, not-yet-due %s, nothing-new %s.",
             sent, failed, skipped_not_due, skipped_empty,
         )
-    return {"sent": sent, "failed": failed, "skipped_not_due": skipped_not_due, "skipped_empty": skipped_empty}
+    return {"sent": sent, "failed": failed, "skipped_not_due": skipped_not_due, "skipped_empty": skipped_empty,
+            "skipped_gate": skipped_gate}
 
 
 @shared_task(name="tuitionclass.notify_waitlist_promotion")
@@ -1345,48 +1377,184 @@ def notify_notice_posted(notice_id, student_ids):
 @shared_task(name="tuitionclass.notify_session_live")
 def notify_session_live(session_id, exclude_user_id=None):
     """Fired the instant a session flips SCHEDULED -> LIVE (the
-    teacher/co-teacher's own /join/ call). Students who never set an
-    explicit ClassReminder previously had NO way to know class had
-    actually started short of opening the app and checking — this is the
-    "your teacher just went live" push that closes that gap. Fanned out to
-    every student with a currently active pass on the classroom, minus
-    whoever's join() call triggered the transition (they don't need a push
-    telling them the class they're already in has started)."""
-    from .models import ClassSession, PassPurchase
-    from .notifications import send_notification
+    teacher/co-teacher's own /join/ call): "<teacher> is live now".
 
-    session = ClassSession.objects.filter(pk=session_id).select_related("classroom").first()
+    LV1 (Live in story tray) — what changed vs. the old pass-holders-only push:
+      * Audience = students with an active pass on the classroom  PLUS  the
+        teacher's accepted followers (the same people who see the LIVE ring in
+        their story tray). Pass holders come first so a very large follower
+        list can never crowd them out (cap: LIVE_NOTIFY_MAX_AUDIENCE).
+      * Blocked (either direction) and muted-the-teacher users are skipped.
+      * ONCE per session: `ClassSession.live_notified_at` is claimed with a
+        single conditional UPDATE, so a host who re-joins, a retried task or a
+        double fire can't notify twice. Nothing is sent if the session is no
+        longer LIVE by the time the task runs.
+      * In-app bell row (Notification SESSION_LIVE, linked to the session)
+        for everyone + FCM push only for users whose preferences allow it
+        right now (mute / push toggle / quiet hours via core.services.channels_for).
+    Excludes whoever's own join() triggered the transition (they're already in).
+    """
+    from django.conf import settings as dj_settings
+    from django.contrib.auth import get_user_model
+
+    from core.models import Notification
+    from core.services import channels_for, create_bulk_notifications
+    from .models import ClassSession, PassPurchase
+
+    now = timezone.now()
+    claimed = ClassSession.objects.filter(
+        pk=session_id, status=ClassSession.Status.LIVE, live_notified_at__isnull=True
+    ).update(live_notified_at=now)
+    if not claimed:
+        return 0  # already notified, or not LIVE any more
+
+    session = ClassSession.objects.filter(pk=session_id).select_related("classroom", "classroom__teacher").first()
     if not session:
         return 0
-
     classroom = session.classroom
-    student_ids = (
+    teacher = classroom.teacher
+
+    member_ids = list(
         PassPurchase.objects.filter(
             class_pass__classroom=classroom,
             status=PassPurchase.Status.SUCCESS,
             is_active=True,
-            expires_at__gt=timezone.now(),
+            expires_at__gt=now,
         )
-        .exclude(student_id=exclude_user_id)
         .values_list("student_id", flat=True)
         .distinct()
     )
-
-    from django.contrib.auth import get_user_model
-
-    User = get_user_model()
-    title = f"{classroom.title} is live now"
-    message = "Your teacher just started the class — tap to join."
-    data = {"type": "session_live", "session_id": str(session.id), "classroom_id": str(classroom.id)}
-
-    sent_count = 0
-    for student in User.objects.filter(id__in=list(student_ids)):
+    follower_ids = []
+    skip = set()
+    if teacher is not None:
         try:
-            if send_notification(student, title, message, channel="push", data=data):
-                sent_count += 1
+            from post.models import MutedAccount
+            from user_profile.models import Follow
+            from user_profile.services import blocked_user_ids
+
+            follower_ids = list(
+                Follow.objects.filter(following_id=teacher.id, status=Follow.Status.ACCEPTED)
+                .values_list("follower_id", flat=True)
+            )
+            skip |= set(blocked_user_ids(teacher))
+            skip |= set(MutedAccount.objects.filter(mute_stories=True, muted_user_id=teacher.id).values_list("user_id", flat=True))
+            skip.add(teacher.id)
         except Exception:
-            logger.exception("Failed pushing session_live (session %s) to user %s", session_id, student.pk)
-    return sent_count
+            logger.exception("notify_session_live: follower/mute lookup failed for session %s", session_id)
+    if exclude_user_id is not None:
+        skip.add(exclude_user_id)
+
+    max_audience = int(getattr(dj_settings, "LIVE_NOTIFY_MAX_AUDIENCE", 5000))
+    audience = []
+    seen = set()
+    extra_ids = []
+    if session.live_standalone:
+        # X12 L-C: people who tapped "Remind me" get the push even when they do not follow the host; a members-only
+        # standalone live is not announced to followers.
+        from .standalone_live import OPEN_AUDIENCES, live_start_audience_extra
+
+        extra_ids = live_start_audience_extra(session)
+        if session.live_audience not in OPEN_AUDIENCES:
+            follower_ids = []
+    for uid in list(member_ids) + extra_ids + list(follower_ids):  # members first
+        if uid in seen or uid in skip:
+            continue
+        seen.add(uid)
+        audience.append(uid)
+        if len(audience) >= max_audience:
+            break
+    if not audience:
+        return 0
+
+    host_name = ""
+    if teacher is not None:
+        host_name = (teacher.get_full_name() or teacher.username or "").strip()
+    title = f"{host_name or 'Your teacher'} is live now"
+    shown_title = (session.live_title or "").strip() or classroom.title  # X12 L-C: standalone live has its own title
+    message = f"{shown_title} - tap to join."
+    data = {
+        "type": "session_live",
+        "session_id": str(session.id),
+        "live_session_id": str(session.id),
+        "classroom_id": str(classroom.id),
+    }
+    if teacher is not None:
+        data["actor_id"] = str(teacher.id)
+
+    try:
+        create_bulk_notifications(
+            audience, Notification.NotifType.SESSION_LIVE, title, message,
+            classroom=classroom, session=session, data=data,
+        )
+    except Exception:
+        logger.exception("notify_session_live: bell rows failed for session %s", session_id)
+
+    allowed = []
+    for uid in audience:
+        try:
+            if "push" in channels_for(uid, Notification.NotifType.SESSION_LIVE):
+                allowed.append(uid)
+        except Exception:
+            logger.exception("notify_session_live: could not read notification preferences of user %s", uid)
+    if allowed:
+        # N9 - people who muted THIS class keep the bell row above, but get no push.
+        from core import notification_center
+
+        allowed = notification_center.filter_unmuted_users(
+            allowed, notification_center.SCOPE_CLASS, classroom.id, Notification.NotifType.SESSION_LIVE,
+        )
+    if allowed:
+        try:
+            from message.push_utils import send_push_to_users
+
+            send_push_to_users(allowed, title, message, data=data)
+        except Exception:
+            logger.exception("notify_session_live: push failed for session %s (%d users)", session_id, len(allowed))
+    return len(audience)
+
+
+@shared_task(name="tuitionclass.send_standalone_live_reminders")
+def send_standalone_live_reminders():
+    """X12 L-C: "<host> goes live in N minutes" for scheduled standalone lives (idempotent, see standalone_live)."""
+    from .standalone_live import send_due_reminders
+
+    return send_due_reminders()
+
+
+@shared_task(name="tuitionclass.sweep_stale_live_sessions")
+def sweep_stale_live_sessions():
+    """LV1 — close out a LIVE session whose host stopped heartbeating.
+
+    The story tray / live-now row already hide a session ~LIVE_HEARTBEAT_TTL_SECONDS
+    after the last heartbeat (see live_presence.py), so a crashed host app never
+    leaves a ghost ring. This sweep is the second half: if the silence lasts
+    LIVE_STALE_COMPLETE_MINUTES the session is marked COMPLETED (saved row by
+    row so the post_save cleanup in signals.py runs: LiveKit teardown,
+    participant check-out, polls closed ...). Only sessions that HAVE
+    heartbeated at least once are touched (live_heartbeat_at NOT NULL), so a
+    session from before this feature / an old client is never force-closed.
+    """
+    from .live_presence import LIVE_STALE_COMPLETE_MINUTES
+    from .models import ClassSession
+
+    cutoff = timezone.now() - timedelta(minutes=LIVE_STALE_COMPLETE_MINUTES)
+    stale = ClassSession.objects.filter(
+        status=ClassSession.Status.LIVE,
+        live_heartbeat_at__isnull=False,
+        live_heartbeat_at__lt=cutoff,
+    )
+    closed = 0
+    for session in stale:
+        try:
+            session.status = ClassSession.Status.COMPLETED
+            session.actual_end = timezone.now()
+            session.save(update_fields=["status", "actual_end"])
+            closed += 1
+        except Exception:
+            logger.exception("sweep_stale_live_sessions: failed to close session %s", session.pk)
+    if closed:
+        logger.info("sweep_stale_live_sessions: completed %s heartbeat-silent session(s).", closed)
+    return closed
 
 
 @shared_task(name="tuitionclass.notify_session_cancelled")
@@ -1920,3 +2088,44 @@ def notify_testseries_published_push(user_ids, title, body, data):
     from .notifications import push_testseries_published
 
     return push_testseries_published(user_ids=user_ids, title=title, body=body, data=data)
+
+
+# ---------------------------------------------------------------------------
+# X12 - "Save as lecture / reel / post" from a class recording (recording_save.py).
+# One RecordingSave row = one job. The request only writes the pending row and queues this task; the ffmpeg cut and the
+# Post / PostMedia / VideoChapter rows are made here, off the request. `run_save` never raises (a failure is written to the
+# row), and only picks up a `pending` row, so a duplicate delivery is a no-op. Long limit: a 4 h lecture is re-encoded.
+# ---------------------------------------------------------------------------
+@shared_task(name="tuitionclass.save_recording_clip", time_limit=5 * 3600, soft_time_limit=5 * 3600 - 120)
+def save_recording_clip(save_id):
+    from .recording_save import run_save
+
+    return run_save(save_id)
+
+
+@shared_task(name="tuitionclass.sweep_recording_saves")
+def sweep_recording_saves():
+    """Beat (every 10 min): re-queue a clip whose message was lost, fail one that has been stuck for hours."""
+    from .recording_save import sweep_stuck_saves
+
+    return sweep_stuck_saves()
+
+
+@shared_task(name="tuitionclass.notify_recording_ready")
+def notify_recording_ready(session_id, egress_id=""):
+    """X12: bell + N9-aware push "your class recording is ready" to the students who attended. Called from the LiveKit
+    `egress_ended` webhook; LiveKit may deliver that webhook twice, so it runs once per (session, egress)."""
+    from django.core.cache import cache
+
+    from . import live_push
+    from .models import ClassSession
+
+    try:
+        if not cache.add(f"tc:rec_ready_push:{session_id}:{egress_id}", 1, 24 * 3600):
+            return {"skipped": "duplicate"}
+    except Exception:
+        pass  # cache down: better a rare double push than none
+    session = ClassSession.objects.filter(pk=session_id).select_related("classroom").first()
+    if session is None:
+        return {"skipped": "no-session"}
+    return live_push.notify_recording_ready(session)

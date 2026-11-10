@@ -35,10 +35,15 @@ from .models import (
     BlockUser,
     AutoModerationFlag,
     ContentReport,
+    ChildSafetyCase,
+    ChildSafetyReport,
+    ModerationAction,
+    ModerationAppeal,
     CoinLedger,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
     DailyUsage,
+    WalletSettings,
     Follow,
     RestrictUser,
     Streak,
@@ -249,14 +254,10 @@ class FollowAdmin(admin.ModelAdmin):
     raw_id_fields = ("follower", "following")
 
 
-@admin.register(ContentReport)
-class ContentReportAdmin(admin.ModelAdmin):
-    list_display = ("id", "reporter", "reported_user", "target_type", "reason", "status", "created_at")
-    list_filter = ("status", "target_type", "reason")
-    search_fields = ("reporter__username", "reported_user__username", "target_id", "details")
-    raw_id_fields = ("reporter", "reported_user")
-    list_editable = ("status",)
-    actions = ("hide_reported_content", "dismiss_reports")
+class _ReportActionsMixin:
+    """hide / dismiss / mark-reviewed - every one goes through report_automation so it is audited."""
+
+    actions = ("hide_reported_content", "dismiss_reports", "mark_reviewed")
 
     @admin.action(description="Take action: hide the reported content (all reports on it are closed)")
     def hide_reported_content(self, request, queryset):
@@ -271,6 +272,215 @@ class ContentReportAdmin(admin.ModelAdmin):
 
         n = resolve_reports(list(queryset), "dismiss", request.user)
         self.message_user(request, f"{n} report(s) dismissed.")
+
+    @admin.action(description="Mark as reviewed (no decision yet)")
+    def mark_reviewed(self, request, queryset):
+        from .moderation_log import log_action
+
+        n = 0
+        for r in queryset.filter(status="open"):
+            r.status = ContentReport.Status.REVIEWED
+            r.save(update_fields=["status"])
+            log_action(ModerationAction.Action.STATUS_CHANGE, target_type=r.target_type, target_id=r.target_id,
+                       actor=request.user, owner=r.reported_user, reason=r.reason, note="open -> reviewed")
+            n += 1
+        self.message_user(request, f"{n} report(s) marked reviewed.")
+
+
+@admin.register(ContentReport)
+class ContentReportAdmin(_ReportActionsMixin, admin.ModelAdmin):
+    # `status` is deliberately NOT list_editable any more: a bare status edit would change
+    # the report without touching the content and without an audit row (audit item 20).
+    list_display = ("id", "priority", "sla_state", "reporter", "reported_user", "target_type", "reason", "status",
+                    "brigading_suspected", "created_at")
+    list_filter = ("status", "priority", "target_type", "reason", "brigading_suspected", "sla_breached_at")
+    search_fields = ("reporter__username", "reported_user__username", "target_id", "details")
+    raw_id_fields = ("reporter", "reported_user")
+    readonly_fields = ("priority", "evidence", "brigading_suspected", "sla_due_at", "sla_breached_at", "created_at")
+    # 'urgent' sorts before 'normal'; then the earliest review deadline first (overdue ones are always on top)
+    ordering = ("-priority", "sla_due_at", "-created_at")
+
+    @admin.display(description="Review deadline")
+    def sla_state(self, obj):
+        from django.utils import timezone
+
+        if obj.status not in ("open", "reviewed") or obj.sla_due_at is None:
+            return "-"
+        left = int((obj.sla_due_at - timezone.now()).total_seconds() // 60)
+        if left <= 0:
+            return f"OVERDUE {abs(left) // 60}h"
+        return f"{left // 60}h {left % 60}m left"
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        from .child_safety import can_handle
+
+        # child-safety material is only visible to child-safety staff
+        return qs if can_handle(request.user) else qs.exclude(reason="child_safety")
+
+    def save_model(self, request, obj, form, change):
+        from .moderation_log import log_action
+
+        old = ContentReport.objects.filter(pk=obj.pk).values_list("status", flat=True).first() if change else None
+        super().save_model(request, obj, form, change)
+        if change and old != obj.status:
+            log_action(ModerationAction.Action.STATUS_CHANGE, target_type=obj.target_type, target_id=obj.target_id,
+                       actor=request.user, owner=obj.reported_user, reason=obj.reason, note=f"{old} -> {obj.status}")
+            # H15: a plain status edit that DECIDES a report also tells the reporter (resolve_reports uses
+            # queryset.update, so it never lands here - no double message).
+            if old in ("open", "reviewed") and obj.status in ("actioned", "dismissed"):
+                from types import SimpleNamespace
+
+                from .report_automation import notify_reporters
+
+                notify_reporters([SimpleNamespace(status=old, reporter_id=obj.reporter_id, reporter=obj.reporter,
+                                                  target_type=obj.target_type, target_id=obj.target_id)], obj.status)
+
+
+@admin.register(ChildSafetyReport)
+class ChildSafetyReportAdmin(_ReportActionsMixin, admin.ModelAdmin):
+    """The separate URGENT queue. Only staff with `user_profile.handle_child_safety`."""
+
+    list_display = ("id", "created_at", "target_type", "reported_user", "status", "reporter")
+    list_filter = ("status", "target_type")
+    search_fields = ("reported_user__username", "target_id")
+    raw_id_fields = ("reporter", "reported_user")
+    readonly_fields = ("reporter", "reported_user", "target_type", "target_id", "reason", "details", "evidence",
+                       "priority", "created_at")
+    ordering = ("status", "created_at")  # oldest open first
+    actions = ("mark_reviewed",)  # hide / dismiss go through the CASE (reported to authority / close)
+
+    def get_queryset(self, request):
+        return admin.ModelAdmin.get_queryset(self, request).filter(reason="child_safety")
+
+    def has_module_permission(self, request):
+        from .child_safety import can_handle
+
+        return can_handle(request.user)
+
+    has_view_permission = has_change_permission = lambda self, request, obj=None: self.has_module_permission(request)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ChildSafetyCase)
+class ChildSafetyCaseAdmin(admin.ModelAdmin):
+    """One row per reported item: frozen evidence + the POCSO trail.
+
+    To record that you reported it: fill 'Authority name' and 'Authority reference'
+    (acknowledgement / FIR number), set Status = 'Reported to the authorities', Save.
+    To close as a false alarm: write the reason in 'Staff note', set Status = 'Closed'.
+    """
+
+    list_display = ("id", "status", "target_type", "reported_user", "due_at", "assigned_to", "reported_to_authority_at")
+    list_filter = ("status", "target_type")
+    search_fields = ("reported_user__username", "target_id", "authority_reference")
+    raw_id_fields = ("reported_user", "assigned_to")
+    readonly_fields = ("target_type", "target_id", "reported_user", "snapshot", "first_report_at", "due_at",
+                       "sla_warned_at", "reported_to_authority_at", "reported_by", "preserve_until",
+                       "created_at", "updated_at")
+    ordering = ("due_at",)
+
+    def has_module_permission(self, request):
+        from .child_safety import can_handle
+
+        return can_handle(request.user)
+
+    has_view_permission = has_change_permission = lambda self, request, obj=None: self.has_module_permission(request)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # evidence is never deleted from the UI
+
+    def save_model(self, request, obj, form, change):
+        from . import child_safety
+
+        if not change:
+            return super().save_model(request, obj, form, change)
+        old = ChildSafetyCase.objects.get(pk=obj.pk)
+        new_status = obj.status
+        S = ChildSafetyCase.Status
+        try:
+            if new_status == S.REPORTED and old.status != S.REPORTED:
+                obj.status = old.status
+                obj.save()
+                child_safety.mark_reported(obj, request.user, obj.authority_name, obj.authority_reference)
+            elif new_status == S.CLOSED_NO_ACTION and old.status != S.CLOSED_NO_ACTION:
+                if not (obj.staff_note or "").strip():
+                    raise child_safety.ChildSafetyError("Write the reason in 'Staff note' before closing.")
+                obj.status = old.status
+                obj.save()
+                child_safety.close_case(obj, request.user, f"closed by {request.user.username}; see staff note")
+            else:
+                obj.save()
+        except child_safety.ChildSafetyError as exc:
+            messages.error(request, str(exc))
+
+
+@admin.register(ModerationAction)
+class ModerationActionAdmin(admin.ModelAdmin):
+    """Read-only audit trail of every automatic / staff decision on reported content."""
+
+    list_display = ("created_at", "actor_label", "action", "target_type", "target_id", "target_owner", "report_count")
+    list_filter = ("action", "target_type", "actor_label")
+    search_fields = ("target_id", "target_owner__username", "actor_label", "note")
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ModerationAppeal)
+class ModerationAppealAdmin(admin.ModelAdmin):
+    """Owner appeals against an auto-hold / hide. Write the reason in 'Decision note', Save,
+    then use the action Accept (restores the content) or Reject. A reviewer can't decide an
+    appeal against their own decision."""
+
+    list_display = ("id", "created_at", "user", "target_type", "target_id", "status", "decided_by")
+    list_filter = ("status", "target_type")
+    search_fields = ("user__username", "target_id", "message")
+    raw_id_fields = ("user", "action", "decided_by")
+    readonly_fields = ("user", "action", "target_type", "target_id", "message", "status", "decided_by",
+                       "created_at", "decided_at")
+    actions = ("accept_appeals", "reject_appeals")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def _decide(self, request, queryset, accept):
+        from . import appeals
+
+        done = 0
+        for ap in queryset.filter(status="open"):
+            try:
+                appeals.decide_appeal(ap, request.user, accept, ap.decision_note)
+                done += 1
+            except appeals.AppealError as exc:
+                self.message_user(request, f"Appeal {ap.pk}: {exc.message}", level=messages.WARNING)
+        self.message_user(request, f"{done} appeal(s) {'accepted' if accept else 'rejected'}.")
+
+    @admin.action(description="Accept appeal - restore the content")
+    def accept_appeals(self, request, queryset):
+        self._decide(request, queryset, True)
+
+    @admin.action(description="Reject appeal - decision stands (needs a Decision note)")
+    def reject_appeals(self, request, queryset):
+        self._decide(request, queryset, False)
 
 
 @admin.register(BlockUser)
@@ -298,8 +508,8 @@ class CoinPurchaseRequestAdmin(admin.ModelAdmin):
     IsAdminUser) — admin here only lets ops SEE which ones are waiting.
     """
 
-    list_display = ("id", "user", "gateway", "gateway_reference", "amount", "coins", "status", "created_at")
-    list_filter = ("status", "gateway")
+    list_display = ("id", "user", "gateway", "gateway_reference", "amount", "coins", "status", "refund_status", "created_at")
+    list_filter = ("status", "gateway", "refund_status")
     search_fields = ("gateway_reference", "user__username")
     ordering = ("-created_at",)
 
@@ -399,4 +609,22 @@ class DailyUsageAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(WalletSettings)
+class WalletSettingsAdmin(admin.ModelAdmin):
+    """S9: view-only. Limits are the USER's own safety choice (minors: server cap) - support should not edit them."""
+
+    list_display = ("user", "confirm_purchases", "daily_spend_limit", "monthly_spend_limit", "updated_at")
+    search_fields = ("user__username",)
+    raw_id_fields = ("user",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False

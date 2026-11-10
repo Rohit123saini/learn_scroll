@@ -224,6 +224,15 @@ class TestSeries(TestSeriesBaseModel):
     is_paid = models.BooleanField(default=False)
     price_coins = models.PositiveIntegerField(default=0)
 
+    # REFER & EARN - OWNER OPT-IN. A test series only pays commission to people
+    # who share it when its creator turned this on (default OFF). The creator
+    # picks the cut and it must be > 0: referral_enabled=True with 0% pays nothing and the series is not listed in
+    # refer & earn (no platform-default fallback any more). Always clamped
+    # to TESTSERIES_REFERRAL_MAX_PERCENT. The commission is a one-time, per-buyer
+    # payout when the purchase is released, taken out of the creator's share.
+    referral_enabled = models.BooleanField(default=False)
+    referral_commission_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+
     duration_minutes = models.PositiveIntegerField(null=True, blank=True)
 
     # Auto-computed from Question.marks sum on question changes, or a
@@ -267,6 +276,8 @@ class TestSeries(TestSeriesBaseModel):
 
     subject = models.CharField(max_length=60, blank=True, db_index=True)
     difficulty = models.CharField(max_length=6, choices=Difficulty.choices, blank=True, db_index=True)
+    # TS1 (migration 0007): free-form creator tags (max 8, lower-case, <=30 chars each) - same rule as assignment tags.
+    tags = models.JSONField(default=list, blank=True)
 
     # ------------------------------------------------------------------
     # ADVANCED DELIVERY (migration 0003). Every field below has a default
@@ -320,6 +331,10 @@ class TestSeries(TestSeriesBaseModel):
     )
     results_released_at = models.DateTimeField(null=True, blank=True)
     show_solutions = models.BooleanField(default=True)
+
+    # TS3 — optional cover picture shown on cards / the detail header. Set through
+    # `POST testseries/{id}/cover/` (creator only, JPG/PNG/WEBP, 5 MB), never through the JSON create body.
+    cover_image = models.ImageField(upload_to="testseries/covers/", null=True, blank=True)
 
     # Public share link: /testseries/public/<share_slug>/ — minted on publish.
     share_slug = models.CharField(max_length=24, unique=True, null=True, blank=True)

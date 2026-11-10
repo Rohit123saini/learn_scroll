@@ -39,6 +39,7 @@ POINTS_STUDY_OFF = 3.0
 POINTS_CONTEXT = 12.0
 POINTS_EXAM = 8.0  # post hashtags match the viewer's declared exam / class (feed_exam.EXAM_TAGS)
 POINTS_WEAK = 10.0  # post is about a topic the viewer keeps getting wrong in tests
+POINTS_PREF = 5.0  # S8: post hashtags match the viewer's content level / content languages (learning_prefs.*_TAGS)
 
 DEFAULT_CONTEXT = {
     "enabled": True,  # env FEED_CONTEXT_ENABLED=0 switches it off
@@ -51,6 +52,7 @@ DEFAULT_CONTEXT = {
     "points_context": POINTS_CONTEXT,
     "points_exam": POINTS_EXAM,
     "points_weak": POINTS_WEAK,
+    "points_pref": POINTS_PREF,
     # weak topics (from testseries answers): a topic counts as weak with at
     # least `weak_min_answers` graded answers and accuracy below
     # `weak_max_accuracy`; looks at the most recent `weak_row_cap` answers;
@@ -76,6 +78,8 @@ class ContextSignals(NamedTuple):
     # The loaded feed_exam.ExamProfile (None = not loaded, e.g. context disabled) - lets
     # feed_exam.apply_exam_mode reuse it instead of querying UserPreference a second time.
     profile: object = None
+    # S8: hashtags of the viewer's content level + content languages (+POINTS_PREF on a match).
+    pref_tags: Tuple[str, ...] = ()
 
 
 EMPTY = ContextSignals([], False, set(), set())
@@ -248,6 +252,7 @@ def load_context(user, cfg: dict | None = None) -> ContextSignals:
         learner = True
         subjects += [s.strip().lower() for s in profile.subjects if s.strip()]
     exam_tags = tuple(feed_exam.profile_tags(profile))
+    pref_tags = tuple(_safe("learning prefs", lambda: feed_exam.preference_tags(profile), []))
     weak = tuple(_safe("weak topics", lambda: load_weak_topics(user, cfg), ()))
 
     # most frequent first, de-duplicated, capped
@@ -256,7 +261,7 @@ def load_context(user, cfg: dict | None = None) -> ContextSignals:
         counts[s] = counts.get(s, 0) + 1
     ordered = [s for s, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][: int(cfg["max_subjects"])]
     return ContextSignals(
-        ordered, learner, campus_authors - class_authors, class_authors, exam_tags, weak, profile,
+        ordered, learner, campus_authors - class_authors, class_authors, exam_tags, weak, profile, pref_tags,
     )
 
 
@@ -299,6 +304,11 @@ def context_expression(ctx: ContextSignals, now_local_hour: int, cfg: dict | Non
         for tag in ctx.exam_tags:
             q |= feed_mix.hashtag_match_q(tag)
         parts.append(case(q, cfg["points_exam"]))
+    if ctx.pref_tags:  # S8: content level / language the learner asked for
+        q = Q()
+        for tag in ctx.pref_tags:
+            q |= feed_mix.hashtag_match_q(tag)
+        parts.append(case(q, cfg.get("points_pref", POINTS_PREF)))
     if ctx.weak_topics:
         q = Q(subcategory__in=list(ctx.weak_topics))
         q |= Q(subcategory__in=[t.title() for t in ctx.weak_topics])

@@ -665,6 +665,89 @@ def generate_campus_session_token(room_name: str, user) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 13b. Campus class RECORDING (LiveKit egress) + section-group lookup
+#
+# `campus` must never import `tuitionclass` (golden rule, see module docstring),
+# but the LiveKit egress engine (start / stop a room-composite recording, S3
+# upload, webhook) lives in `tuitionclass.livekit_utils`. These thin wrappers are
+# campus's only door to it:
+#
+#   campus.recordings --> campus.bridge --> core.classroom_chat_bridge --> tuitionclass.livekit_utils
+#   LiveKit webhook (tuitionclass) ----------> handle_campus_egress_ended --> campus.recordings.finish_recording
+#
+# `RecordingBackendError.code` is a short machine code (`not_configured` /
+# `start_failed` / `stop_failed`) so campus never shows or stores raw exception text.
+# ---------------------------------------------------------------------------
+class RecordingBackendError(Exception):
+    def __init__(self, code: str, message: str = ""):
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
+
+
+def start_campus_recording(room_name: str) -> str:
+    """Start a room-composite recording of a campus live room; returns the egress id.
+    Raises `RecordingBackendError`. The room must already be ACTIVE in LiveKit
+    (someone must be inside it) — which is why campus starts it from the teacher's
+    first heartbeat, not from the go-live tap."""
+    from tuitionclass import livekit_utils as lk  # local import — cross-app
+
+    try:
+        lk._check_egress_credentials()
+        lk._check_credentials()
+    except Exception as exc:
+        raise RecordingBackendError("not_configured", str(exc)) from exc
+    try:
+        return lk.start_room_recording(str(room_name))
+    except Exception as exc:
+        logger.exception("Campus recording could not start for room %s", room_name)
+        raise RecordingBackendError("start_failed", str(exc)) from exc
+
+
+def stop_campus_recording(egress_id: str) -> None:
+    """Stop an in-progress egress job. The finished file arrives later via the
+    `egress_ended` webhook (`handle_campus_egress_ended`)."""
+    from tuitionclass import livekit_utils as lk  # local import — cross-app
+
+    try:
+        lk.stop_room_recording(str(egress_id))
+    except Exception as exc:
+        logger.exception("Campus recording could not stop for egress %s", egress_id)
+        raise RecordingBackendError("stop_failed", str(exc)) from exc
+
+
+def handle_campus_egress_ended(egress_info) -> bool:
+    """Called by the LiveKit webhook view for an `egress_ended` event whose egress
+    id belongs to NO tuition-class session. Hands it to campus when it is one of
+    ITS recordings; returns True when campus claimed it. Never raises."""
+    try:
+        from campus.recordings import finish_recording  # local import — cross-app
+
+        egress_id = getattr(egress_info, "egress_id", "") or ""
+        if not egress_id:
+            return False
+        file_results = list(getattr(egress_info, "file_results", []) or [])
+        url, duration = "", None
+        if file_results:
+            first = file_results[0]
+            url = getattr(first, "location", "") or getattr(first, "filename", "") or ""
+            raw = getattr(first, "duration", 0) or 0  # LiveKit reports nanoseconds
+            duration = int(raw / 1_000_000_000) if raw else None
+        return bool(finish_recording(egress_id, url=url, duration_seconds=duration))
+    except Exception:
+        logger.exception("Campus egress_ended handling failed")
+        return False
+
+
+def get_section_group_id(section):
+    """`str(message.Group.id)` of a campus section's chat group, or None when the
+    section has no (working) group. Never raises. Used by the campus "ask the class
+    group" doubt flow, which then goes through the doubt hub."""
+    group = _get_group_for_section(section)
+    return str(group.id) if group is not None else None
+
+
+# ---------------------------------------------------------------------------
 # 14. resolve_parent_from_token() — Task 5, parent-portal auth
 # ---------------------------------------------------------------------------
 class ParentTokenResolution:

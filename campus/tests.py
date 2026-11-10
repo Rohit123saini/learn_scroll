@@ -1082,9 +1082,26 @@ class assigmentsProxyViewSetTests(APITestCase):
         self.client.force_authenticate(user=self.student_user)
         submission_id = self.client.get(reverse("assigments-submission-list")).data[0]["id"]
 
-        submit_response = self.client.patch(reverse("assigments-submission-detail", args=[submission_id]))
+        # Empty submit is rejected: there must be a file/photo or a note to hand in.
+        empty = self.client.patch(reverse("assigments-submission-detail", args=[submission_id]))
+        self.assertEqual(empty.status_code, status.HTTP_400_BAD_REQUEST)
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        upload = SimpleUploadedFile("work.pdf", b"%PDF-1.4 test", content_type="application/pdf")
+        submit_response = self.client.patch(
+            reverse("assigments-submission-detail", args=[submission_id]), {"file": upload}, format="multipart"
+        )
         self.assertEqual(submit_response.status_code, status.HTTP_200_OK)
         self.assertEqual(submit_response.data["status"], "submitted")
+        self.assertTrue(submit_response.data["file"])
+
+        # Teacher cannot grade without a grade value.
+        self.client.force_authenticate(user=self.teacher_user)
+        no_grade = self.client.patch(
+            reverse("assigments-submission-detail", args=[submission_id]), {"feedback": "x"}
+        )
+        self.assertEqual(no_grade.status_code, status.HTTP_400_BAD_REQUEST)
+        self.client.force_authenticate(user=self.student_user)
 
         self.client.force_authenticate(user=self.teacher_user)
         grade_response = self.client.patch(

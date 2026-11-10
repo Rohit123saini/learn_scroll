@@ -15,6 +15,12 @@ from .models import (
 )
 
 
+def certificate_verify_url(code: str) -> str:
+    """P3 - the public, no-login page an employer opens (also what the QR code on the profile encodes)."""
+    base = (getattr(settings, "PUBLIC_WEB_BASE_URL", "") or "https://learnscroll.app").rstrip("/")
+    return f"{base}/certificate/{code}/"
+
+
 def display_name(user) -> str:
     """Public-facing name for leaderboards / certificates (never the email)."""
     if user is None:
@@ -158,6 +164,11 @@ class TestSeriesSerializer(serializers.ModelSerializer):
     share_url = serializers.SerializerMethodField()
     window_state = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
+    # TS3 - absolute URL of the cover picture ("" when none). Uploaded via `POST testseries/{id}/cover/`.
+    cover_url = serializers.SerializerMethodField()
+    # TS3 - WRITE-ONLY, create only: put this new test inside one of the creator's own classrooms. The series then
+    # becomes a class test (source=tuitionclass, always free, visible to the class only, announced to it on publish).
+    classroom_id = serializers.IntegerField(write_only=True, required=False, min_value=1)
 
     class Meta:
         model = TestSeries
@@ -167,15 +178,19 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             "total_marks", "status", "attempts_allowed", "questions", "question_count",
             "avg_rating", "review_count", "created_at", "updated_at",
             # ---- discovery / search (Task G9)
-            "subject", "difficulty",
+            "subject", "difficulty", "tags",
             # ---- advanced delivery / certification (migration 0003)
             "delivery_mode", "starts_at", "ends_at", "late_entry_minutes", "window_state",
             "proctoring", "record_live",
             "pass_percentage", "certificate_enabled", "certificate_title",
             "result_release", "results_released_at", "show_solutions",
             "share_slug", "share_url",
+            # ---- refer & earn: creator opt-in + cut
+            "referral_enabled", "referral_commission_percent",
             # ---- T2: may THIS viewer add / edit / delete / reorder the questions?
             "can_edit",
+            # ---- TS3: cover picture + (write-only) class to create the test in
+            "cover_url", "classroom_id",
         ]
         # `source`/`context_type`/`context_id` are provenance — set once at
         # creation (INDIVIDUAL here, or CAMPUS/TUITIONCLASS via bridge.py) and
@@ -215,6 +230,16 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             cache[context_type] = editable_context_ids(user, context_type)
         return normalize_context_id(obj.context_id) in cache[context_type]
 
+    def get_cover_url(self, obj):
+        if not obj.cover_image:
+            return ""
+        try:
+            url = obj.cover_image.url
+        except Exception:  # noqa: BLE001 - a missing / broken file must never break a list
+            return ""
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request is not None else url
+
     def get_question_count(self, obj):
         annotated = getattr(obj, "q_count", None)  # set by the viewset queryset
         return annotated if annotated is not None else obj.questions.count()
@@ -225,9 +250,10 @@ class TestSeriesSerializer(serializers.ModelSerializer):
         template = getattr(settings, "TESTSERIES_SHARE_URL_TEMPLATE", "")
         if template:
             return template.format(slug=obj.share_slug)
-        request = self.context.get("request")
-        path = f"/testseries/public/{obj.share_slug}/"
-        return request.build_absolute_uri(path) if request else path
+        # The shared link is the public WEB LANDING (common/web_links.py), which
+        # opens the app / store and carries ?ref= - NOT the JSON preview API.
+        base = (getattr(settings, "PUBLIC_WEB_BASE_URL", "") or "").rstrip("/")
+        return f"{base}/test-series/{obj.share_slug}/" if base else None
 
     def get_window_state(self, obj):
         return obj.window_state()
@@ -247,6 +273,16 @@ class TestSeriesSerializer(serializers.ModelSerializer):
         return data
 
     # ---- input -----------------------------------------------------------
+    def create(self, validated_data):
+        # `classroom_id` is not a model field; the view already used it to pick source / context.
+        validated_data.pop("classroom_id", None)
+        return super().create(validated_data)
+
+    def validate_tags(self, value):
+        from assignments.serializers import validate_tags
+
+        return validate_tags(value)
+
     def validate(self, attrs):
         inst = self.instance
 
@@ -257,6 +293,15 @@ class TestSeriesSerializer(serializers.ModelSerializer):
         # INDIVIDUAL series (see the viewset); campus / tuitionclass series come
         # from their bridges.
         source = getattr(inst, "source", TestSeries.Source.INDIVIDUAL)
+
+        # TS3 - creating INSIDE a class: it is a class test, so the class rules apply from the first validation
+        # (always free, no share & earn). Who may add a test to THAT class is checked in the view (it needs the user
+        # and the owning app's resolver); the existence of the class is part of that same check.
+        if "classroom_id" in attrs:
+            if inst is not None:
+                raise serializers.ValidationError({"classroom_id": "A test cannot be moved to another class."})
+            source = TestSeries.Source.TUITIONCLASS
+            attrs["is_paid"], attrs["price_coins"] = False, 0
 
         # --- pricing policy (config-driven: settings.TESTSERIES_PRICING_POLICY)
         # Strict only when it matters: on create, or when the client actually
@@ -272,6 +317,29 @@ class TestSeriesSerializer(serializers.ModelSerializer):
                 )
             except policy.PolicyError as exc:
                 raise serializers.ValidationError({exc.field: exc.message})
+
+        # --- refer & earn opt-in (creator-controlled)
+        if "referral_enabled" in attrs or "referral_commission_percent" in attrs:
+            from decimal import Decimal
+
+            cap = Decimal(str(getattr(settings, "TESTSERIES_REFERRAL_MAX_PERCENT", "50")))
+            pct = Decimal(str(get("referral_commission_percent", 0) or 0))
+            if pct < 0 or pct > cap:
+                raise serializers.ValidationError(
+                    {"referral_commission_percent": f"Must be between 0 and {cap}."}
+                )
+            if get("referral_enabled", False) and not (
+                source == TestSeries.Source.INDIVIDUAL and get("is_paid", False)
+            ):
+                raise serializers.ValidationError(
+                    {"referral_enabled": "Commission is only available on paid, individually sold test series."}
+                )
+            # T-REF: there is no platform default any more - referral ON with 0% would pay nothing and list nowhere,
+            # so the creator must pick a real cut (> 0) when switching it on.
+            if get("referral_enabled", False) and pct <= 0:
+                raise serializers.ValidationError(
+                    {"referral_commission_percent": f"Enter a commission above 0 (max {cap}) to turn on refer & earn."}
+                )
 
         # --- delivery window
         mode = get("delivery_mode", TestSeries.DeliveryMode.SELF_PACED)
@@ -536,14 +604,19 @@ class TestCertificateSerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     is_valid = serializers.BooleanField(read_only=True)
     verify_path = serializers.SerializerMethodField()
+    verify_url = serializers.SerializerMethodField()  # P3
 
     class Meta:
         model = TestCertificate
         fields = [
             "id", "code", "title", "series", "series_title", "student", "student_name",
             "score", "total_marks", "percentage", "issued_at", "is_valid", "revoked_reason", "verify_path",
+            "verify_url",
         ]
         read_only_fields = fields
+
+    def get_verify_url(self, obj):
+        return certificate_verify_url(obj.code)
 
     def get_student_name(self, obj):
         return display_name(obj.student)
@@ -560,14 +633,18 @@ class CertificateVerifySerializer(serializers.ModelSerializer):
     series_title = serializers.CharField(source="series.title", read_only=True)
     student_name = serializers.SerializerMethodField()
     valid = serializers.BooleanField(source="is_valid", read_only=True)
+    verify_url = serializers.SerializerMethodField()  # P3
 
     class Meta:
         model = TestCertificate
         fields = [
             "code", "title", "series_title", "student_name", "score", "total_marks",
-            "percentage", "issued_at", "valid", "revoked_reason",
+            "percentage", "issued_at", "valid", "revoked_reason", "verify_url",
         ]
         read_only_fields = fields
+
+    def get_verify_url(self, obj):
+        return certificate_verify_url(obj.code)
 
     def get_student_name(self, obj):
         return display_name(obj.student)
@@ -582,6 +659,8 @@ class PublicSeriesSerializer(serializers.ModelSerializer):
     review_count = serializers.IntegerField(read_only=True)
     question_count = serializers.SerializerMethodField()
     window_state = serializers.SerializerMethodField()
+    # TS3 - cover picture for the share preview / onboarding sample cards ("" when none). Same rule as the main serializer.
+    cover_url = serializers.SerializerMethodField()
 
     class Meta:
         model = TestSeries
@@ -589,9 +668,19 @@ class PublicSeriesSerializer(serializers.ModelSerializer):
             "id", "title", "description", "source", "is_paid", "price_coins", "duration_minutes",
             "total_marks", "attempts_allowed", "question_count", "delivery_mode", "starts_at", "ends_at",
             "window_state", "pass_percentage", "certificate_enabled", "certificate_title",
-            "proctoring", "avg_rating", "review_count", "creator_name", "share_slug",
+            "proctoring", "avg_rating", "review_count", "creator_name", "share_slug", "cover_url",
         ]
         read_only_fields = fields
+
+    def get_cover_url(self, obj):
+        if not obj.cover_image:
+            return ""
+        try:
+            url = obj.cover_image.url
+        except Exception:  # noqa: BLE001 - a missing / broken file must never break a public page
+            return ""
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request is not None else url
 
     def get_creator_name(self, obj):
         return display_name(obj.creator)

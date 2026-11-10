@@ -211,6 +211,8 @@ class SqlMirrorTests(TestCase, Viewers):
         self.assertAlmostEqual(self.check(p), 0.75 * 0.5 * 10.0)
 
 
+# The random exploration slot injects/reorders posts in a 2-post pool -> orderings flaky; pin it off.
+@override_settings(FEED_EXPLORE={"enabled": False})
 class RankingTests(TestCase, Viewers):
     def setUp(self):
         cache.clear()

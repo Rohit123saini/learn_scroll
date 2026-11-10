@@ -4,6 +4,7 @@ from unittest import mock
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -443,6 +444,7 @@ class CoinWithdrawalRequestManagerTests(APITestCase):
         self.assertEqual(self.alice.coin, 500)
 
 
+@override_settings(COIN_CASHOUT_ENABLED=True)  # P-G1: these tests exercise the cash-out path itself
 class CoinWithdrawalRequestAPITests(APITestCase):
     def setUp(self):
         self.alice = User.objects.create_user(username="alice", password="pass12345")

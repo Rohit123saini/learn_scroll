@@ -10,7 +10,9 @@ from .models import (
     ConversationParticipant,
     ConversationType,
     # 🔥 NAYA — Doubt Queue (see doubt_models_addition.py)
+    DoubtAnswer,
     DoubtQuestion,
+    DoubtUpvote,
     Group,
     GroupJoinRequest,
     GroupMedia,
@@ -26,6 +28,7 @@ from .models import (
     UserPresence,
 )
 from .group_rules import is_group_admin_or_mod
+from .doubt_utils import sanitize_doubt_image  # T1.1 — doubt photo validation + EXIF strip
 from .voice_meta import sanitize_voice_meta  # 🔥 NAYA (M4a) — voice waveform
 from .user_display import get_display_name, get_profile_photo_url
 
@@ -158,6 +161,9 @@ class ConversationListSerializer(serializers.ModelSerializer):
     def get_other_participant(self, obj):
         if obj.type != ConversationType.PRIVATE:
             return None
+        if hasattr(obj, 'other_membership_list'):  # P-C5: batched by ConversationViewSet.get_queryset (0 queries/row)
+            membership = obj.other_membership_list[0] if obj.other_membership_list else None
+            return UserMiniSerializer(membership.user, context=self.context).data if membership else None
         request = self.context.get('request')
         membership = obj.memberships.exclude(user=request.user).select_related('user').first()
         return UserMiniSerializer(membership.user, context=self.context).data if membership else None
@@ -294,30 +300,100 @@ class PollVoteSerializer(serializers.Serializer):
 # ======================================================================
 # DOUBT QUEUE (persistent, upvotable per-classroom question board)
 # ======================================================================
+class DoubtAnswerItemSerializer(serializers.ModelSerializer):
+    """T1.3 — one answer on a doubt (output only). `is_mine` is viewer-
+    specific; broadcast payloads (`context['broadcast']=True`) always send
+    False and the client recomputes it from `author.id`."""
+    author = serializers.SerializerMethodField()
+    verified_by = serializers.SerializerMethodField()
+    is_mine = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DoubtAnswer
+        fields = [
+            'id', 'doubt', 'author', 'text',
+            'is_teacher_answer', 'is_best',
+            'is_teacher_verified', 'verified_by', 'verified_at',
+            'is_mine', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_author(self, obj):
+        # SET_NULL author (deleted account) -> None; client shows "Deleted user".
+        if obj.author_id is None:
+            return None
+        return UserMiniSerializer(obj.author, context=self.context).data
+
+    def get_verified_by(self, obj):
+        if obj.verified_by_id is None:
+            return None
+        return UserMiniSerializer(obj.verified_by, context=self.context).data
+
+    def get_is_mine(self, obj):
+        if self.context.get('broadcast'):
+            return False
+        request = self.context.get('request')
+        return bool(request and obj.author_id is not None and obj.author_id == getattr(request.user, 'id', None))
+
+
 class DoubtQuestionSerializer(serializers.ModelSerializer):
     """
     `GET /message/groups/<group_id>/doubts/` list + create/upvote/answer/
     reveal response shape. Same request se dono uses cover hote hain
     (`PollSerializer`/`PollOptionSerializer` jaisa hi pattern — `votes_count`
     /`voted_by_me` ki tarah yahan `upvotes_count`/`upvoted_by_me`).
+
+    T1.1: `image_url` (optional photo). T1.3: `answers_count`,
+    `has_best_answer`, `has_verified_answer` + `best_answer` preview (list
+    view); the full thread is only in `DoubtQuestionDetailSerializer`.
+
+    `context['broadcast']=True` (WebSocket fan-out in
+    `DoubtQuestionViewSet._broadcast`) makes the payload VIEWER-NEUTRAL:
+    `author` is only present for non-anonymous / revealed doubts, and
+    `is_mine`/`upvoted_by_me` are False — those are per-viewer, so each
+    client keeps its own local value. (Before this, the *actor's* request
+    was used for broadcasts, which leaked an anonymous asker's identity to
+    the whole group the moment they posted/upvoted.)
     """
     author = serializers.SerializerMethodField()
     answered_by = UserMiniSerializer(read_only=True)
     upvoted_by_me = serializers.SerializerMethodField()
     is_mine = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+    best_answer = serializers.SerializerMethodField()
 
     class Meta:
         model = DoubtQuestion
         fields = [
-            'id', 'group', 'author', 'text', 'is_anonymous', 'is_revealed',
+            'id', 'group', 'author', 'text', 'image_url', 'is_anonymous', 'is_revealed',
             'upvotes_count', 'upvoted_by_me', 'is_mine',
             'is_answered', 'answer_text', 'answered_by', 'answered_at',
-            'created_at',
+            'answers_count', 'has_best_answer', 'has_verified_answer', 'best_answer',
+            'created_at', 'is_public', 'public_url',
         ]
         read_only_fields = [
             'id', 'group', 'is_revealed', 'upvotes_count', 'is_answered',
             'answer_text', 'answered_by', 'answered_at', 'created_at',
+            'is_public', 'public_url',
         ]
+
+    # TASK T2.6 — only set while the doubt is actually published, so a
+    # client can't hand out a stale link for an unpublished one.
+    public_url = serializers.SerializerMethodField()
+
+    def get_public_url(self, obj):
+        if not (obj.is_public and obj.public_slug):
+            return None
+        from django.conf import settings as dj_settings
+        base = getattr(dj_settings, 'PUBLIC_WEB_BASE_URL', '').rstrip('/')
+        return f'{base}/doubts/{obj.public_slug}/'
+
+    def _viewer_id(self):
+        """Viewer's user id, or None for viewer-neutral (broadcast) payloads."""
+        if self.context.get('broadcast'):
+            return None
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'id', None)
 
     def get_author(self, obj):
         # 🔒 Anonymity default-hidden hai: khud poochne wale ko hamesha
@@ -325,44 +401,99 @@ class DoubtQuestionSerializer(serializers.ModelSerializer):
         # nahi jab tak `is_revealed` explicitly True na ho (teacher ki
         # `reveal` action se) — "Ask Anonymously" §2 ka poora point yahi
         # hai ki teacher ko bhi by-default identity na dikhe.
-        request = self.context.get('request')
         if not obj.is_anonymous:
             return UserMiniSerializer(obj.author, context=self.context).data
-        if request and getattr(request.user, 'id', None) == obj.author_id:
+        viewer_id = self._viewer_id()
+        if viewer_id is not None and viewer_id == obj.author_id:
             return UserMiniSerializer(obj.author, context=self.context).data
         if obj.is_revealed:
             return UserMiniSerializer(obj.author, context=self.context).data
         return None
 
     def get_upvoted_by_me(self, obj):
-        request = self.context.get('request')
-        if not request:
+        viewer_id = self._viewer_id()
+        if viewer_id is None:
             return False
-        # `.all()` — jahan `prefetch_related('upvotes')` lagi hai
-        # (`DoubtQuestionViewSet.get_queryset`) wahan 0 extra queries;
-        # jahan nahi hai wahan bhi sahi kaam karta hai — `PollOptionSerializer.
-        # get_voted_by_me` jaisa hi tradeoff.
-        return any(v.user_id == request.user.id for v in obj.upvotes.all())
+        # T1.4 — list view annotates `upvoted_flag` (one EXISTS subquery in
+        # the main SELECT) so this costs 0 extra queries per row. Single-
+        # object responses (create/upvote/answer actions) fall back to one
+        # cheap indexed lookup.
+        flag = getattr(obj, 'upvoted_flag', None)
+        if flag is not None:
+            return bool(flag)
+        return DoubtUpvote.objects.filter(doubt_id=obj.pk, user_id=viewer_id).exists()
 
     def get_is_mine(self, obj):
+        viewer_id = self._viewer_id()
+        return bool(viewer_id is not None and obj.author_id == viewer_id)
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        try:
+            url = obj.image.url
+        except ValueError:
+            return None
+        if url.startswith(('http://', 'https://')):
+            return url
         request = self.context.get('request')
-        return bool(request and obj.author_id == getattr(request.user, 'id', None))
+        return request.build_absolute_uri(url) if request else url
+
+    def get_best_answer(self, obj):
+        if not obj.has_best_answer:
+            return None
+        # T1.4 — list view prefetches best answers into `best_answer_list`
+        # (1 query for the whole page); fall back to a single query elsewhere.
+        cached = getattr(obj, 'best_answer_list', None)
+        if cached is None:
+            cached = list(obj.answers.filter(is_best=True).select_related('author', 'verified_by')[:1])
+        if not cached:
+            return None
+        return DoubtAnswerItemSerializer(cached[0], context=self.context).data
+
+
+class DoubtQuestionDetailSerializer(DoubtQuestionSerializer):
+    """Doubt + its full answer thread (detail endpoint, answer actions and
+    WebSocket broadcasts). Thread order = `DoubtAnswer.Meta.ordering`
+    (best, teacher-verified, teacher, oldest)."""
+    answers = serializers.SerializerMethodField()
+
+    class Meta(DoubtQuestionSerializer.Meta):
+        fields = DoubtQuestionSerializer.Meta.fields + ['answers']
+
+    def get_answers(self, obj):
+        # `.all()` — detail/answer endpoints prefetch `answers` (+author /
+        # verified_by) so this is 0 extra queries there.
+        return DoubtAnswerItemSerializer(obj.answers.all(), many=True, context=self.context).data
 
 
 class DoubtCreateSerializer(serializers.Serializer):
-    """`DoubtQuestionViewSet.create` request body."""
-    text = serializers.CharField(max_length=2000)
+    """`DoubtQuestionViewSet.create` request body — JSON (text-only, old
+    clients) ya multipart (text + optional `image`)."""
+    text = serializers.CharField(max_length=2000, required=False, allow_blank=True, default='')
     is_anonymous = serializers.BooleanField(default=False)
+    image = serializers.FileField(required=False, allow_null=True)
 
     def validate_text(self, value):
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Doubt khali nahi ho sakta.")
-        return value
+        return value.strip()
+
+    def validate_image(self, value):
+        if value is None:
+            return None
+        try:
+            return sanitize_doubt_image(value)  # -> clean ContentFile
+        except ValueError as e:
+            raise serializers.ValidationError(str(e))
+
+    def validate(self, attrs):
+        if not attrs.get('text') and not attrs.get('image'):
+            raise serializers.ValidationError({'text': "Doubt khali nahi ho sakta — text likho ya photo lagao."})
+        return attrs
 
 
 class DoubtAnswerSerializer(serializers.Serializer):
-    """`DoubtQuestionViewSet.answer` request body (teacher/admin/mod only)."""
+    """Legacy `answer/` request body (`answer_text`). Kept for compatibility;
+    new code uses `DoubtAnswerCreateSerializer`."""
     answer_text = serializers.CharField(max_length=4000)
 
     def validate_answer_text(self, value):
@@ -370,6 +501,20 @@ class DoubtAnswerSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Answer khali nahi ho sakta.")
         return value
+
+
+class DoubtAnswerCreateSerializer(serializers.Serializer):
+    """T1.3 — `POST .../doubts/<id>/answers/` (and legacy `.../answer/`)
+    request body. Accepts `text`, or the legacy `answer_text` alias; the
+    validated output is always `{'text': <stripped>}`."""
+    text = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+    answer_text = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        value = (attrs.get('text') or attrs.get('answer_text') or '').strip()
+        if not value:
+            raise serializers.ValidationError({'text': 'Answer khali nahi ho sakta.'})
+        return {'text': value}
 
 
 class MessageSerializer(serializers.ModelSerializer):
@@ -527,7 +672,7 @@ class DirectoryPersonSerializer(serializers.Serializer):
     display_name = serializers.SerializerMethodField()
     profile_photo = serializers.SerializerMethodField()
     is_mutual = serializers.SerializerMethodField()
-    relation = serializers.SerializerMethodField()  # "mutual" | "following" | "follower"
+    relation = serializers.SerializerMethodField()  # "mutual" | "following" | "follower" | "friend_of_friend"
 
     def get_display_name(self, obj):
         return get_display_name(obj)
@@ -541,7 +686,11 @@ class DirectoryPersonSerializer(serializers.Serializer):
     def get_relation(self, obj):
         if getattr(obj, 'is_mutual', False):
             return 'mutual'
-        return 'following' if getattr(obj, 'i_follow', False) else 'follower'
+        if getattr(obj, 'i_follow', False):
+            return 'following'
+        if getattr(obj, 'follows_me', False):
+            return 'follower'
+        return 'friend_of_friend'
 
 
 class DirectoryGroupSerializer(serializers.Serializer):
@@ -633,11 +782,19 @@ class GroupMemberSerializer(serializers.ModelSerializer):
 class GroupJoinRequestSerializer(serializers.ModelSerializer):
     user = UserMiniSerializer(read_only=True)
     responded_by = UserMiniSerializer(read_only=True)
+    # 🔥 S8 — admin ko approve karte waqt pata chale ki requester minor hai (naam real hi dikhta hai: ye screen
+    # sirf group admin/mod ki hai). Sirf DOB-rule (`post.minor_privacy.treated_as_minor`) — extra query nahi.
+    requester_is_minor = serializers.SerializerMethodField()
 
     class Meta:
         model = GroupJoinRequest
-        fields = ['id', 'group', 'user', 'status', 'responded_by', 'responded_at', 'created_at']
+        fields = ['id', 'group', 'user', 'status', 'responded_by', 'responded_at', 'created_at',
+                  'requester_is_minor']
         read_only_fields = fields
+
+    def get_requester_is_minor(self, obj):
+        from post import minor_privacy
+        return bool(minor_privacy.treated_as_minor(obj.user))
 
 
 class GroupSerializer(serializers.ModelSerializer):
@@ -662,15 +819,46 @@ class GroupSerializer(serializers.ModelSerializer):
             'allow_anonymous_doubts',
             # 🔥 NAYA (Task G14) — Study Groups discovery tag.
             'topic_tag',
+            # 🔥 S8 — discovery -> room safety (admin/mod PATCH se badalte hain; `room_rules_version` server badhata hai).
+            'join_approval_required', 'room_rules', 'room_rules_version',
         ]
         read_only_fields = [
             'id', 'conversation_id', 'created_by', 'invite_code',
-            'members_count', 'messages_count', 'created_at',
+            'members_count', 'messages_count', 'created_at', 'room_rules_version',
         ]
 
+    def validate_room_rules(self, value):
+        from .study_room_safety import clean_rules_text
+        return clean_rules_text(value)
+
     def get_members(self, obj):
-        qs = obj.group_members.filter(is_banned=False).select_related('user')
-        return GroupMemberSerializer(qs, many=True, context=self.context).data
+        qs = list(obj.group_members.filter(is_banned=False).select_related('user'))
+        data = GroupMemberSerializer(qs, many=True, context=self.context).data
+        # 🔥 S8 — public group me minor ka naam / photo adult strangers se chhupta hai (group admin/mod aur doosre
+        # minors ko real). ONE query (`minors_among`); `masked: true` flag client ko batata hai.
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None)
+        if viewer is None or not getattr(viewer, 'is_authenticated', False) or obj.is_private:
+            return data
+        from . import study_room_safety
+        masked = study_room_safety.masked_user_ids(viewer, obj.conversation, [m.user_id for m in qs])
+        if not masked:
+            return data
+        masked_str = {str(i) for i in masked}
+        out = []
+        for member, row in zip(qs, data):
+            row = dict(row)
+            if str(member.user_id) in masked_str:
+                fields = study_room_safety.person_fields(member.user, True, request=request)
+                user_row = dict(row.get('user') or {})
+                user_row.update({
+                    'display_name': fields['display_name'], 'profile_photo': None,
+                    'first_name': fields['display_name'], 'last_name': '', 'username': fields['display_name'],
+                })
+                row['user'] = user_row
+                row['masked'] = True
+            out.append(row)
+        return out
 
 
 # 🔥 NAYA (Task G14) — `GroupViewSet.discover` ke liye lightweight
@@ -685,13 +873,36 @@ class GroupSerializer(serializers.ModelSerializer):
 # hai) + `is_member` taaki UI "Join" vs "Open" button decide kar sake.
 class GroupDiscoverSerializer(serializers.ModelSerializer):
     is_member = serializers.SerializerMethodField()
+    # 🔥 S8 — discover card: "Join" vs "Request to join" vs "Requested".
+    #   join_approval_required — admin ne approval on rakha hai
+    #   join_needs_approval    — IS viewer ko approval lagegi (admin setting YA viewer minor hai)
+    #   my_request_status      — 'pending' | 'rejected' | None (viewer ki apni request)
+    #   has_custom_rules       — admin ne apne rules likhe hain (pre-join sheet me dikhane ke liye)
+    join_approval_required = serializers.BooleanField(read_only=True)
+    join_needs_approval = serializers.SerializerMethodField()
+    my_request_status = serializers.SerializerMethodField()
+    has_custom_rules = serializers.SerializerMethodField()
 
     class Meta:
         model = Group
         fields = [
             'id', 'name', 'description', 'photo_url', 'topic_tag',
             'invite_code', 'members_count', 'created_at', 'is_member',
+            'join_approval_required', 'join_needs_approval', 'my_request_status', 'has_custom_rules',
         ]
+
+    def get_join_needs_approval(self, obj):
+        from .study_room_safety import join_decision
+        return bool(join_decision(obj, self.context['request'].user).needs_approval)
+
+    def get_my_request_status(self, obj):
+        if hasattr(obj, '_viewer_request_status'):
+            return obj._viewer_request_status
+        row = obj.join_requests.filter(user=self.context['request'].user).values_list('status', flat=True).first()
+        return row if row in ('pending', 'rejected') else None
+
+    def get_has_custom_rules(self, obj):
+        return bool((obj.room_rules or '').strip())
 
     def get_is_member(self, obj):
         user = self.context['request'].user

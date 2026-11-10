@@ -1,0 +1,15 @@
+[Unit]
+Description=LearnScroll media backup
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=learnscroll
+Group=learnscroll
+WorkingDirectory=/srv/learnscroll/backend
+EnvironmentFile=/srv/learnscroll/.env
+ExecStart=/srv/learnscroll/backend/deploy/backup/backup_media.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3h

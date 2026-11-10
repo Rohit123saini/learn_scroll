@@ -60,13 +60,25 @@ MSG91_BASE_URL = "https://control.msg91.com/api/v5"
 
 
 def _phone_for(user) -> str | None:
-    """Single lookup shared by SMS and WhatsApp so the two channels can
-    never drift on which attribute they trust — NOTE (fix): the old
-    _send_sms had this fallback inline and _send_whatsapp (new in this
-    pass) would otherwise have had to duplicate it, with an easy chance
-    of the two silently disagreeing after a future edit to one but not
-    the other."""
-    return getattr(user, "phone_number", None) or getattr(user, "mobile", None)
+    """Single lookup shared by SMS and WhatsApp (N8: now core.channel_policy.phone_for, which reads the real `User.phone`
+    field first - before N8 this only looked at `phone_number` / `mobile`, attributes the User model does not have, so
+    SMS / WhatsApp silently never had a number). Returns a normalised "+<country><number>" or None."""
+    from core.channel_policy import phone_for
+
+    return phone_for(user) or None
+
+
+def _gate(user, channel: str, data: dict | None):
+    """N8 - the one gate for e-mail / SMS / WhatsApp: verified address, consent, suppression, caps, quiet hours.
+    Returns (decision, notif_type). Never raises (a policy glitch must not become a send)."""
+    from core.channel_policy import Decision, decide
+
+    notif_type = (data or {}).get("type") or None
+    try:
+        return decide(user, channel, notif_type), notif_type
+    except Exception:  # noqa: BLE001 - fail CLOSED for paid / personal channels: no policy answer = no send
+        logger.exception("channel policy crashed (channel=%s user=%s) - not sending", channel, getattr(user, "id", None))
+        return Decision(False, "policy_error"), notif_type
 
 
 def _send_push(user, title: str, message: str, data: dict | None = None) -> bool:
@@ -88,6 +100,18 @@ def _send_push(user, title: str, message: str, data: dict | None = None) -> bool
         )
         return False
 
+    # X12: quiet hours / Do Not Disturb / muted type are decided in ONE place (live_push.central_push_allowed), so the
+    # older tuitionclass pushes (waitlist, pass refund, notices, reminders ...) stop buzzing at night too. A held-back
+    # push counts as "handed off" (True): the bell row / reminder row is the record, retrying at 3 am would not help.
+    # Fails open; kill switch settings.TUITIONCLASS_PUSH_RESPECT_QUIET_HOURS = False.
+    try:
+        from .live_push import central_push_allowed
+
+        if not central_push_allowed(user, data):
+            return True
+    except Exception:
+        logger.exception("central push gate failed for user %s - sending anyway", getattr(user, "id", None))
+
     try:
         # NOTE: send_push_to_users (message app) doesn't return a per-call
         # success/failure count today — it logs its own FCM failures and
@@ -102,17 +126,27 @@ def _send_push(user, title: str, message: str, data: dict | None = None) -> bool
 
 
 def _send_email(user, title: str, message: str, data: dict | None = None) -> bool:
-    if not getattr(user, "email", None):
-        logger.info("No email on file for user %s — skipping email notification.", user.id)
+    """N8: verified address only, honours bounce / complaint / unsubscribe + daily cap, Hindi / English template with a
+    footer unsubscribe link and RFC 8058 one-click headers. HTML + plain-text alternative."""
+    decision, notif_type = _gate(user, "email", data)
+    if not decision.allowed:
+        logger.info("E-mail skipped for user %s: %s", user.id, decision.reason)
         return False
     try:
-        send_mail(
-            subject=title,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+        from django.core.mail import EmailMultiAlternatives
+
+        from core import channel_policy as policy
+        from core.channel_templates import language_for, render_event_email
+
+        url = policy.unsubscribe_url(user, "email", "channel")
+        subject, text, html = render_event_email(title, message, language_for(user), url)
+        mail = EmailMultiAlternatives(
+            subject=subject, body=text, from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[decision.address], headers=policy.email_headers(url),
         )
+        mail.attach_alternative(html, "text/html")
+        mail.send(fail_silently=False)
+        policy.record_send(user, "email", notif_type or "")
         return True
     except Exception:
         logger.exception("Email send failed for user %s", user.id)
@@ -131,10 +165,11 @@ def _send_sms(user, title: str, message: str, data: dict | None = None) -> bool:
     warning + no-op, same degrade-gracefully contract as _send_push above
     when the message app's push module can't be imported.
     """
-    phone = _phone_for(user)
-    if not phone:
-        logger.info("No phone number on file for user %s — skipping SMS notification.", user.id)
+    decision, notif_type = _gate(user, "sms", data)
+    if not decision.allowed:  # N8: verified phone + granted consent + not STOP-ed + under the daily / global cap
+        logger.info("SMS skipped for user %s: %s", user.id, decision.reason)
         return False
+    phone = decision.address
 
     auth_key = getattr(settings, "MSG91_AUTH_KEY", None)
     sender_id = getattr(settings, "MSG91_SMS_SENDER_ID", None)
@@ -146,6 +181,10 @@ def _send_sms(user, title: str, message: str, data: dict | None = None) -> bool:
         return False
 
     try:
+        from core import channel_policy as policy
+        from core.channel_templates import language_for, render_sms
+
+        message = render_sms(title, message, language_for(user))  # N8: Hindi / English + "Reply STOP" line, segment cap
         resp = requests.post(
             f"{MSG91_BASE_URL}/flow/",
             # NOTE: MSG91's simplest send shape (no pre-registered DLT
@@ -160,11 +199,12 @@ def _send_sms(user, title: str, message: str, data: dict | None = None) -> bool:
                 "sender": sender_id,
                 "route": "4",  # transactional route
                 "country": "91",
-                "sms": [{"message": message, "to": [phone]}],
+                "sms": [{"message": message, "to": [phone.lstrip("+")]}],  # MSG91 wants 91XXXXXXXXXX, no "+"
             },
             timeout=10,
         )
         resp.raise_for_status()
+        policy.record_send(user, "sms", notif_type or "")
         return True
     except requests.RequestException:
         logger.exception("SMS send failed for user %s (phone=%s)", user.id, phone)
@@ -189,14 +229,19 @@ def _send_whatsapp(user, title: str, message: str, data: dict | None = None) -> 
     MSG91_WHATSAPP_INTEGRATED_NUMBER + MSG91_WHATSAPP_TEMPLATE_NAME —
     see §10. No-ops with a logged warning if any are missing.
     """
-    phone = _phone_for(user)
-    if not phone:
-        logger.info("No phone number on file for user %s — skipping WhatsApp notification.", user.id)
+    decision, notif_type = _gate(user, "whatsapp", data)
+    if not decision.allowed:  # N8: same gate as SMS
+        logger.info("WhatsApp skipped for user %s: %s", user.id, decision.reason)
         return False
+    phone = decision.address
 
+    from core import channel_policy as policy
+    from core.channel_templates import language_for, render_whatsapp_value, whatsapp_template
+
+    template_name, template_lang = whatsapp_template(language_for(user))  # N8: Hindi / English template per user
+    message = render_whatsapp_value(title, message)
     auth_key = getattr(settings, "MSG91_AUTH_KEY", None)
     integrated_number = getattr(settings, "MSG91_WHATSAPP_INTEGRATED_NUMBER", None)
-    template_name = getattr(settings, "MSG91_WHATSAPP_TEMPLATE_NAME", None)
     if not auth_key or not integrated_number or not template_name:
         logger.warning(
             "MSG91_AUTH_KEY/MSG91_WHATSAPP_INTEGRATED_NUMBER/"
@@ -217,9 +262,9 @@ def _send_whatsapp(user, title: str, message: str, data: dict | None = None) -> 
                     "type": "template",
                     "template": {
                         "name": template_name,
-                        "language": {"code": "en", "policy": "deterministic"},
+                        "language": {"code": template_lang, "policy": "deterministic"},
                         "to_and_components": [
-                            {"to": [phone], "components": {"body_1": {"type": "text", "value": message}}}
+                            {"to": [phone.lstrip("+")], "components": {"body_1": {"type": "text", "value": message}}}
                         ],
                     },
                 },
@@ -227,6 +272,7 @@ def _send_whatsapp(user, title: str, message: str, data: dict | None = None) -> 
             timeout=10,
         )
         resp.raise_for_status()
+        policy.record_send(user, "whatsapp", notif_type or "")
         return True
     except requests.RequestException:
         logger.exception("WhatsApp send failed for user %s (phone=%s)", user.id, phone)

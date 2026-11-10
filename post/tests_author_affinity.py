@@ -374,6 +374,8 @@ class WhyAPITests(ApiBase):
         self.assertEqual([r["code"] for r in self.why(p)["reasons"]], ["popular"])
 
 
+# Exploration injects a random post into a tiny (2-post) feed -> the ordering asserts were flaky.
+@override_settings(FEED_EXPLORE={"enabled": False})
 class FeedAPITests(ApiBase):
     def order(self, **extra):
         r = self.client.get(reverse("home-feed"), {"page_size": 50, **extra})

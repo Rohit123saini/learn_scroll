@@ -1,0 +1,21 @@
+# P-B2 -- keep ?ticket= / ?token= / ?access_token= / ?refresh= out of the reverse proxy's ACCESS log.
+# The app never sends ?token= any more (sockets use a one-time ?ticket=, valid ~30 s, single use), but an old build or a
+# curl test can still put a credential in a URL, and nginx would write it to disk. Copy into the http {} block.
+#
+# Redacts the FIRST sensitive parameter of the request line; the value is replaced by [redacted].
+map $request $ls_loggable_request {
+    ~^(?<head>.*[?&](?:token|ticket|access_token|refresh|refresh_token)=)[^&\s"]+(?<tail>.*)$  "${head}[redacted]${tail}";
+    default                                                                                    $request;
+}
+map $request_uri $ls_loggable_uri {
+    ~^(?<head>.*[?&](?:token|ticket|access_token|refresh|refresh_token)=)[^&\s"]+(?<tail>.*)$  "${head}[redacted]${tail}";
+    default                                                                                    $request_uri;
+}
+
+# Use this format instead of `combined` (never log $request, $request_uri, $args or $query_string directly).
+log_format learnscroll '$remote_addr - $remote_user [$time_local] "$ls_loggable_request" '
+                       '$status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time';
+access_log /var/log/nginx/learnscroll.access.log learnscroll;
+
+# Also: an AWS ALB / Cloudflare / other managed proxy writes the full URL in ITS log and cannot redact it -
+# that is why the app uses a short-lived single-use ticket and WS_ALLOW_QUERY_TOKEN stays false.

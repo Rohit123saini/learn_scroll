@@ -1,0 +1,10 @@
+# Minimal LiveKit config for the STAGING compose. Keys come from the LIVEKIT_KEYS env var (see compose file).
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false      # --node-ip is passed on the command line
+redis:
+  address: redis:6379
+log_level: info

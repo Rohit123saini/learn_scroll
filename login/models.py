@@ -76,6 +76,7 @@ from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator, URLValidator
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
 from django.db.models.signals import post_delete, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
@@ -94,13 +95,48 @@ phone_validator = RegexValidator(
 # what a valid link list is. Referenced by name from the migration, so keep it
 # at module level and don't rename it.
 # ---------------------------------------------------------------------------
-MAX_PROFILE_LINKS = 3
+MAX_PROFILE_LINKS = 5  # P1: was 3
 PROFILE_LINK_TITLE_MAX = 40
 PROFILE_LINK_URL_MAX = 200
 
 # http/https ONLY — rejects javascript:, data:, ftp:, file:, etc. (stored XSS via
 # a tappable profile link is the whole reason this is not just a CharField).
 _link_url_validator = URLValidator(schemes=["http", "https"])
+
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home", ".corp")
+
+
+def is_public_http_url(url) -> bool:
+    """P11: True only for an http(s) address a stranger may be sent to by tapping it.
+
+    Refused: any other scheme (javascript:, data:, file:, ftp: ...), `user:pass@host` / `google.com@evil.com` style
+    addresses (the part before @ is a classic phishing disguise), control characters / spaces, `localhost`, internal-only
+    suffixes, single-label hosts, and IP addresses that are not public (loopback, 10.x, 192.168.x, 169.254.x ...).
+    Never raises."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        if not isinstance(url, str):
+            return False
+        url = url.strip()
+        if not url or any(ord(c) < 32 or c.isspace() for c in url):
+            return False
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in ("http", "https"):
+            return False
+        if "@" in parts.netloc or parts.username is not None or parts.password is not None:
+            return False
+        host = (parts.hostname or "").lower().rstrip(".")
+        if not host or host == "localhost" or host.endswith(_BLOCKED_HOST_SUFFIXES):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return "." in host  # a real domain has at least one dot
+        return bool(ip.is_global)
+    except Exception:
+        return False
 
 
 def clean_profile_links(value):
@@ -138,6 +174,8 @@ def clean_profile_links(value):
             _link_url_validator(url)
         except ValidationError:
             raise ValidationError(f"Link {i}: enter a valid http:// or https:// URL.")
+        if not is_public_http_url(url):  # P11: no user@host disguises, localhost, private IPs
+            raise ValidationError(f"Link {i}: this address can't be used on a profile.")
         cleaned.append({"title": title, "url": url})
     return cleaned
 
@@ -157,6 +195,12 @@ class User(AbstractUser):
         validators=[phone_validator],
     )
 
+    # L1 gap 4 -- True only when the owner proved they control `phone` with an
+    # OTP (signup, complete-profile, or a successful OTP login on that number).
+    # New phones are never saved without it. Rows that already had a phone
+    # before this change start as False (unverified/legacy).
+    phone_verified = models.BooleanField(default=False)
+
     # AbstractUser.email is NOT unique by default — made it unique here so
     # "sign in with email" / "email already registered" checks can rely on
     # the DB instead of a racy SELECT-then-INSERT in application code.
@@ -167,6 +211,10 @@ class User(AbstractUser):
         null=True,
         blank=True,
     )
+    # P10b - BlurHash (~28 chars) of profile_photo, drawn as the avatar placeholder while the photo downloads.
+    # Filled by `_refresh_profile_photo_blurhash` (pre_save) when a NEW photo is uploaded, cleared when the photo is
+    # removed; old accounts: `manage.py backfill_profile_blurhash`. Hand-written migration login/0013.
+    profile_photo_blurhash = models.CharField(max_length=40, blank=True, default="")
 
     bio = models.TextField(blank=True)
 
@@ -174,9 +222,28 @@ class User(AbstractUser):
     pronouns = models.CharField(max_length=30, blank=True, default="")
     # Free-text label under the name, e.g. "Teacher", "JEE Aspirant".
     category_label = models.CharField(max_length=40, blank=True, default="")
-    # Up to 3 {"title": str, "url": http(s) str}. Validated by
+    # Up to 5 (MAX_PROFILE_LINKS) {"title": str, "url": http(s) str}. Validated by
     # clean_profile_links() above; the API also normalises through it.
     links = models.JSONField(default=list, blank=True, validators=[validate_profile_links])
+
+    # P1 — profile header (hand-written migration login/0011_profile_header.py).
+    # Optional banner behind the avatar; same upload checks as profile_photo (SafeCoverPhotoField).
+    cover_photo = models.ImageField(upload_to="profile_covers/", null=True, blank=True)
+    # Free-text "Kota, Rajasthan" — optional, never shown to others for under-18 accounts.
+    location = models.CharField(max_length=60, blank=True, default="")
+    # When the username was last changed (NULL = never). Drives the "1 change per 14 days" rule.
+    username_changed_at = models.DateTimeField(null=True, blank=True)
+
+    class VerifiedReason(models.TextChoices):
+        IDENTITY = "identity", "Verified account"
+        TEACHER = "teacher", "Verified teacher"
+        CAMPUS = "campus", "Verified by campus"
+        CREATOR = "creator", "Verified creator"
+        OFFICIAL = "official", "Official account"
+
+    # WHY the blue tick was given. Set by staff only (admin) — never writable through the profile API.
+    # Blank on a verified account = legacy tick, shown as "Verified account".
+    verified_reason = models.CharField(max_length=12, blank=True, default="", choices=VerifiedReason.choices)
 
     is_private = models.BooleanField(default=False)
 
@@ -184,11 +251,19 @@ class User(AbstractUser):
     # in the 30-second first-run step, used to personalise the first feed
     # and suggested tests. Choices live in core/onboarding_quickstart.py.
     study_class = models.CharField(max_length=20, blank=True, default="")
+    # T2.3 - role picked in onboarding ("student" | "teacher" | "parent"; "" = never chosen).
+    # Only personalises first-run next steps / Home; it grants NO permissions (anyone can
+    # still teach, learn or link a child) - see core/onboarding_quickstart.py.
+    onboarding_role = models.CharField(max_length=10, blank=True, default="")
     target_exam = models.CharField(max_length=20, blank=True, default="")
 
     # Minor-safety. Optional so pre-existing accounts keep working; NEW
     # signups must supply it (SignupSerializer). See login/age.py.
     date_of_birth = models.DateField(null=True, blank=True)
+
+    # P7 -- "show my birthday (day + month) on my profile". Off by default; can never be on for an under-18 account.
+    # The year is never shown to anyone. See user_profile/profile_header.py::birthday_label.
+    show_birthday = models.BooleanField(default=False)
 
     is_verified = models.BooleanField(default=False, db_index=True)
 
@@ -209,6 +284,12 @@ class User(AbstractUser):
     class Meta:
         indexes = [
             models.Index(fields=["is_private"]),
+            # P-C5: user search does `username/first_name/last_name icontains` = a sequential scan of the whole
+            # user table. Trigram GIN lets Postgres use an index scan for substring matches. Needs `pg_trgm`
+            # (login migration 0014 enables it); ignored on non-Postgres backends, same as the tuitionclass ones.
+            GinIndex(fields=["username"], name="user_username_trgm", opclasses=["gin_trgm_ops"]),
+            GinIndex(fields=["first_name"], name="user_first_name_trgm", opclasses=["gin_trgm_ops"]),
+            GinIndex(fields=["last_name"], name="user_last_name_trgm", opclasses=["gin_trgm_ops"]),
         ]
 
     def save(self, *args, **kwargs):
@@ -262,6 +343,57 @@ def _delete_old_profile_photo_on_change(sender, instance: User, **kwargs):
         old_photo.storage.delete(old_photo.name)
 
 
+@receiver(pre_save, sender=User)
+def _refresh_profile_photo_blurhash(sender, instance: User, **kwargs):
+    """P10b - keep `profile_photo_blurhash` in step with `profile_photo`.
+
+    * no photo                      -> "" (removed / never had one)
+    * a NEW upload (not yet stored) -> BlurHash computed from the uploaded file
+    * same, already stored photo    -> untouched (no query, no file read)
+
+    Never raises: a photo that cannot be decoded just gets no placeholder (the app falls back to the initial letter).
+    NOTE: `save(update_fields=[...])` that lists `profile_photo` but not `profile_photo_blurhash` will not store the
+    hash - the backfill command fixes such rows.
+    """
+    photo = instance.profile_photo
+    if not photo:
+        instance.profile_photo_blurhash = ""
+        return
+    if getattr(photo, "_committed", True):
+        return  # already in storage, hash (if any) already computed
+    try:
+        from PIL import Image
+
+        from post.services import blurhash_for_image  # lazy: login must not import post at load time
+
+        f = photo.file
+        try:
+            f.seek(0)
+        except Exception:  # noqa: BLE001 - some file objects are not seekable
+            pass
+        with Image.open(f) as img:
+            instance.profile_photo_blurhash = blurhash_for_image(img)[:40]
+        try:
+            f.seek(0)  # storage must read the upload from the start
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001 - placeholder is optional, the save must go through
+        instance.profile_photo_blurhash = ""
+
+
+@receiver(pre_save, sender=User)
+def _delete_old_cover_photo_on_change(sender, instance: User, **kwargs):
+    """P1 — same as the profile photo: replacing or removing the cover deletes the old file."""
+    if not instance.pk:
+        return
+    try:
+        old = sender.objects.only("cover_photo").get(pk=instance.pk).cover_photo
+    except sender.DoesNotExist:
+        return
+    if old and old != instance.cover_photo:
+        old.storage.delete(old.name)
+
+
 @receiver(post_delete, sender=User)
 def _delete_profile_photo_on_user_delete(sender, instance: User, **kwargs):
     """Fires for both `instance.delete()` and bulk `queryset.delete()`,
@@ -269,6 +401,8 @@ def _delete_profile_photo_on_user_delete(sender, instance: User, **kwargs):
     entirely)."""
     if instance.profile_photo:
         instance.profile_photo.storage.delete(instance.profile_photo.name)
+    if instance.cover_photo:  # P1
+        instance.cover_photo.storage.delete(instance.cover_photo.name)
 
 
 class OTPVerification(models.Model):
@@ -299,6 +433,10 @@ class OTPVerification(models.Model):
 
     MAX_ATTEMPTS = 5
     EXPIRY_MINUTES = 5  # 2 min was too tight for real-world email/SMS delivery delay
+    # L1 gap 12 -- phone-first signup: after the OTP is verified the user still
+    # has to fill name / DOB / password, so a VERIFIED row lives longer than an
+    # unverified code. It is still single-use (deleted when signup consumes it).
+    VERIFIED_EXPIRY_MINUTES = 15
 
     class Meta:
         indexes = [
@@ -314,14 +452,22 @@ class OTPVerification(models.Model):
         return check_password(raw_otp, self.otp_hash)
 
     def is_expired(self) -> bool:
-        return timezone.now() > self.created_at + timedelta(minutes=self.EXPIRY_MINUTES)
+        minutes = self.VERIFIED_EXPIRY_MINUTES if self.is_verified else self.EXPIRY_MINUTES
+        return timezone.now() > self.created_at + timedelta(minutes=minutes)
 
     def is_locked(self) -> bool:
         return self.attempts >= self.MAX_ATTEMPTS
 
+    def attempts_left(self) -> int:
+        """Wrong guesses still allowed before this code locks (L1 gap 14)."""
+        return max(self.MAX_ATTEMPTS - self.attempts, 0)
+
     def register_failed_attempt(self) -> None:
-        self.attempts += 1
-        self.save(update_fields=["attempts"])
+        # Atomic increment: two parallel wrong guesses must both be counted,
+        # otherwise the "N attempts left" shown to the user (and the lock
+        # itself) can undercount. refresh_from_db keeps self.attempts exact.
+        type(self).objects.filter(pk=self.pk).update(attempts=models.F("attempts") + 1)
+        self.refresh_from_db(fields=["attempts"])
 
     def __str__(self):
         return f"{self.target} - OTP (hashed, attempts={self.attempts})"
@@ -366,11 +512,28 @@ class AuthToken(models.Model):
     # unrelated .save() call elsewhere touching this row.
     last_used_at = models.DateTimeField(db_index=True)
 
+    # L1 gap 11 -- device info, so the user can see "where am I signed in" and
+    # end one device. All of it is filled once, when the session is created
+    # (login/device_info.py), and is informational only: nothing here is used
+    # for authentication. `device_id` is a random per-install id the app sends
+    # (kept across logouts); it lets a fresh login on the same phone REPLACE the
+    # old row instead of piling up duplicates.
+    device_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    device_name = models.CharField(max_length=120, blank=True, default="")
+    platform = models.CharField(max_length=20, blank=True, default="")
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True, default="")
+
     # Product requirement: 10 days of zero activity -> session dies.
     SLIDING_EXPIRY = timedelta(days=10)
 
+    # L1 gap 11 -- at most this many live sessions per user; a new login beyond
+    # it ends the least-recently-used one (override: settings.AUTH_MAX_SESSIONS_PER_USER).
+    MAX_SESSIONS_PER_USER = 10
+
     class Meta:
         indexes = [
+            models.Index(fields=["user", "last_used_at"], name="login_auth_user_used_idx"),
             # Supports a future periodic-cleanup job ("delete rows nobody
             # will ever touch again") — same reasoning as the created_at
             # index on OTPVerification above. Nothing queries by
@@ -391,3 +554,270 @@ class AuthToken(models.Model):
 
     def __str__(self):
         return f"session user_id={self.user_id} jti={self.jti[:8]}..."
+
+
+class AuthAuditLog(models.Model):
+    """
+    L1 gap 19 -- append-only audit trail of login / OTP / password-reset / session
+    events. Written ONLY through ``login.audit.record()`` (never directly), which
+    also masks the identifier, drops secrets and de-duplicates attacker-triggerable
+    noise -- read that module's docstring for the rules.
+
+    Answers: "was this account attacked?" (many ``login_failed`` / ``otp_failed``
+    rows for one user), "which device reset the password?" (``reset_success`` +
+    ip / device_id), "who is pumping SMS?" (``otp_send_blocked`` by ip).
+
+    Design notes
+      * ``user`` is a plain nullable FK with ``db_constraint=False`` + SET_NULL: an
+        audit insert can never fail (or fail at COMMIT, FK checks are deferred on
+        Postgres) because the account vanished, and deleting a user never
+        cascades into -- or is blocked by -- its history.
+      * The identifier is stored masked (``identifier_masked``) and as a keyed hash
+        (``identifier_hash``) -- never in clear. Account deletion blanks both for
+        that user's rows (login/account_deletion.py).
+      * Rows are never edited: ``save()`` refuses updates, the admin is read-only.
+        Old rows are removed in bulk by the retention task
+        (login.tasks.purge_auth_audit_logs, AUTH_AUDIT_RETENTION_DAYS).
+    """
+
+    OUTCOME_SUCCESS = "success"
+    OUTCOME_FAILURE = "failure"  # tried and failed (wrong password / code)
+    OUTCOME_BLOCKED = "blocked"  # refused by a guard (lockout, rate limit, captcha)
+
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    # login.audit.Event.* -- plain string, deliberately without `choices` so adding an
+    # event later never needs a migration.
+    event = models.CharField(max_length=40, db_index=True)
+    outcome = models.CharField(max_length=10, default=OUTCOME_SUCCESS)
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="auth_audit_logs",
+        db_constraint=False,
+    )
+
+    identifier_kind = models.CharField(max_length=10, blank=True, default="")  # email | phone | username
+    identifier_masked = models.CharField(max_length=120, blank=True, default="")
+    identifier_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True, default="")
+    device_id = models.CharField(max_length=64, blank=True, default="")
+    platform = models.CharField(max_length=20, blank=True, default="")
+
+    reason = models.CharField(max_length=64, blank=True, default="")  # stable machine code
+    metadata = models.JSONField(default=dict, blank=True)  # small extras: attempts_left, retry_after ...
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["event", "created_at"], name="login_audit_ev_created_idx"),
+            models.Index(fields=["user", "created_at"], name="login_audit_user_created_idx"),
+            models.Index(fields=["ip_address", "created_at"], name="login_audit_ip_created_idx"),
+            models.Index(fields=["identifier_hash", "created_at"], name="login_audit_idh_created_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("AuthAuditLog rows are append-only and cannot be edited.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event} [{self.outcome}] user_id={self.user_id}"
+
+
+
+# ---------------------------------------------------------------------------
+# S5 -- DPDP Act 2023 data rights: export my data, delete with grace, consent history.
+# ---------------------------------------------------------------------------
+class DataExportRequest(models.Model):
+    """One "Download my data" job. The ZIP is built by a Celery task (login/data_rights.py) and kept in the
+    default storage under a private path; it is handed out ONLY through the authenticated download endpoint
+    until `expires_at` (7 days by default), then the file is deleted and the row is marked expired."""
+
+    STATUS_QUEUED = "queued"
+    STATUS_PROCESSING = "processing"
+    STATUS_READY = "ready"
+    STATUS_FAILED = "failed"
+    STATUS_EXPIRED = "expired"
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, "Queued"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_READY, "Ready"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_EXPIRED, "Expired"),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="data_exports")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
+    requested_at = models.DateTimeField(default=timezone.now, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    ready_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    file_name = models.CharField(max_length=255, blank=True, default="")  # storage key, empty until ready
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    download_count = models.PositiveIntegerField(default=0)
+    error = models.CharField(max_length=255, blank=True, default="")
+    notified_at = models.DateTimeField(null=True, blank=True)  # "your export is ready" message sent
+
+    class Meta:
+        ordering = ["-requested_at", "-id"]
+        indexes = [models.Index(fields=["user", "-requested_at"], name="login_dexp_user_req_idx")]
+
+    def __str__(self):
+        return f"export #{self.pk} user={self.user_id} {self.status}"
+
+
+class AccountDeletionRequest(models.Model):
+    """Delete-account with a grace period. While `status == pending` the account still works (the person can
+    log in and cancel); at `scheduled_for` the Celery sweeper runs the real anonymise + erase
+    (login/account_deletion.py::delete_account)."""
+
+    STATUS_PENDING = "pending"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_COMPLETED = "completed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_CANCELLED, "Cancelled"),
+        (STATUS_COMPLETED, "Completed"),
+    ]
+
+    # no DB constraint on the FK target after anonymisation: the user row is kept (anonymised), so a plain FK is fine
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="deletion_requests")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    requested_at = models.DateTimeField(default=timezone.now)
+    scheduled_for = models.DateTimeField(db_index=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)  # "3 days left" nudge
+
+    class Meta:
+        ordering = ["-requested_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user"], condition=models.Q(status="pending"), name="login_delreq_one_pending_per_user"
+            ),
+        ]
+
+    def __str__(self):
+        return f"deletion #{self.pk} user={self.user_id} {self.status} @ {self.scheduled_for:%Y-%m-%d}"
+
+
+class ConsentRecord(models.Model):
+    """Append-only consent history (DPDP: when did the person agree / take it back). The CURRENT state of a
+    purpose is its newest row. Rows are never edited; the sweeper that erases an account keeps them (they hold no
+    personal data beyond the user id and a coarse source) as proof of the consent trail."""
+
+    PURPOSE_MARKETING = "marketing"
+    PURPOSE_ANALYTICS = "analytics"
+    PURPOSE_PERSONALISATION = "personalisation"
+    PURPOSES = (PURPOSE_MARKETING, PURPOSE_ANALYTICS, PURPOSE_PERSONALISATION)
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="consent_records")
+    purpose = models.CharField(max_length=30, db_index=True)
+    granted = models.BooleanField()
+    notice_version = models.CharField(max_length=20, blank=True, default="")  # privacy-notice version shown
+    source = models.CharField(max_length=20, blank=True, default="app")  # app | signup | system
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["user", "purpose", "-created_at"], name="login_consent_up_idx")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("ConsentRecord rows are append-only and cannot be edited.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"user={self.user_id} {self.purpose} {'granted' if self.granted else 'withdrawn'} @ {self.created_at:%Y-%m-%d}"
+
+
+class LinkedIdentity(models.Model):
+    """S10 -- an outside sign-in account (today: Google) tied to a LearnScroll account.
+
+    One row per (user, provider). `subject` is the provider's stable id (Google ``sub``), NOT the e-mail, so the link
+    keeps working when the e-mail on either side changes. Unlinking sets `revoked_at` instead of deleting the row:
+    that is what stops "Sign in with Google" from silently re-attaching itself through the old match-by-e-mail rule.
+    """
+
+    PROVIDER_GOOGLE = "google"
+    PROVIDER_CHOICES = [(PROVIDER_GOOGLE, "Google")]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="linked_identities")
+    provider = models.CharField(max_length=16, choices=PROVIDER_CHOICES, default=PROVIDER_GOOGLE)
+    subject = models.CharField(max_length=64)
+    email = models.EmailField(blank=True, default="")  # e-mail of the provider account when it was linked
+    display_name = models.CharField(max_length=120, blank=True, default="")
+    linked_at = models.DateTimeField(default=timezone.now)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["provider", "subject"], name="login_linkid_provider_subject_uniq"),
+            models.UniqueConstraint(fields=["user", "provider"], name="login_linkid_user_provider_uniq"),
+        ]
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None
+
+    def __str__(self):
+        return f"user={self.user_id} {self.provider} {'active' if self.is_active else 'unlinked'}"
+
+
+class QRLoginRequest(models.Model):
+    """S10 -- one "sign in on a computer by scanning a QR with the phone" attempt.
+
+    The computer (no session yet) creates the row and shows a QR holding the public `code`; it keeps the private
+    `secret` and polls with both. The signed-in phone scans the code and approves. Only HASHES of code / secret are
+    stored. `match_code` (4 digits) is shown on the computer and must be typed on the phone -- a QR held up by an
+    attacker cannot be approved blindly.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_APPROVED = "approved"
+    STATUS_DENIED = "denied"
+    STATUS_CONSUMED = "consumed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_DENIED, "Denied"),
+        (STATUS_CONSUMED, "Consumed"),
+    ]
+
+    code_hash = models.CharField(max_length=64, unique=True)
+    secret_hash = models.CharField(max_length=64)
+    match_code = models.CharField(max_length=4)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    # the computer that asked (from its request headers, informational only)
+    requester_ip = models.GenericIPAddressField(null=True, blank=True)
+    requester_device_name = models.CharField(max_length=120, blank=True, default="")
+    requester_platform = models.CharField(max_length=20, blank=True, default="")
+    requester_user_agent = models.CharField(max_length=255, blank=True, default="")
+    requester_device_id = models.CharField(max_length=64, blank=True, default="")
+
+    # the phone that answered
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE, related_name="qr_login_requests")
+    wrong_match_attempts = models.PositiveSmallIntegerField(default=0)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    # AuthToken.jti of the session this QR created -> "Linked apps" list
+    session_jti = models.CharField(max_length=64, blank=True, default="", db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    def __str__(self):
+        return f"qr-login {self.status} user={self.user_id}"

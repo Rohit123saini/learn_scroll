@@ -1,0 +1,17 @@
+{% extends login_parent %}
+{% block content %}
+{{ block.super }}
+<div style="max-width:420px;margin:16px auto;padding:12px 14px;border:1px solid #c9d4e3;border-radius:6px;background:#f5f8fc;color:#1d2b3a;font-size:13px;line-height:1.5">
+  <strong>Staff password rules</strong>
+  <ul style="margin:6px 0 0 18px;padding:0">
+    <li>At least {{ staff_min_length }} characters, with upper- and lower-case letters, a digit and a symbol.</li>
+    <li>It must not contain your username, name or email.</li>
+    <li>Older, weaker password? Login is refused - ask a superuser to run <code>manage.py changepassword</code> for you.</li>
+    <li>After {{ max_failures }} wrong attempts login is locked for {{ lockout_minutes }} minutes (the message shows the time left).</li>
+  </ul>
+  {% if require_2fa %}
+  <p style="margin:8px 0 0"><strong>Two-factor is required:</strong> enter the 6-digit code from your authenticator app, or a one-time backup code.
+    First time? <a href="{% url 'admin:twofa_guide' %}">How to set up 2FA</a>.</p>
+  {% endif %}
+</div>
+{% endblock %}

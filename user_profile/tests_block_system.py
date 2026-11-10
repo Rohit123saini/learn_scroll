@@ -11,6 +11,7 @@ Instagram-style block / unblock, end to end:
 Run:  python manage.py test user_profile.tests_block_system
 """
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -34,6 +35,10 @@ def _post(user, **kw):
 
 def _results(resp):
     data = resp.json()
+    # List endpoints wrap their page in the project's response envelope:
+    #   {"status": true, "message": "...", "data": {"count": .., "results": [...]}}
+    if isinstance(data, dict) and "status" in data and isinstance(data.get("data"), (dict, list)):
+        data = data["data"]
     return data["results"] if isinstance(data, dict) and "results" in data else data
 
 
@@ -391,6 +396,9 @@ from user_profile.services import block_new_accounts_of
 
 class ReportTests(APITestCase):
     def setUp(self):
+        # DRF throttles (e.g. profile_report_burst = 10/min per user id) live in the cache, which is NOT
+        # rolled back between tests, and user ids are reused -> counters leaked from earlier tests (429).
+        cache.clear()
         self.alice, self.bob = _user("r_alice"), _user("r_bob")
         self.post = _post(self.bob)
         self.comment = PostComment.objects.create(post=self.post, user=self.bob, content="rude")
@@ -432,6 +440,9 @@ class ReportTests(APITestCase):
 
 class BlockAndReportTests(APITestCase):
     def setUp(self):
+        # DRF throttles (e.g. profile_report_burst = 10/min per user id) live in the cache, which is NOT
+        # rolled back between tests, and user ids are reused -> counters leaked from earlier tests (429).
+        cache.clear()
         self.alice, self.bob = _user("br_alice"), _user("br_bob")
         self.client.force_authenticate(self.alice)
 
@@ -565,7 +576,6 @@ class MuteAndRestrictTests(APITestCase):
 # signals, and one end-to-end lifecycle across every layer
 # ======================================================================
 from django.contrib.admin.sites import AdminSite
-from django.core.cache import cache
 from django.test import RequestFactory
 
 from login.admin import UserAdmin

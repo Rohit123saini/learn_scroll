@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from datetime import timedelta
 from django.db.backends.signals import connection_created
 from django.core.exceptions import ImproperlyConfigured
+from LearnScroll.ops_settings import env_bool, env_float, env_int  # P-C3
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -22,8 +23,9 @@ DEBUG = os.getenv("DEBUG", "False") == "True"
 # Env-driven allowlist (comma-separated). Fails SAFE: with DEBUG=False and no
 # ALLOWED_HOSTS set, Django rejects every request (400) instead of accepting any
 # Host header. DEBUG-only wildcard below is for local dev convenience.
-#ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
-ALLOWED_HOSTS=['*']
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
+# T0.1 (B1): the hard-coded ALLOWED_HOSTS = ['*'] that used to live here is gone;
+# the env-driven allowlist above is the only source. Wrong Host -> 400.
 # NOTE (fix — local dev on a physical device): a phone/emulator on the same
 # Wi-Fi hits this server via the PC's LAN IP (e.g. 10.224.54.189), not
 # localhost/127.0.0.1 — that IP isn't in the allowlist above, so every
@@ -47,6 +49,64 @@ ALLOWED_HOSTS=['*']
 if DEBUG and not os.getenv("ALLOWED_HOSTS"):
     ALLOWED_HOSTS = ["*"]
 
+# T0.1: in production an empty allowlist would 400 every request (incl. health
+# checks) with no obvious reason -> fail loudly at boot instead. Skipped while
+# running the test-suite (Django's test runner injects 'testserver' itself).
+import sys as _sys  # noqa: E402
+if not DEBUG and not ALLOWED_HOSTS and "test" not in _sys.argv:
+    raise ImproperlyConfigured(
+        "ALLOWED_HOSTS is empty. Set ALLOWED_HOSTS in the environment, e.g. "
+        "ALLOWED_HOSTS=api.learnscroll.app (comma-separated, no wildcard)."
+    )
+if not DEBUG and "*" in ALLOWED_HOSTS:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must not contain '*' when DEBUG is False.")
+
+
+# ---------------------------------------------------------------------------
+# C4: LiveKit (calls / study rooms / live classes) production sanity check.
+# Fails ONLY when LIVEKIT_WS_URL IS set to something that can never work in
+# production (plain ws://, localhost, private/LAN IP) — iOS ATS + Android
+# cleartext policy block ws://, and a LAN IP is unreachable from the internet.
+# Unset => no crash (calls/study-room return a clean 503, text chat unaffected).
+# ---------------------------------------------------------------------------
+def _validate_livekit_config():
+    import ipaddress
+    import warnings
+    from urllib.parse import urlparse
+
+    ws = (os.getenv("LIVEKIT_WS_URL") or "").strip()
+    if not ws:
+        warnings.warn(
+            "LIVEKIT_WS_URL is not set: calls, study rooms and live classes will answer 503. "
+            "Set it to wss://<livekit-domain> (see deploy/livekit/README.md).",
+            RuntimeWarning,
+        )
+        return
+    parsed = urlparse(ws)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "wss":
+        raise ImproperlyConfigured(
+            f"LIVEKIT_WS_URL must be wss://<domain> when DEBUG is False (got {ws!r}). "
+            "Plain ws:// is blocked by iOS ATS / Android cleartext policy."
+        )
+    private = host in ("localhost", "") or host.endswith((".local", ".internal", ".lan"))
+    try:
+        ip = ipaddress.ip_address(host)
+        private = private or ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        pass
+    if private:
+        raise ImproperlyConfigured(
+            f"LIVEKIT_WS_URL points at a local/private host ({host!r}); clients on the internet cannot reach it."
+        )
+    http_url = (os.getenv("LIVEKIT_HTTP_URL") or "").strip()
+    if http_url and urlparse(http_url).scheme not in ("http", "https"):
+        raise ImproperlyConfigured("LIVEKIT_HTTP_URL must start with http:// or https://")
+
+
+if not DEBUG and "test" not in _sys.argv:
+    _validate_livekit_config()
+
 
 
 
@@ -63,7 +123,16 @@ if DEBUG and not os.getenv("ALLOWED_HOSTS"):
 # All gated on `not DEBUG` so local dev over plain http:// keeps working
 # exactly as before — nothing here changes behavior until DEBUG=False.
 # ---------------------------------------------------------------------------
-SECURE_SSL_REDIRECT = False
+# T0.1: `check --deploy` W008 -> redirect http->https in production. Safe behind a
+# TLS-terminating proxy because SECURE_PROXY_SSL_HEADER below is set (the proxy
+# MUST send X-Forwarded-Proto). Override with SECURE_SSL_REDIRECT=false only if
+# the proxy itself already does the redirect.
+SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "false" if DEBUG else "true").strip().lower() in ("1", "true", "yes", "on")
+# T3.7 probes (/healthz/, /readyz/) must answer 200 even when a load balancer / local checker hits
+# them over plain http — never redirect them. (The Host header must still be in ALLOWED_HOSTS.)
+SECURE_REDIRECT_EXEMPT = [r"^healthz/?$", r"^readyz/?$", r"^healthz/deep/?$",
+                         # C2: LiveKit webhook POST ko 301 redirect nahi (signature hi auth hai)
+                         r"^message/livekit/webhook/?$"]
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -72,6 +141,24 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
 SECURE_HSTS_PRELOAD = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
+# X6 -- cookie / header hardening (the app itself uses Bearer tokens; these protect /admin/ and any cookie-auth page).
+# HttpOnly: JavaScript can never read the session cookie. SameSite=Lax: a cookie is not sent on cross-site POSTs.
+# (CSRF_COOKIE_HTTPONLY is left at Django's default False on purpose: the admin's own JS reads the CSRF cookie.)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
+SECURE_REFERRER_POLICY = os.getenv("SECURE_REFERRER_POLICY", "same-origin")
+SECURE_CROSS_ORIGIN_OPENER_POLICY = os.getenv("SECURE_CROSS_ORIGIN_OPENER_POLICY", "same-origin")
+
+# X6 -- wrong CURRENT password while changing a sensitive setting (change-password, change e-mail / phone, unlink
+# Google): login/sensitive.py ReauthGuard. N wrong tries inside the window lock the action for the lockout time.
+# X6 -- files (relative to BASE_DIR) allowed to use Django's @csrf_exempt (a signed webhook). `check_security_settings`
+# warns about every other use. Empty today: the code base has none (DRF APIViews are exempt by design - Bearer auth).
+CSRF_EXEMPT_ALLOWED: list = []
+
+REAUTH_MAX_FAILURES = int(os.getenv("REAUTH_MAX_FAILURES", "5"))
+REAUTH_FAILURE_WINDOW_SECONDS = int(os.getenv("REAUTH_FAILURE_WINDOW_SECONDS", "900"))
+REAUTH_LOCKOUT_SECONDS = int(os.getenv("REAUTH_LOCKOUT_SECONDS", "900"))
 
 # NOTE: needed alongside CORS_ALLOWED_ORIGINS above — CORS governs which
 # origins the *browser* is allowed to read cross-origin responses from;
@@ -101,6 +188,34 @@ CSRF_TRUSTED_ORIGINS = [
 # add it to .env. Requires `pip install --upgrade sentry-sdk`.
 # ---------------------------------------------------------------------------
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+# P-C3: share of requests traced (0..1). Default 0.1 (was 1.0 = every request); a bad value falls back to the default.
+SENTRY_TRACES_SAMPLE_RATE = env_float("SENTRY_TRACES_SAMPLE_RATE", 0.1, lo=0.0, hi=1.0)
+
+# T3.7 — never spend trace quota on uptime-monitor pings (they hit /healthz/ + /readyz/ every minute).
+_SENTRY_IGNORED_PATHS = ("/healthz", "/readyz", "/tuitionclass/healthz")
+
+
+def _sentry_traces_sampler(ctx):
+    path = ((ctx.get("wsgi_environ") or {}).get("PATH_INFO")
+            or (ctx.get("asgi_scope") or {}).get("path") or "")
+    if path.startswith(_SENTRY_IGNORED_PATHS):
+        return 0.0
+    return SENTRY_TRACES_SAMPLE_RATE
+
+
+# T3.7 — backups + health probes (see deploy/BACKUP_RESTORE_RUNBOOK.md)
+BACKUP_DIR = os.getenv("BACKUP_DIR", "/var/backups/learnscroll")
+HEALTHCHECK_TOKEN = os.getenv("HEALTHCHECK_TOKEN", "")  # enables GET /healthz/deep/
+
+def _sentry_before_send(event, hint):
+    from LearnScroll.log_filters import scrub_sentry_event
+    return scrub_sentry_event(event)
+
+
+def _sentry_before_breadcrumb(crumb, hint):
+    from LearnScroll.log_filters import scrub_sentry_event
+    return scrub_sentry_event(crumb)
+
 
 if SENTRY_DSN:
     import sentry_sdk
@@ -118,7 +233,10 @@ if SENTRY_DSN:
             # models.py's post_save signal, signals.py) runs through
             # Celery — without this, a task that throws only ever shows up
             # as a silent console line, exactly the gap this fix closes.
-            CeleryIntegration(monitor_beat_tasks=False),
+            # Task 13: monitor_beat_tasks=True turns every CELERY_BEAT_SCHEDULE entry (incl. the 5
+            # copyrights.* automations) into a Sentry *Cron Monitor*. If beat or the worker is
+            # DOWN, a run is missed and Sentry alerts -- plain exception capture can't see that.
+            CeleryIntegration(monitor_beat_tasks=True),
             # Captures every logger.exception()/logger.error() call as a
             # Sentry event (with INFO+ as breadcrumbs for context) — this is
             # what actually surfaces the deliberately-swallowed exceptions
@@ -127,11 +245,15 @@ if SENTRY_DSN:
         ],
         # 1.0 = trace every request. Turn this down (e.g. 0.1-0.2) once
         # real traffic shows up — it's a cost/volume knob, not correctness.
-        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
+        traces_sampler=_sentry_traces_sampler,
         # Coin balances, coupon codes, join-request notes, etc. all pass
         # through this API — don't let Sentry capture request bodies/user
         # PII by default.
         send_default_pii=False,
+        # P-B2: a websocket / request URL may carry ?ticket= (or, from an old build, ?token=<JWT>) - scrub it from
+        # events and breadcrumbs before they leave the server (LearnScroll/log_filters.py).
+        before_send=_sentry_before_send,
+        before_breadcrumb=_sentry_before_breadcrumb,
     )
 
 # Application definition
@@ -177,15 +299,24 @@ if MEDIA_CDN_ENABLED and not MEDIA_CDN_URL.startswith(("https://", "http://")):
 
 INSTALLED_APPS = [
     'daphne',
-    'django.contrib.admin',
+    # = django.contrib.admin with the hardened site (TOTP 2FA, staff password policy,
+    # login lockout) -- see common/admin_site.py. Same app label ('admin').
+    'common.apps.SecureAdminConfig',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
     "django.contrib.postgres",
+    # Two-factor auth for moderators/admins (TOTP authenticator app + one-time backup codes).
+    'django_otp',
+    'django_otp.plugins.otp_totp',
+    'django_otp.plugins.otp_static',
     'django_filters',
     "rest_framework",
+    # L1 gap 9 -- without this app SIMPLE_JWT["BLACKLIST_AFTER_ROTATION"] was a silent no-op.
+    # Needs `python manage.py migrate` (creates the OutstandingToken / BlacklistedToken tables).
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     'corsheaders',
     'login',
@@ -202,8 +333,14 @@ INSTALLED_APPS = [
     # FK to settings.AUTH_USER_MODEL, no FK into those apps) never needs
     # a strict load-order relative to them.
     'leaderboard',
+    # T3.4 (D8) — unified Doubts hub: aggregation/dispatch layer over the five
+    # doubt systems (message, campus, tuitionclass, post, testseries). Owns no tables.
+    'doubts',
     # Help & feedback: support chat, bug reports, feature-request board.
     'support',
+    'aiquality',  # P-F6: AI 👍/👎 + report-wrong feedback, prompt-version + cost log
+    'social_learning',  # P-F5: study-with-me Pomodoro, accountability partner, leaderboard seasons
+    'spaced_repetition',  # P-F8: SM-2 review of the Revision deck + daily due-cards reminder
     'copyrights',  # copyright claims, takedowns, counter-notices, strikes
     # 🔧 GAP FIX — was 'assigments' (typo), which doesn't match this
     # app's real label anywhere else in the codebase (assigments/
@@ -216,7 +353,7 @@ INSTALLED_APPS = [
     # `check_config_drift`'s admin-registration check calls) would have
     # raised `LookupError` the moment `assigments` was added to
     # `CONFIG_DRIFT_APPS` below, not just silently skipped it.
-    'assigments',
+    'assignments',  # T3.10 — package renamed; AppConfig.label stays 'assigments' (DB/migrations unchanged)
 
     # NEW (task 42) — neutral notification + classroom<->chat bridge
     # layer. Must be able to resolve `tuitionclass.Classroom`/`ClassSession`
@@ -230,16 +367,22 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
+    'common.admin_ip_allowlist.AdminIPAllowlistMiddleware',  # P-B8 - optional IP allow-list for /<ADMIN_URL> (off while ADMIN_IP_ALLOWLIST is empty)
+    'common.api_version.ApiVersionMiddleware',
+    'common.feature_gate.FeatureFlagGateMiddleware',  # P-J2 - server side of the remote kill switches (+ optional hard min-version gate)
     # C5 — long-lived Cache-Control on /media/ responses (no-op unless
     # MEDIA_CDN_ENABLED=true; see common/media_cache.py).
     'common.media_cache.MediaCacheControlMiddleware',
+    'common.api_cache_headers.ApiCacheSafetyMiddleware',  # P-C8 - private,no-store on API responses with no Cache-Control
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django_otp.middleware.OTPMiddleware',  # sets request.user.is_verified() (must follow AuthenticationMiddleware)
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'common.csp.ContentSecurityPolicyMiddleware',  # P-B6 - CSP for admin + public HTML pages (common/csp.py)
 ]
 
 ROOT_URLCONF = 'LearnScroll.urls'
@@ -276,12 +419,32 @@ ASGI_APPLICATION = 'LearnScroll.asgi.application'
 # `psycopg2-binary` (or `psycopg[binary]`) installed once DATABASE_URL is
 # actually set.
 # ---------------------------------------------------------------------------
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+
+# P-C1 -- PostgreSQL is COMPULSORY in production. With DEBUG=False and no DATABASE_URL the old code fell back to SQLite
+# without a word: a forgotten env var meant production silently ran on a single-writer file DB ("database is locked"
+# under real traffic, no backups wired to it, data lost on a container rebuild). Now it refuses to boot.
+#   * allowed: DEBUG=True (local dev: SQLite/WAL below), `manage.py test`, and `collectstatic` (an image build step that
+#     never touches the DB). Nothing else - there is deliberately no "I know what I'm doing" switch.
+#   * DATABASE_URL must be a postgres:// / postgresql:// URL in every mode (sqlite:// was silently mis-parsed before).
+# The URL is never put in the error text (it holds the password).
+_DB_BOOT_EXEMPT_COMMANDS = ("test", "collectstatic")
+if not DATABASE_URL and not DEBUG and not any(_c in _sys.argv for _c in _DB_BOOT_EXEMPT_COMMANDS):
+    raise ImproperlyConfigured(
+        "DATABASE_URL is not set while DEBUG is False. Production needs PostgreSQL - set "
+        "DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DBNAME (see deploy/env.production.example). "
+        "SQLite is for local development only (DEBUG=True)."
+    )
 
 if DATABASE_URL:
     from urllib.parse import urlparse
 
     _db_url = urlparse(DATABASE_URL)
+    if _db_url.scheme.split("+")[0] not in ("postgres", "postgresql"):
+        raise ImproperlyConfigured(
+            "DATABASE_URL must be a PostgreSQL URL (postgres://USER:PASSWORD@HOST:5432/DBNAME); "
+            f"got scheme '{_db_url.scheme}'. SQLite is selected by leaving DATABASE_URL unset in local development."
+        )
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -292,17 +455,28 @@ if DATABASE_URL:
             "PORT": _db_url.port or 5432,
             # Reuse connections instead of opening a fresh one per request —
             # meaningful under real request volume.
-            "CONN_MAX_AGE": 60,
+            # P-C3: DB_CONN_MAX_AGE (default 60 = same as before). See deploy/PGBOUNCER.md for pgbouncer values.
+            "CONN_MAX_AGE": env_int("DB_CONN_MAX_AGE", 60, lo=0),
+            "CONN_HEALTH_CHECKS": env_bool("DB_CONN_HEALTH_CHECKS", False),
+            # pgbouncer in transaction mode cannot keep server-side cursors (.iterator()) -> set DB_DISABLE_SERVER_SIDE_CURSORS=true.
+            "DISABLE_SERVER_SIDE_CURSORS": env_bool("DB_DISABLE_SERVER_SIDE_CURSORS", False),
         }
     }
 else:
+    # T2.1 - dev SQLite + Daphne (multi-thread): jab ek DEFERRED transaction read se write me upgrade hoti hai to
+    # SQLite turant "database is locked" deta hai (busy_timeout ka fayda nahi). `IMMEDIATE` write-lock transaction ke
+    # shuru me hi le leta hai, to writers line me lagte hain aur beech me fail nahi hote. Django 5.1+ feature;
+    # purane Django me ye key unsupported hai, isliye version-guard.
+    import django as _django
+
+    _sqlite_options = {'timeout': 30}
+    if _django.VERSION >= (5, 1):
+        _sqlite_options['transaction_mode'] = 'IMMEDIATE'
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'db.sqlite3',
-            'OPTIONS': {
-                'timeout': 60,
-            },
+            'OPTIONS': _sqlite_options,
         }
     }
 
@@ -314,6 +488,45 @@ else:
             cursor.execute('PRAGMA busy_timeout=30000;')
 
     connection_created.connect(_activate_sqlite_wal)
+
+# ---------------------------------------------------------------------------
+# P-C8 -- optional read replica (OFF by default; see core/db_routing.py + deploy/CDN_AND_REPLICA.md).
+#   DB_REPLICA_ENABLED=true  DB_REPLICA_URL=postgres://USER:PASS@REPLICA_HOST:5432/DBNAME
+#   DB_REPLICA_PATH_PREFIXES=/post/feed/,/post/reels/,/profile/search/   (comma list; EMPTY = nothing uses the replica)
+DB_REPLICA_ENABLED = env_bool("DB_REPLICA_ENABLED", False)
+DB_REPLICA_URL = (os.getenv("DB_REPLICA_URL") or "").strip()
+DB_REPLICA_PATH_PREFIXES = tuple(x.strip() for x in (os.getenv("DB_REPLICA_PATH_PREFIXES") or "").split(",") if x.strip())
+DB_REPLICA_PIN_SECONDS = env_int("DB_REPLICA_PIN_SECONDS", 5, lo=1, hi=300)
+DB_REPLICA_DOWN_SECONDS = env_int("DB_REPLICA_DOWN_SECONDS", 30, lo=1, hi=3600)
+DB_REPLICA_EXCLUDE_APPS = tuple(x.strip() for x in (os.getenv(
+    "DB_REPLICA_EXCLUDE_APPS", "sessions,auth,admin,contenttypes,authtoken,login,django_otp,otp_totp,otp_static,token_blacklist"
+) or "").split(",") if x.strip())
+if DB_REPLICA_ENABLED:
+    if not DATABASE_URL:
+        raise ImproperlyConfigured("DB_REPLICA_ENABLED=true needs DATABASE_URL (the primary) to be set too.")
+    from urllib.parse import urlparse as _urlparse_replica
+
+    _rep = _urlparse_replica(DB_REPLICA_URL)
+    if _rep.scheme.split("+")[0] not in ("postgres", "postgresql") or not _rep.hostname:
+        raise ImproperlyConfigured(
+            "DB_REPLICA_ENABLED=true but DB_REPLICA_URL is missing or not a postgres:// URL "
+            "(postgres://USER:PASSWORD@REPLICA_HOST:5432/DBNAME). Set it, or set DB_REPLICA_ENABLED=false."
+        )
+    DATABASES["replica"] = {
+        **DATABASES["default"],
+        "NAME": _rep.path[1:] or DATABASES["default"]["NAME"],
+        "USER": _rep.username or DATABASES["default"]["USER"],
+        "PASSWORD": _rep.password if _rep.password is not None else DATABASES["default"]["PASSWORD"],
+        "HOST": _rep.hostname,
+        "PORT": _rep.port or 5432,
+        "TEST": {"MIRROR": "default"},  # tests: the replica alias is the primary
+    }
+    DATABASE_ROUTERS = ["core.db_routing.ReplicaRouter"]
+    MIDDLEWARE.insert(MIDDLEWARE.index("django.middleware.security.SecurityMiddleware") + 1,
+                      "core.db_routing.ReplicaReadMiddleware")
+
+# P-C8 -- default Cache-Control for responses that set none (see common/api_cache_headers.py). false = old behaviour.
+API_CACHE_DEFAULT_PRIVATE = env_bool("API_CACHE_DEFAULT_PRIVATE", True)
 
 # ---------------------------------------------------------------------------
 # Channels
@@ -350,7 +563,9 @@ if not REDIS_URL and not DEBUG:
 if REDIS_URL:
     CHANNEL_LAYERS = {
         "default": {
-            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            # T0.2 — SafeRedisChannelLayer = RedisChannelLayer + har payload pe json_safe()
+            # (UUID/datetime -> str), warna msgpack "can not serialize 'UUID' object" deta hai.
+            "BACKEND": "common.ws_payload.SafeRedisChannelLayer",
             "CONFIG": {"hosts": [REDIS_URL]},
         },
     }
@@ -361,12 +576,26 @@ else:
         },
     }
 
+# T0.3 — Notes (message/user_notes.py) close-friends audience lookup. `post.CloseFriend` me
+# list ka maalik field `owner` hai (pehle default 'user' tha => FieldError => notes hide).
+NOTES_CLOSE_FRIEND_MODEL = "post.CloseFriend"
+NOTES_CLOSE_FRIEND_OWNER_FIELD = "owner"
+NOTES_CLOSE_FRIEND_MEMBER_FIELD = "friend"
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+    # Task 14: moderators/admins (is_staff / is_superuser) need 14+ chars, mixed case, digit,
+    # symbol. No effect on normal students. Also re-checked at admin login (common/admin_site.py).
+    {'NAME': 'common.password_policy.StaffStrongPasswordValidator'},
 ]
+
+# Migrations for login / user_profile / leaderboard already record BigAutoField ids; without this setting
+# Django resolves those models to AutoField and `makemigrations --check` (CI) reports 17 phantom
+# 'Alter field id' migrations (and models.W042 warnings). Matches the existing DB schema -> NO schema change.
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'Asia/Kolkata'
@@ -379,6 +608,26 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 # (which pulls from <origin>/media/). Off -> unchanged "/media/".
 MEDIA_URL = f"{MEDIA_CDN_URL}/media/" if MEDIA_CDN_ENABLED else '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# T0.3 (B3) — private media. See common/private_media.py.
+# Files under these upload prefixes are NEVER served from /media/; their URLs are signed + expiring.
+# PRIVATE_MEDIA_PREFIXES = (...)         # override the default list (common/private_media.py)
+# P1 — Notes / Resource posts (post/resource_files.py)
+POST_RESOURCE_MAX_MB_PDF = int(os.getenv("POST_RESOURCE_MAX_MB_PDF", "25"))
+POST_RESOURCE_MAX_MB_DOC = int(os.getenv("POST_RESOURCE_MAX_MB_DOC", "25"))
+POST_RESOURCE_MAX_MB_IMAGE = int(os.getenv("POST_RESOURCE_MAX_MB_IMAGE", "15"))
+POST_RESOURCE_MAX_MB_VIDEO = int(os.getenv("POST_RESOURCE_MAX_MB_VIDEO", "200"))
+# Antivirus (optional): set one of these to scan every upload with clamd. Unreachable scanner => upload refused
+# unless POST_RESOURCE_SCAN_FAIL_OPEN is true.
+POST_RESOURCE_CLAMAV_HOST = os.getenv("POST_RESOURCE_CLAMAV_HOST", "")
+POST_RESOURCE_CLAMAV_PORT = int(os.getenv("POST_RESOURCE_CLAMAV_PORT", "3310"))
+POST_RESOURCE_CLAMAV_SOCKET = os.getenv("POST_RESOURCE_CLAMAV_SOCKET", "")
+POST_RESOURCE_SCAN_FAIL_OPEN = os.getenv("POST_RESOURCE_SCAN_FAIL_OPEN", "false").lower() == "true"
+
+PRIVATE_MEDIA_URL_TTL = int(os.getenv("PRIVATE_MEDIA_URL_TTL", str(4 * 3600)))      # seconds a signed URL stays valid (+ up to one bucket)
+PRIVATE_MEDIA_URL_BUCKET = int(os.getenv("PRIVATE_MEDIA_URL_BUCKET", "3600"))      # URL is stable within a bucket -> client caches still hit
+# nginx offload: set to the `internal` location alias, e.g. "/protected-media" (see deploy/PRIVATE_MEDIA.md)
+PRIVATE_MEDIA_ACCEL_PREFIX = os.getenv("PRIVATE_MEDIA_ACCEL_PREFIX", "")
 os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 # Chunked-upload temp storage — deliberately OUTSIDE MEDIA_ROOT. MEDIA_ROOT
@@ -388,6 +637,12 @@ os.makedirs(MEDIA_ROOT, exist_ok=True)
 # mid-upload. See tuitionclass/chunked_upload_views.py.
 CHUNKED_UPLOAD_TMP_ROOT = BASE_DIR / 'tmp' / 'chunked_uploads'
 os.makedirs(CHUNKED_UPLOAD_TMP_ROOT, exist_ok=True)
+
+# H20 round 1: the Flutter app no longer uses the legacy POST /post/chunked/{init,complete,status}/ routes (every post goes
+# through the upload queue, /post/uploads/...). Old installed app versions still do, so the routes stay ON by default and
+# log a deprecation warning. Set POST_LEGACY_CHUNKED_ENABLED=false once the old versions are force-updated: the three
+# routes then answer 410 `legacy_chunked_removed`. (The shared comment/chunked/chunk/ route is NOT affected.)
+POST_LEGACY_CHUNKED_ENABLED = os.getenv("POST_LEGACY_CHUNKED_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # ADD (missing): WhiteNoiseMiddleware was already wired into MIDDLEWARE
 # above, but without this it just serves STATIC_ROOT as-is — no gzip/brotli
@@ -443,7 +698,7 @@ if USE_S3_STORAGE:
 
     STORAGES = {
         "default": {
-            "BACKEND": "storages.backends.s3.S3Storage",
+            "BACKEND": "common.storage_backends.PrivateAwareS3Storage",  # T0.3: signed URLs for private prefixes
         },
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
@@ -452,7 +707,7 @@ if USE_S3_STORAGE:
 else:
     STORAGES = {
         "default": {
-            "BACKEND": "django.core.files.storage.FileSystemStorage",
+            "BACKEND": "common.storage_backends.PrivateAwareFileSystemStorage",  # T0.3: signed URLs for private prefixes
         },
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
@@ -514,6 +769,50 @@ SERVE_MEDIA_VIA_DJANGO = os.getenv(
     "SERVE_MEDIA_VIA_DJANGO", "False" if USE_S3_STORAGE else "True"
 ) == "True"
 
+# V1 — video playback pipeline (post.tasks.process_video_for_streaming).
+# Every new video upload is probed in the background and, if a phone might not
+# play it (H.265/HEVC, 10-bit/HDR, 4K, non-AAC audio, moov atom at the end,
+# .mov/.avi container), converted to MP4 / H.264 / AAC / +faststart. Needs
+# `ffmpeg` and `ffprobe` on the Celery worker's PATH (see deploy/systemd/
+# learnscroll-celery-worker.service). Dev without a worker: either run with
+# CELERY_TASK_ALWAYS_EAGER=true or run `python manage.py process_videos --sync`.
+VIDEO_TRANSCODE_ENABLED = os.getenv("VIDEO_TRANSCODE_ENABLED", "True") == "True"
+VIDEO_TRANSCODE_MAX_SIDE = int(os.getenv("VIDEO_TRANSCODE_MAX_SIDE", "1280"))  # longer side, px
+VIDEO_TRANSCODE_CRF = int(os.getenv("VIDEO_TRANSCODE_CRF", "23"))  # x264 quality, lower = better/larger
+VIDEO_TRANSCODE_PRESET = os.getenv("VIDEO_TRANSCODE_PRESET", "veryfast")
+VIDEO_TRANSCODE_TIMEOUT_SECONDS = int(os.getenv("VIDEO_TRANSCODE_TIMEOUT_SECONDS", "1800"))
+# The converted file gets a NEW name; the original is deleted this long after the
+# swap (so a client holding the old URL for a moment doesn't 404), or never if
+# VIDEO_TRANSCODE_KEEP_ORIGINAL=True.
+VIDEO_TRANSCODE_KEEP_ORIGINAL = os.getenv("VIDEO_TRANSCODE_KEEP_ORIGINAL", "False") == "True"
+VIDEO_ORIGINAL_DELETE_DELAY_SECONDS = int(os.getenv("VIDEO_ORIGINAL_DELETE_DELAY_SECONDS", str(6 * 3600)))
+
+# Failed / stuck conversions (post/tasks.py retry_failed_video_processing, beat every 10 min). A `failed` video goes back
+# in the queue after attempts x BACKOFF minutes until MAX_ATTEMPTS is used up (then the owner gets ONE notification with
+# a Retry action = POST /post/media/<id>/retry-processing/, at most MANUAL_RETRY_LIMIT times per video). A video that
+# sits in pending / processing for STUCK_MINUTES (worker died) is queued again.
+VIDEO_PROCESSING_MAX_ATTEMPTS = int(os.getenv("VIDEO_PROCESSING_MAX_ATTEMPTS", "3"))
+VIDEO_PROCESSING_RETRY_BACKOFF_MINUTES = int(os.getenv("VIDEO_PROCESSING_RETRY_BACKOFF_MINUTES", "10"))
+VIDEO_PROCESSING_STUCK_MINUTES = int(os.getenv("VIDEO_PROCESSING_STUCK_MINUTES", "120"))  # minimum 10
+VIDEO_PROCESSING_MANUAL_RETRY_LIMIT = int(os.getenv("VIDEO_PROCESSING_MANUAL_RETRY_LIMIT", "5"))
+
+# Seek-bar scrub preview (post/services.py plan_video_sprite): ONE jpeg grid of small frames per video, one frame every
+# ceil(duration / MAX_FRAMES) seconds, kept in PostMedia.metadata["sprite"] and served as `sprite` by the API. Built after
+# the MP4 is ready (best effort). Old videos: `python manage.py process_videos --sprite --sync`.
+VIDEO_SPRITE_ENABLED = os.getenv("VIDEO_SPRITE_ENABLED", "True") == "True"
+VIDEO_SPRITE_MAX_FRAMES = int(os.getenv("VIDEO_SPRITE_MAX_FRAMES", "100"))
+VIDEO_SPRITE_COLS = int(os.getenv("VIDEO_SPRITE_COLS", "10"))
+VIDEO_SPRITE_THUMB_WIDTH = int(os.getenv("VIDEO_SPRITE_THUMB_WIDTH", "160"))  # px per tile
+VIDEO_SPRITE_TIMEOUT_SECONDS = int(os.getenv("VIDEO_SPRITE_TIMEOUT_SECONDS", "300"))
+
+# Video lectures (round 4) - automatic Hindi / English captions (post/tasks.py generate_video_captions + poll_video_caption_jobs).
+# Needs an S3 bucket for AWS Transcribe's output (and, on local-disk media storage, for a temporary copy of the video).
+LECTURE_AUTO_CAPTIONS_ENABLED = os.getenv("LECTURE_AUTO_CAPTIONS_ENABLED", "true").lower() in ("1", "true", "yes")
+CAPTIONS_S3_BUCKET = os.getenv("CAPTIONS_S3_BUCKET", "")            # falls back to AWS_STORAGE_BUCKET_NAME when empty
+AWS_REGION = os.getenv("AWS_REGION", os.getenv("AWS_S3_REGION_NAME", "ap-south-1"))
+LECTURE_AUTO_CAPTION_MAX_SECONDS = int(os.getenv("LECTURE_AUTO_CAPTION_MAX_SECONDS", str(3 * 3600)))
+LECTURE_CAPTION_JOB_TIMEOUT_HOURS = int(os.getenv("LECTURE_CAPTION_JOB_TIMEOUT_HOURS", "6"))
+
 if not DEBUG and SERVE_MEDIA_VIA_DJANGO and USE_S3_STORAGE:
     # Contradictory combination: with S3 on, model FileFields already
     # resolve to S3/CloudFront URLs and MEDIA_ROOT has nothing in it for
@@ -530,6 +829,59 @@ if not DEBUG and SERVE_MEDIA_VIA_DJANGO and USE_S3_STORAGE:
 
 # --- PRODUCTION AI FIX ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# T0.4 — Smart reply (chat quick-reply chips) best-effort feature hai.
+#   AI_SMART_REPLY_ENABLED          false => endpoint turant 200 {suggestions: []} (Gemini call hi nahi)
+#   AI_SMART_REPLY_TIMEOUT          Gemini call ka hard deadline (seconds)
+#   AI_SMART_REPLY_BACKOFF_SECONDS  fail/timeout ke baad itni der Gemini skip (offline par har
+#                                   naye message pe 4s ka intezaar na ho)
+AI_SMART_REPLY_ENABLED = os.getenv("AI_SMART_REPLY_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+AI_SMART_REPLY_TIMEOUT = float(os.getenv("AI_SMART_REPLY_TIMEOUT", "4"))
+AI_SMART_REPLY_BACKOFF_SECONDS = int(os.getenv("AI_SMART_REPLY_BACKOFF_SECONDS", "30"))
+
+# Composer AI helpers (post/ai_assist.py + post/ai_assist_guard.py): caption, tags, 3-line summary, alt text,
+# hi<->en translate, step hints. The cost guard counts in the CACHES backend (Redis in production) - no model, no migration.
+#   AI_ASSIST_ENABLED               false => every AI helper answers 503 `ai_disabled` (the free `quality` tips still work)
+#   AI_ASSIST_DISABLED_FEATURES     comma list to switch single helpers off, e.g. "alt_text,translate"
+#   AI_ASSIST_GLOBAL_DAILY_CALLS    all users together per local day - the real money cap
+#   AI_ASSIST_USER_DAILY_TOTAL      one user, all helpers together, per local day
+#   AI_ASSIST_DAILY_LIMITS          per-feature per-user per-day overrides; env AI_ASSIST_DAILY_LIMITS_JSON='{"alt_text": 10}'
+#   AI_ASSIST_BACKOFF_SECONDS       after a failed / timed-out model call the model is skipped this long (503 `ai_busy`)
+#   AI_ASSIST_TIMEOUT               hard deadline of one model call (seconds)
+#   AI_ASSIST_CACHE_TTL             same input -> same answer for this long (seconds); a cache hit costs no quota
+#   AI_ASSIST_IMAGE_FOR_MINORS      false (default) => photo-to-alt-text AI is off for accounts under 18
+#   AI_ASSIST_MIN_IMAGE_SIDE / _DARK_MEAN / _BLUR_VARIANCE   thresholds of the free photo-quality tips (600 px / 45 / 30)
+AI_ASSIST_ENABLED = os.getenv("AI_ASSIST_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+AI_ASSIST_DISABLED_FEATURES = [f.strip() for f in os.getenv("AI_ASSIST_DISABLED_FEATURES", "").split(",") if f.strip()]
+AI_ASSIST_GLOBAL_DAILY_CALLS = int(os.getenv("AI_ASSIST_GLOBAL_DAILY_CALLS", "20000"))
+AI_ASSIST_USER_DAILY_TOTAL = int(os.getenv("AI_ASSIST_USER_DAILY_TOTAL", "100"))
+try:
+    import json as _json_ai_assist
+    AI_ASSIST_DAILY_LIMITS = _json_ai_assist.loads(os.getenv("AI_ASSIST_DAILY_LIMITS_JSON", "") or "{}")
+    if not isinstance(AI_ASSIST_DAILY_LIMITS, dict):
+        AI_ASSIST_DAILY_LIMITS = {}
+except ValueError:
+    AI_ASSIST_DAILY_LIMITS = {}  # a typo in the env var must not stop the server: the guard's defaults apply
+AI_ASSIST_BACKOFF_SECONDS = int(os.getenv("AI_ASSIST_BACKOFF_SECONDS", "20"))
+AI_ASSIST_TIMEOUT = float(os.getenv("AI_ASSIST_TIMEOUT", "12"))
+AI_ASSIST_CACHE_TTL = int(os.getenv("AI_ASSIST_CACHE_TTL", str(24 * 3600)))
+AI_ASSIST_IMAGE_FOR_MINORS = os.getenv("AI_ASSIST_IMAGE_FOR_MINORS", "false").lower() in ("1", "true", "yes", "on")
+# P-F6 - AI quality loop (aiquality app): 👍/👎 + "report wrong answer", prompt-version log, cost guard.
+#   AI_PROMPT_VERSIONS / env AI_PROMPT_VERSIONS_JSON   {"doubt.answer": "v2"} - bump when a prompt text changes (aiquality/prompts.py)
+#   AI_PRICE_INPUT_PER_M_USD / AI_PRICE_OUTPUT_PER_M_USD   USD per 1M tokens, used for the cost ESTIMATE (defaults = Gemini 2.5 Flash list price)
+#   AI_DAILY_BUDGET_USD            0 = no budget; > 0 => dashboard bar + one critical log at 80 % / 100 % (aiquality.check_budget)
+#   AI_QUALITY_MIN_VOTES / AI_QUALITY_ALERT_DOWN_RATE   a feature+prompt version is flagged when it has >= N votes and >= this 👎 share
+#   AI_QUALITY_AUTO_REMOVE_REPORTS  N different students report a cached feed-post AI result wrong => it is deleted (0 = never)
+#   AI_CALL_LOG_RETENTION_DAYS / AI_FEEDBACK_RETENTION_DAYS   pruning (reviewed feedback only; unreviewed 👎 is kept)
+AI_PRICE_INPUT_PER_M_USD = float(os.getenv("AI_PRICE_INPUT_PER_M_USD", "0.30"))
+AI_PRICE_OUTPUT_PER_M_USD = float(os.getenv("AI_PRICE_OUTPUT_PER_M_USD", "2.50"))
+AI_DAILY_BUDGET_USD = float(os.getenv("AI_DAILY_BUDGET_USD", "0"))
+AI_QUALITY_MIN_VOTES = int(os.getenv("AI_QUALITY_MIN_VOTES", "10"))
+AI_QUALITY_ALERT_DOWN_RATE = float(os.getenv("AI_QUALITY_ALERT_DOWN_RATE", "0.30"))
+AI_QUALITY_AUTO_REMOVE_REPORTS = int(os.getenv("AI_QUALITY_AUTO_REMOVE_REPORTS", "3"))
+AI_CALL_LOG_RETENTION_DAYS = int(os.getenv("AI_CALL_LOG_RETENTION_DAYS", "90"))
+AI_FEEDBACK_RETENTION_DAYS = int(os.getenv("AI_FEEDBACK_RETENTION_DAYS", "365"))
+
 
 # NOTE (fix — production readiness): LocMemCache lives inside a single
 # process's memory. With more than one worker process (any real
@@ -602,13 +954,17 @@ NOTIFICATION_BATCH_MAX_AGE = {
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        # X6b - ?token= / ?ticket= / JWTs never reach a log line (LearnScroll/log_filters.py)
+        "redact_secrets": {"()": "LearnScroll.log_filters.RedactSecretsFilter"},
+    },
     "formatters": {
         "verbose": {
             "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         },
     },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
+        "console": {"class": "logging.StreamHandler", "formatter": "verbose", "filters": ["redact_secrets"]},
     },
     "root": {
         "handlers": ["console"],
@@ -652,6 +1008,15 @@ SUPPORTED_LANGUAGES = (
 # if pricing changes.
 COIN_TO_INR_RATE = os.getenv("COIN_TO_INR_RATE", "1")
 
+# P-G1 -- COIN CASH-OUT KILL SWITCH. Coin -> real-money withdrawal is still an open business / tax decision (GST invoice,
+# TDS 194R / 194BA, KYC / PAN, minimum limit), so it ships OFF. Default is FALSE: unset env == OFF == safe.
+#   OFF: POST /profile/coin-withdrawals/ and the staff "processing" / "success" actions answer 403 {"code": "feature_disabled"};
+#        the app config + wallet summary tell the Flutter app to hide the withdraw UI ("Coming soon").
+#   Unchanged while OFF: coin purchase, spending, refunds, withdrawal HISTORY / receipts, and staff "reject"
+#        (it only refunds the coins, so requests made before the switch was OFF can still be unwound).
+# Turn it ON only after the checklist in deploy/COIN_CASHOUT_REENABLE.md is signed off. Read at call time (common.feature_flags).
+COIN_CASHOUT_ENABLED = os.getenv("COIN_CASHOUT_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
 # Max time (ms) a wallet operation waits for another transaction's row lock
 # (CoinLedger.record_transaction / purchase confirm / withdrawal steps) before
 # failing fast with CoinLedgerBusy -> HTTP 503 + Retry-After instead of
@@ -667,6 +1032,15 @@ COIN_PURCHASE_MAX_PENDING_PER_USER = int(os.getenv("COIN_PURCHASE_MAX_PENDING_PE
 # Enforced by common.pagination.StandardPagination; views that define their
 # own paginator (post/tuitionclass) already cap at <= 100 themselves.
 MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "100"))
+
+# X6b -- WebSocket auth without the JWT in the URL (login/ws_ticket.py, LearnScroll/ws_auth.py).
+#   WS_TICKET_TTL_SECONDS    life of the one-time ticket from POST /login/auth/ws-ticket/ (5..120, default 30)
+#   WS_ALLOW_QUERY_TOKEN     P-B2: DEFAULT FALSE = only `?ticket=` is accepted; the JWT never goes into a URL.
+#                            true  = the old `?token=<JWT>` works again (only for old app builds that still send it; the
+#                            current app NEVER does). It is a temporary env switch for a staged rollout, not a setting to keep:
+#                            `manage.py release_check` and `check_security_settings --production` FAIL while it is true.
+WS_TICKET_TTL_SECONDS = int(os.getenv("WS_TICKET_TTL_SECONDS", "30"))
+WS_ALLOW_QUERY_TOKEN = os.getenv("WS_ALLOW_QUERY_TOKEN", "false").strip().lower() in ("1", "true", "yes", "on")
 
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
@@ -694,8 +1068,44 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.AnonRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
+        "channel_verify": "20/hour",  # N8 - e-mail verification code send / check (core/channel_views.py)
+        "data_rights_write": "20/hour",  # S5 - export request, deletion cancel, consent change (login/data_rights_views.py)
+        "data_rights_download": "20/hour",  # S5 - export ZIP download
+        "profile_username_check": "30/min",  # P1 - GET /profile/username/check/ (debounced while typing)
+        "profile_achievements": "60/min",  # P3 - GET /profile/profile/<username>/achievements/
+        "profile_layout": "60/min",  # P5 - GET /profile/profile/<username>/layout/
+        "profile_featured": "60/min",  # P6 - /profile/profile/<username>/featured/, /profile/featured/, /profile/featured/candidates/
+        "role_settings": "60/min",  # S12 - teacher defaults, parent child-limit (user_profile/role_settings_views.py)
+        "post_poll_vote": "60/min",  # poll / quiz votes
+        "post_gif_search": "60/min",  # GET /post/gifs/search/ (story GIF sticker, debounced while typing)
+        "post_doubt_answer": "30/min",   # POST /post/<id>/answers/ (text / steps / photos / video)
+        "post_doubt_similar": "90/min",  # GET /post/doubts/similar/ (debounced while typing)
+        "search_unified": "90/min",  # P-F7 - GET /core/search/unified/ (debounced while typing, ~1 call per 450 ms)
+        "search_trending": "30/min",  # P-F7 - GET /core/search/trending/ (opened once per search screen)
         "user": "100/min",
+        # T3.8 — install/app_open pings from the app (anonymous allowed; keyed by IP / user)
+        "funnel_events": "120/min",
         "anon": "20/min",
+        # L1 gaps 10-11 (login/session_views.py): logout is cheap + idempotent; the device
+        # list / per-device logout / logout-all are user-driven and never need to be fast.
+        "logout": "30/min",
+        "session_manage": "30/min",
+        "ws_ticket": "60/min",  # X6b - POST /login/auth/ws-ticket/ (one per socket (re)connect)
+        # S3 (login/security_views.py): 2FA code check at login (no auth yet -> keyed by IP) + security centre writes.
+        "two_factor": "10/min",
+        # S10 (login/connected_views.py): connections reads / writes (re-auth, link, change) + QR sign-in.
+        "connections": "60/min",
+        "connections_write": "20/hour",
+        "qr_login": "30/min",
+        "qr_poll": "120/min",
+        "password_change": "30/hour",  # S3 - POST /login/auth/change-password/ (current password is checked there)
+        # X6 (login/sensitive.py SensitiveWriteThrottle - counts WRITES only, a refusal is audited). Every scope used by
+        # a throttle MUST be listed here, otherwise DRF raises ImproperlyConfigured (HTTP 500) on the first request.
+        "profile_update": "60/hour",  # PATCH /profile/update/ (username / DOB / private account / photo ...)
+        "privacy_write": "120/hour",  # PATCH /profile/privacy/ (S4 who-can-message / call / tag ... controls)
+        "contact_match": "20/hour",  # POST /profile/contacts/match/ (S4b find friends by phone / e-mail)
+        "wallet_settings_write": "30/hour",  # PATCH /profile/wallet/settings/ (spend limits, confirm toggle)
+        "withdrawal_request": "10/hour",  # POST /profile/coin-withdrawals/
         "ai_study": "20/min",
         # T3 — `ClassroomCreateGroupView` & co. (tuitionclass/classroom_chat_views.py)
         # always used throttle_scope="classroom_group_create" but the rate was
@@ -708,15 +1118,34 @@ REST_FRAMEWORK = {
         "support_bug": "10/day",
         "support_feature": "10/day",
         "support_vote": "60/min",
+        "support_faq": "120/hour",  # S11b FAQ "was this helpful?"
         # Classroom scopes used by tuitionclass/views.py via ScopedRateThrottle —
         # a scope with no rate here raises ImproperlyConfigured on first request.
         "classroom_trial_join": "10/min",
         "session_reaction": "120/min",
         "session_caption": "120/min",
         "chat_read": "120/min",
+        # X12 live safety (tuitionclass/live_moderation_views.py) - each scope is used by ScopedRateThrottle there, so a
+        # scope missing here would be an ImproperlyConfigured 500 on the first call. New reports are ALSO capped per
+        # class / per hour by live_abuse.consume_report_budget; this is only the request-rate floor.
+        "live_report": "10/min",         # POST sessions/<id>/moderation/report/
+        "live_mod_action": "60/min",     # POST moderation/act/, queue resolve, chat-filter
+        "live_notice_ack": "30/min",     # POST sessions/<id>/recording-notice/ack/
         "parent_message_create": "10/min",
         "send_otp": "5/min",
         "verify_otp": "10/min",
+        # L1 gap 18 -- GET /login/auth/captcha/ (each call draws an image, so keep it low).
+        "captcha": "30/min",
+        # P-B3 -- open (no-login) endpoints; classes in common/open_throttles.py. Keyed by user id, else by IP.
+        "login": "20/min",              # POST /login/auth/login/ (a per-identifier lockout also exists)
+        "signup": "10/min",             # POST signup
+        "google_auth": "20/min",        # POST google sign-in / sign-up
+        "public_read": "240/min",       # comments / replies / categories / ad config / sound policy
+        "freesound_search": "30/min",   # GET /post/music/search/ (logged-in only now)
+        "unsubscribe": "30/min",        # e-mail unsubscribe link
+        "channel_webhook": "600/min",   # SES / SNS / SMS provider bounces (shared-secret protected)
+        "token_refresh": "120/min",     # POST /login/auth/token/refresh/ (JWT refresh; per user id or IP)
+        "gateway_webhook": "600/min",   # coin-purchase confirm webhook (HMAC protected)
         # NOTE (fix — CRITICAL, same bug class as every other scope
         # documented in this dict): login_app_reference.md confirms
         # `ForgotPasswordView`/`ResetPasswordView` (login/views.py) are
@@ -745,6 +1174,10 @@ REST_FRAMEWORK = {
         # throttle_scope= in views.py.
         "session_join": "20/min",
         "session_token": "30/min",
+        # LV1 — host presence ping (app sends ~every 20s = 3/min; headroom for retries).
+        "session_heartbeat": "12/min",
+        # LV1 — home polls GET post/stories/live/ every ~5s (12/min); headroom for resume bursts.
+        "story_live": "30/min",
         # NEW (task 9 — parent-join): ClassSessionViewSet.parent_join is
         # unauthenticated (see ParentJoinIPThrottle in tuitionclass/throttles.py
         # for why this is a separate, IP-keyed scope rather than reusing
@@ -786,6 +1219,8 @@ REST_FRAMEWORK = {
         "profile_block_burst": "20/min",
         "profile_block_daily": "200/day",
         "profile_report_burst": "10/min",
+        "copyright_termination_appeal": "3/hour",
+        "copyright_transparency": "60/hour",
         # P14-BE — user_profile ActivityView (aggregates 7 days + two post lists,
         # so a modest rate) and ActivityHeartbeatView (client beats every
         # ~30-60 s while foregrounded; 12/min leaves headroom for 2 devices).
@@ -833,6 +1268,19 @@ REST_FRAMEWORK = {
         "referral_attribute": "20/min",
         "message_send": "60/min",
         "call_initiate": "10/min",
+        "livekit_token_refresh": "30/hour",   # C13
+        "study_room_moderation": "60/min",    # S4 host controls
+        "study_room_hand": "30/min",          # S4 raise hand
+        "study_room_report": "10/hour",       # S4 report user in room
+        "study_room_block": "30/hour",        # S8 block / unblock from room
+        "call_telemetry": "120/hour",         # X1 client call telemetry (connect / summary)
+        "call_ops": "30/min",                 # X1 GET /message/calls/ops/ (Prometheus scrape)
+        "study_room_rules": "60/hour",        # S8 rules accept
+        "study_room_join": "60/min",          # X2 join (waiting-room 4s loop ~15/min)
+        "study_room_state": "180/min",        # X2 whiteboard state GET/PUT autosave
+        "study_room_telemetry": "120/hour",   # X1 client study-room telemetry (connect / summary)
+        "study_room_activity": "150/hour",    # S5 idle-time heartbeat (~1/min while active)
+        "study_room_review": "120/min",       # S4 staff review of study-room reports
         "group_create": "5/min",
         "reaction": "120/min",
         "ai_transcribe": "15/min",
@@ -846,11 +1294,19 @@ REST_FRAMEWORK = {
         # — looser than ai_transcribe since a client may reasonably call
         # this on every incoming message).
         "ai_smart_reply": "30/min",
+        # T1.5 — DoubtSimilarThrottle (message/throttles.py) -> "similar doubt"
+        # suggestions while a student types a new doubt. A scope with no rate
+        # here is a guaranteed ImproperlyConfigured (500) — see the notes above.
+        "doubt_similar": "60/min",
+        # T1.8 — core.views.AppConfigView (public, per-IP). Generous: campus
+        # Wi-Fi/NAT puts many students behind one IP and the app calls this
+        # on every launch + resume.
+        "app_config": "300/min",
         # IP-level safety net (used alongside the per-user rates above, not
         # instead of them — see MessageSendIPThrottle/CallInitiateIPThrottle
         # in throttles.py for why per-user alone isn't enough).
         "message_send_ip": "120/min",
-        "call_initiate_ip": "20/min",
+        "call_initiate_ip": "120/min",        # X2: CGNAT / college WiFi (per-user 10/min alag lagta hai)
         # NOTE (fix — same bug class as above, CONFIRMED missing): these
         # scopes are already wired to real views via throttle_classes/
         # get_throttles() but had no matching rate here — each was a
@@ -866,6 +1322,28 @@ REST_FRAMEWORK = {
         "ai_ask_doubt_image": "8/min",               # AskAIDoubtImageThrottle -> AskAIDoubtView photo doubts
         "ai_study_buddy": "20/min",                  # StudyBuddyThrottle -> StudyBuddyView
         "ai_study_buddy_pdf": "5/min",               # StudyBuddyPdfThrottle -> StudyBuddyView (PDF input)
+        "post_ai_study": "20/min",                   # PostAiStudyThrottle -> PostAiStudyAPIView (Feature 1)
+        "post_ai_assist": "20/min",                  # PostAiAssistThrottle -> PostAiAssistAPIView (composer AI helpers, burst)
+        "post_ai_assist_image": "8/min",             # PostAiAssistImageThrottle -> alt_text (picture goes to the model)
+        "post_ai_assist_quality": "30/min",          # PostAiAssistQualityThrottle -> quality tips (no AI, but decodes pictures)
+        "social_read": "240/min",                     # social_learning SocialReadThrottle (P-F5)
+        "social_write": "60/min",                     # social_learning SocialWriteThrottle: timer controls / claim / goal / prefs
+        "social_nudge": "20/hour",                    # social_learning SocialNudgeThrottle (+ 2 per day per pair rule)
+        "social_partner_request": "20/day",           # social_learning SocialPartnerRequestThrottle
+        "revision_read": "120/min",                   # spaced_repetition RevisionReadThrottle: due queue / stats / config (P-F8)
+        "revision_review": "240/min",                 # spaced_repetition RevisionReviewThrottle: one POST per graded card (P-F8)
+        "ai_feedback": "40/min",                      # aiquality AiFeedbackThrottle -> POST /ai-quality/feedback/ (P-F6)
+        "ai_feedback_report": "30/hour",              # aiquality AiFeedbackReportThrottle -> "report wrong answer" only (P-F6)
+        # T1.4 (D7) — Doubt Queue write/read limits (message/throttles.py,
+        # wired in DoubtQuestionViewSet.get_throttles). Settings is the single
+        # source of truth for these rates (the classes deliberately set only
+        # `scope`), so ops can retune without a code deploy.
+        "doubt_create": "20/hour",                   # DoubtCreateThrottle -> new doubt (text or photo)
+        "doubt_create_image": "10/hour",             # DoubtImageUploadThrottle -> doubt WITH photo (on top of doubt_create)
+        "doubt_answer": "60/hour",                   # DoubtAnswerThrottle -> post an answer
+        "doubt_upvote": "120/min",                   # DoubtUpvoteThrottle -> upvote / un-upvote
+        "doubt_action": "60/min",                    # DoubtActionThrottle -> best / verify / reveal / delete-answer
+        "doubt_read": "120/min",                     # DoubtReadThrottle -> list / detail / answers list
         # NOTE (fix — Feature 12, Focus Mode): `views_focus.py`'s own
         # header comment suggests this scope (`FocusSessionThrottle`,
         # `UserRateThrottle`, 20/min) as an optional addition. Adding the
@@ -915,6 +1393,8 @@ REST_FRAMEWORK = {
         # compromised staff account can otherwise blast every student
         # and parent in a campus.
         "campus_notice_post": "10/min",
+        # COMMUNICATION — NoticeViewSet.emergency (see CampusEmergencyBroadcastThrottle).
+        "campus_emergency_broadcast": "6/hour",
         # ParentLinkVerifyView.post — resolves a raw `token` from the
         # request body via bridge.resolve_parent_from_token; rated tight
         # for the same reason message's parent_code_reveal/
@@ -936,15 +1416,61 @@ REST_FRAMEWORK = {
         # class as every NOTE above (a scope with no rate = guaranteed
         # ImproperlyConfigured/500 on the first request).
         "campus_doubt_post": "30/hour",
+        # NEW — Homework Diary: HomeworkDiaryViewSet.create (see
+        # campus/throttles.py::CampusHomeworkDiaryPostThrottle). Same rule as
+        # every scope above: the rate MUST land with the throttle wiring.
+        "campus_homework_diary_post": "60/hour",
+        # NEW — Class resources: ClassResourceViewSet.create / file-replacing edits
+        # and ResourceFolderViewSet.create (see campus/throttles.py::
+        # CampusResourceUploadThrottle / CampusResourceFolderThrottle).
+        "campus_resource_upload": "60/hour",
+        "campus_resource_folder": "120/hour",
+        "campus_substitute_assign": "120/hour",
+        "campus_staff_leave_apply": "20/day",
+        # NEW — Admission: AdmissionViewSet writes (see campus/throttles.py::CampusAdmissionWriteThrottle).
+        "campus_admission_write": "600/hour",
+        # NEW — Results sheet: ResultEntryViewSet.publish/.bulk/.import (see
+        # campus/throttles.py::CampusResultsPublishThrottle and
+        # CampusResultsImportThrottle). Rates land with the throttle wiring,
+        # same rule as every scope above.
+        "campus_results_publish": "60/hour",
+        "campus_results_import": "120/hour",
+        # FINANCE — see campus/throttles.py::CampusFinanceExportThrottle / CampusFinanceReconcileThrottle
+        "campus_finance_export": "60/hour",
+        # REPORTS / EXPORT — campus.report_views.ReportExportView (attendance / marks / fees; CSV, Excel, PDF)
+        "campus_report_export": "60/hour",
+        # Safety: backups / admin consent entry / deletion decisions, restore, and user-side requests + consent changes
+        "campus_safety_write": "30/hour",
+        "campus_safety_restore": "10/hour",
+        # Campus Settings (campus/settings_views.py)
+        "campus_settings_write": "120/hour",
+        "campus_data_request": "60/day",
+        "campus_finance_reconcile": "30/hour",
+        # NEW — Parents se baat (PTM + teacher<->parent chat): see
+        # campus/throttles.py::CampusPTMBookThrottle / CampusPTMManageThrottle /
+        # CampusParentChatSendThrottle. Rates land with the throttle wiring.
+        "campus_ptm_book": "60/hour",
+        "campus_ptm_manage": "120/hour",
+        "campus_parent_chat_send": "120/hour",
+        # NEW — Recorded classes + notes: campus/throttles.py::CampusRecordingControlThrottle
+        # (start / stop / hide a class recording) and CampusNoteWriteThrottle (class
+        # notes + private student notes). Rates land with the throttle wiring.
+        "campus_recording_control": "60/hour",
+        "campus_note_write": "300/hour",
+        # T3.4 — Doubts hub (doubts/throttles.py). Reads are cheap list/summary
+        # queries; writes are ALSO limited by the source app's own bucket
+        # (doubt_create / doubt_answer / campus_doubt_post ...), the tighter wins.
+        "doubts_hub_read": "120/min",
+        "doubts_hub_write": "30/min",
         # NOTE (fix — CRITICAL, same bug class as the scopes above):
-        # assigments/throttling.py::assigmentsPublicPageThrottle sets
+        # assignments/throttling.py::assigmentsPublicPageThrottle sets
         # scope = "assigments_public_page" for the one AllowAny surface in the
         # assigments app (PublicSubmissionView), but this dict never had that
         # key — DRF raises ImproperlyConfigured on the very first request, so
         # the public share URL of a submission was a guaranteed 500.
         "assigments_public_page": "60/min",
         # Public, unauthenticated surfaces of the advanced testseries/assignments
-        # features (see testseries/throttling.py, assigments/throttling.py).
+        # features (see testseries/throttling.py, assignments/throttling.py).
         "testseries_public_page": "60/min",
         "testseries_certificate_verify": "30/min",
         "assigments_explore": "120/min",
@@ -955,6 +1481,25 @@ REST_FRAMEWORK = {
         # stop a runaway client. WITHOUT this key DRF raises
         # ImproperlyConfigured (500) on the very first request.
         "post_events": "60/min",
+        # H10: GET /post/feed/ (post.views.HomeFeedView, post.feed_resilience.FeedHomeThrottle). Replaces the global
+        # `user` default for this view. A real scroller makes a few requests/min (page 1 + a page every few
+        # seconds of scrolling + pull-to-refresh); 60/min per user leaves room for several devices and retries,
+        # and stops a script that hammers the (most expensive) endpoint. Env FEED_HOME_THROTTLE e.g. "90/min".
+        "feed_home": os.getenv("FEED_HOME_THROTTLE", "60/min"),
+        # GET /post/feed/ops/ (post.views.FeedOpsAPIView): Prometheus scrapes it every 15-60 s; per-IP/user cheap reads.
+        "feed_ops": "30/min",
+        # N10: GET core/notification-ops/ (core.views.NotificationOpsView) - Prometheus scrape + staff dashboards.
+        "notification_ops": "30/min",
+        # X3: product analytics - app config read, client events (batches of <= 20), staff / scrape-token read.
+        "product_analytics_config": "30/min",
+        "product_events": "60/min",
+        "product_analytics_ops": "30/min",
+        # GET /post/counts/ (live like/comment counts poll; H9: adaptive 20s->40s->90s on the client + ETag/304,
+        # so an idle client is ~0.7 req/min, an active one up to ~3; 30/min leaves room
+        # for resume/refresh bursts + several devices). See post.views.PostCountsAPIView.
+        "post_counts": "30/min",
+        # POST /post/share-item/ (share a class / test series into the feed).
+        "post_create": "20/hour",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -974,15 +1519,75 @@ REST_FRAMEWORK = {
     # exception type — see that file's docstring for the exact problem).
     # This single line turns that already-written code on.
     "EXCEPTION_HANDLER": "tuitionclass.exceptions.tuitionclass_exception_handler",
+    # FIX: DRF treats `?format=<x>` as a renderer override and raises Http404 when no renderer is called <x>.
+    # Our own endpoints use that query param for something else (webhooks ?format=ses|sendgrid|msg91|meta,
+    # ops scrape ?format=prom, campus exports ?format=csv|xlsx|pdf) - so every one of them answered 404 before
+    # the view code ran. None = never negotiate on the query string (Accept header only).
+    "URL_FORMAT_OVERRIDE": None,
+    # L1 -- how many reverse proxies sit in front of Django (load balancer, CDN...).
+    # DRF's get_ident() (throttles AND the login/OTP abuse limits in login/) uses it to
+    # pick the real client IP out of X-Forwarded-For. Unset = DRF's default behaviour.
+    # Set NUM_PROXIES in production, or a client-supplied X-Forwarded-For can dodge per-IP limits.
+    "NUM_PROXIES": int(os.getenv("NUM_PROXIES")) if os.getenv("NUM_PROXIES", "").strip() else None,
 }
 
+# ---------------------------------------------------------------------------
+# T1.12 (R11) — JWT signing key is now SEPARATE from Django's SECRET_KEY.
+#
+# SIMPLE_JWT used to sign every access/refresh token with SECRET_KEY itself.
+# SECRET_KEY also protects sessions, password-reset links, signed cookies and
+# copyrights/claimant.py's HMAC — so one leak (or one rotation) of that key
+# meant forged logins for every user, and rotating it for any other reason
+# logged everybody out. A dedicated key limits the blast radius both ways.
+#
+#   Generate:  python -c "import secrets; print(secrets.token_urlsafe(64))"
+#   Set:       JWT_SIGNING_KEY=<that value>   (in .env / hosting env vars)
+#
+# Production (DEBUG=False) REFUSES TO BOOT without a distinct, >=32-char key.
+# In DEBUG a stable key is derived from SECRET_KEY so local dev needs no setup.
+# ⚠️ Switching keys invalidates every already-issued token once — all users are
+# asked to log in again on the next app open. That is expected; ship it in a
+# normal release window.
+# Both JWTAuthentication (REST) and LearnScroll/ws_auth.py (WebSocket) read
+# SIMPLE_JWT["SIGNING_KEY"], so this one setting covers both.
+JWT_SIGNING_KEY = os.getenv("JWT_SIGNING_KEY", "").strip()
+if not JWT_SIGNING_KEY:
+    if DEBUG and SECRET_KEY:
+        import hashlib as _hashlib
+        import hmac as _hmac
+        JWT_SIGNING_KEY = _hmac.new(
+            SECRET_KEY.encode(), b"learnscroll-jwt-signing-v1", _hashlib.sha256
+        ).hexdigest()
+    else:
+        raise ImproperlyConfigured(
+            "JWT_SIGNING_KEY is not set. Generate one with "
+            "`python -c \"import secrets; print(secrets.token_urlsafe(64))\"` "
+            "and add it to the environment (must differ from SECRET_KEY)."
+        )
+elif not DEBUG and (JWT_SIGNING_KEY == SECRET_KEY or len(JWT_SIGNING_KEY) < 32):
+    raise ImproperlyConfigured(
+        "JWT_SIGNING_KEY must be at least 32 characters and different from SECRET_KEY."
+    )
+
+# L1 gap 8 -- the access token is SHORT-lived (was 1 day): a leaked one is useless within
+# minutes, and revoked sessions (logout / password change / "sign this device out") stop
+# working almost immediately. The app refreshes silently (AuthService.getToken/getValidToken),
+# so users never notice. The refresh token ROTATES on every use and the old one is blacklisted
+# (gap 9); the 10-day inactivity limit still lives in AuthToken (login/models.py).
+JWT_ACCESS_TOKEN_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_MINUTES", "15"))
+# Live sessions (devices) kept per user; a login beyond this ends the least recently used one.
+AUTH_MAX_SESSIONS_PER_USER = int(os.getenv("AUTH_MAX_SESSIONS_PER_USER", "10"))
+
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
-    "ROTATE_REFRESH_TOKENS": False,
+    # Rolling out: OLD app builds ignore the rotated `refresh` in the response and would be
+    # logged out on their 2nd refresh. Until the new app is widely installed, deploy with
+    # JWT_ROTATE_REFRESH_TOKENS=0 (and JWT_ACCESS_TOKEN_MINUTES=1440), then flip both back.
+    "ROTATE_REFRESH_TOKENS": os.getenv("JWT_ROTATE_REFRESH_TOKENS", "1").strip().lower() not in ("0", "false", "no"),
     "BLACKLIST_AFTER_ROTATION": True,
     "ALGORITHM": "HS256",
-    "SIGNING_KEY": SECRET_KEY,
+    "SIGNING_KEY": JWT_SIGNING_KEY,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
@@ -1001,6 +1606,200 @@ IOS_APP_ID = os.getenv("IOS_APP_ID", "")  # "<TEAMID>.<bundle id>"
 PLAY_STORE_URL = os.getenv("PLAY_STORE_URL", "")
 APP_STORE_URL = os.getenv("APP_STORE_URL", "")
 
+# T1.8 — force-update / maintenance defaults for `GET /core/app-config/`
+# (core/app_config.py). A `core.AppConfig` row (Django admin) overrides each
+# value per platform without a redeploy; these are only the fallbacks.
+# Versions are dotted numeric ("1.4.2"). Blank min => nobody is ever forced.
+APP_MIN_SUPPORTED_VERSION = os.getenv("APP_MIN_SUPPORTED_VERSION", "")
+APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "")
+APP_UPDATE_MESSAGE = os.getenv("APP_UPDATE_MESSAGE", "")
+APP_UPDATE_MESSAGE_HI = os.getenv("APP_UPDATE_MESSAGE_HI", "")
+APP_MAINTENANCE_MODE = os.getenv("APP_MAINTENANCE_MODE", "False") == "True"
+APP_MAINTENANCE_MESSAGE = os.getenv("APP_MAINTENANCE_MESSAGE", "")
+
+# T5 - feed video preview length (seconds). The app plays this much of a feed video (muted autoplay), then shows
+# "Watch full"; the full player / reels have no cutoff. Clamped to 3..120 in core/app_config.py.
+FEED_PREVIEW_SECONDS = int(os.getenv("FEED_PREVIEW_SECONDS", "15") or 15)
+
+# P3-4 - max video length (seconds) the editor allows for a feed post / a story. Defaults = the old app constants (90 / 60).
+# Clamped to 5..600 in core/app_config.py. Product owner can change these without an app release.
+POST_VIDEO_MAX_SECONDS = int(os.getenv("POST_VIDEO_MAX_SECONDS", "90") or 90)
+STORY_VIDEO_MAX_SECONDS = int(os.getenv("STORY_VIDEO_MAX_SECONDS", "60") or 60)
+# P3-follow-up - same knob for a reel (was the app constant kReelMaxSeconds = 180). Clamped to 5..600 in core/app_config.py.
+REEL_VIDEO_MAX_SECONDS = int(os.getenv("REEL_VIDEO_MAX_SECONDS", "180") or 180)
+APP_MAINTENANCE_MESSAGE_HI = os.getenv("APP_MAINTENANCE_MESSAGE_HI", "")
+
+# P-J2 - remote kill switches / staged rollout (common/feature_flags.py, common/feature_gate.py).
+# The normal way to flip a feature is Django admin -> Core -> Feature flags (no deploy). FEATURE_FLAGS_OFF is the emergency
+# lever that works even when the database is unreachable: FEATURE_FLAGS_OFF=live,ai_features  (restart needed).
+# Keys: live, reels_upload, coin_purchase, ai_features, cashout.
+FEATURE_FLAGS_OFF = os.getenv("FEATURE_FLAGS_OFF", "")
+# Optional hard min-version gate: an API call from a build older than min_supported_version gets 426 UPDATE_REQUIRED (the app then
+# shows the blocking "Update now" dialog). Default OFF - turn it on only after the force-update test plan (deploy/FORCE_UPDATE_TEST_PLAN.md).
+APP_HARD_MIN_VERSION_GATE = os.getenv("APP_HARD_MIN_VERSION_GATE", "false").strip().lower() in ("1", "true", "yes", "on")
+
+# ONE public web base for EVERY share link (class, test series, profile, parent
+# invite, certificate). It must be the domain that serves /.well-known/assetlinks.json
+# and the landing pages in common/web_links.py, and must equal the Flutter build's
+# --dart-define=WEB_HOST. Set it in the environment for production.
+PUBLIC_WEB_BASE_URL = os.getenv("PUBLIC_WEB_BASE_URL", "https://learnscroll.app").rstrip("/")
+TUITIONCLASS_WEB_BASE_URL = os.getenv("TUITIONCLASS_WEB_BASE_URL", PUBLIC_WEB_BASE_URL).rstrip("/")
+# The app registers learnscroll:// (DeepLinkService.scheme) - the old default
+# "tuitionclass" was never handled by the app.
+TUITIONCLASS_DEEP_LINK_SCHEME = os.getenv("TUITIONCLASS_DEEP_LINK_SCHEME", "learnscroll")
+
+# ---------------------------------------------------------------------------
+# X12 - live class safety (tuitionclass/live_safety.py, live_abuse.py, live_moderation.py, live_push.py).
+# Every knob is optional and read with getattr(settings, NAME, default), so deleting a line here just means "default".
+# ---------------------------------------------------------------------------
+# Word filter for live chat: off | flag | mask | block. A session can override it (ClassSession.chat_filter_mode).
+# 🔥 C1 — call lifecycle (message/tasks.py::sweep_stale_calls)
+CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "45"))
+# Call ki hard cap (started_at + ye) — sweeper isse purani ONGOING call 'max_duration' se end karta hai.
+# 🔥 C13 — LiveKit token TTL 2h hai, isliye client `calls/<id>/refresh-token/` se silently naya token
+# leta hai; refresh isi cap tak chalta hai, aur cap se LIVEKIT_SESSION_WARN_SECONDS pehle warning aati hai.
+CALL_STALE_ONGOING_SECONDS = int(os.getenv("CALL_STALE_ONGOING_SECONDS", str(3 * 3600)))
+# C14 leftover: ENDED participant ka WS reconnect is window (default 60s, C3 ki 30s reconnect grace se bada) ke andar hi wapas ONGOING (blip); uske baad REST accept/join.
+CALL_WS_REJOIN_WINDOW_SECONDS = int(os.environ.get('CALL_WS_REJOIN_WINDOW_SECONDS', '60'))
+# 🔥 C13 — LiveKit token / session knobs (livekit_utils.py getattr se padhta hai).
+LIVEKIT_CALL_TOKEN_TTL_SECONDS = int(os.getenv("LIVEKIT_CALL_TOKEN_TTL_SECONDS", str(2 * 3600)))
+LIVEKIT_STUDY_ROOM_TOKEN_TTL_SECONDS = int(os.getenv("LIVEKIT_STUDY_ROOM_TOKEN_TTL_SECONDS", str(8 * 3600)))
+# Ek user ke ek continuous study-room session (join se) ki hard cap; uske baad refresh 410.
+LIVEKIT_STUDY_ROOM_MAX_SECONDS = int(os.getenv("LIVEKIT_STUDY_ROOM_MAX_SECONDS", str(12 * 3600)))
+# Hard cap se itne seconds pehle client "session khatam hone wala hai" warning dikhaye.
+LIVEKIT_SESSION_WARN_SECONDS = int(os.getenv("LIVEKIT_SESSION_WARN_SECONDS", "300"))
+
+# S3 — study room whiteboard (`StudyRoomStateView`) guards.
+STUDY_ROOM_STATE_MAX_BYTES = int(os.getenv("STUDY_ROOM_STATE_MAX_BYTES", str(2 * 1024 * 1024)))   # PUT payload cap (413)
+STUDY_ROOM_STATE_MAX_PAGES = int(os.getenv("STUDY_ROOM_STATE_MAX_PAGES", "200"))
+# True => board saved ho chuka ho to PUT me `base_version` / `If-Match` zaroori (warna 428).
+STUDY_ROOM_STATE_REQUIRE_VERSION = os.getenv("STUDY_ROOM_STATE_REQUIRE_VERSION", "1") not in ("0", "false", "False")
+STUDY_ROOM_SNAPSHOT_MIN_INTERVAL_SECONDS = int(os.getenv("STUDY_ROOM_SNAPSHOT_MIN_INTERVAL_SECONDS", "300"))
+STUDY_ROOM_SNAPSHOT_KEEP = int(os.getenv("STUDY_ROOM_SNAPSHOT_KEEP", "20"))
+STUDY_ROOM_UNDO_WINDOW_SECONDS = int(os.getenv("STUDY_ROOM_UNDO_WINDOW_SECONDS", str(24 * 3600)))   # clear ke baad undo
+# S4 — host controls (study_room_roles.py). Sab optional.
+STUDY_ROOM_DEFAULT_MAX_PARTICIPANTS = int(os.getenv("STUDY_ROOM_DEFAULT_MAX_PARTICIPANTS", "100"))   # LiveKit room hard cap + default join cap
+STUDY_ROOM_MAX_PARTICIPANTS_LIMIT = int(os.getenv("STUDY_ROOM_MAX_PARTICIPANTS_LIMIT", "500"))        # host jitna max set kar sakta hai
+STUDY_ROOM_PUBLIC_GROUP_WAITING_ROOM = os.getenv("STUDY_ROOM_PUBLIC_GROUP_WAITING_ROOM", "1") not in ("0", "false", "False")   # public group ke naye session me waiting room default
+# S5 — presence + attendance minutes (message/study_room_presence.py). LiveKit webhook (/message/livekit/webhook/ ya purana
+# tuitionclass URL) configured hona zaroori hai; warna STUDY_ROOM_PRESENCE_ENABLED=0 rakho (purana "join = attendance").
+STUDY_ROOM_PRESENCE_ENABLED = os.getenv("STUDY_ROOM_PRESENCE_ENABLED", "1") not in ("0", "false", "False")
+STUDY_ROOM_STREAK_MIN_MINUTES = int(os.getenv("STUDY_ROOM_STREAK_MIN_MINUTES", "10"))   # din streak me tabhi jab itne minute room me; 0 = join kaafi
+STUDY_ROOM_PRESENCE_STALE_SECONDS = int(os.getenv("STUDY_ROOM_PRESENCE_STALE_SECONDS", str(2 * 3600)))   # itna purana open interval sweeper verify kare
+STUDY_ROOM_PRESENCE_STALE_CREDIT_SECONDS = int(os.getenv("STUDY_ROOM_PRESENCE_STALE_CREDIT_SECONDS", "3600"))   # leave webhook kho gaya to max credit
+STUDY_ROOM_PRESENCE_SWEEP_BATCH = int(os.getenv("STUDY_ROOM_PRESENCE_SWEEP_BATCH", "200"))
+# S5 leftover — idle time. ON => client heartbeat (`study-room/<id>/activity/`) bhejne wale rooms me sirf ACTIVE time minutes me
+# jaata hai (idle baithna nahi). Heartbeat na bhejne wala purana client poora connected time pata rehta hai.
+STUDY_ROOM_IDLE_FILTER_ENABLED = os.getenv("STUDY_ROOM_IDLE_FILTER_ENABLED", "1") not in ("0", "false", "False")
+STUDY_ROOM_ACTIVITY_PING_SECONDS = int(os.getenv("STUDY_ROOM_ACTIVITY_PING_SECONDS", "60"))   # client ping interval (pehle ping ka credit)
+STUDY_ROOM_ACTIVITY_GAP_SECONDS = int(os.getenv("STUDY_ROOM_ACTIVITY_GAP_SECONDS", "150"))   # 2 pings ke beech itna gap tak active; zyada => idle
+# S8 — discovery -> room safety (message/study_room_safety.py, post/minor_privacy.py). Sab optional.
+STUDY_ROOM_RULES_REQUIRED_PUBLIC = os.getenv("STUDY_ROOM_RULES_REQUIRED_PUBLIC", "1") not in ("0", "false", "False")   # public group study room: pehle rules accept (group admin/mod exempt)
+STUDY_ROOM_REPORT_AUTO_REMOVE_THRESHOLD = int(os.getenv("STUDY_ROOM_REPORT_AUTO_REMOVE_THRESHOLD", "0"))   # itne ALAG reporters (same session) => user room se auto-remove; 0 = off
+STUDY_ROOM_REPORT_AUTO_REMOVE_WINDOW_MINUTES = int(os.getenv("STUDY_ROOM_REPORT_AUTO_REMOVE_WINDOW_MINUTES", "60"))
+MINOR_PUBLIC_ROOM_MASK_IDENTITY = os.getenv("MINOR_PUBLIC_ROOM_MASK_IDENTITY", "1") not in ("0", "false", "False")   # public room me minor ka naam/photo adult strangers se chhupao
+MINOR_PUBLIC_GROUP_JOIN_APPROVAL = os.getenv("MINOR_PUBLIC_GROUP_JOIN_APPROVAL", "1") not in ("0", "false", "False")   # minor public group me admin approval se hi aaye
+MINOR_PUBLIC_ROOM_CAMERA_OFF = os.getenv("MINOR_PUBLIC_ROOM_CAMERA_OFF", "1") not in ("0", "false", "False")   # public room me minor ka camera default OFF (client hint)
+# S5 — app-wide study-time leaderboard (scope_type=study_time, scope_id khali). Default OFF: bachon ka padhai-time sabko
+# dikhane se pehle product/privacy decision. Per-room board (scope_id = conversation) hamesha sirf us room ke members ko.
+STUDY_TIME_GLOBAL_BOARD_ENABLED = os.getenv("STUDY_TIME_GLOBAL_BOARD_ENABLED", "0") in ("1", "true", "True")
+CALL_SWEEP_BATCH = int(os.getenv("CALL_SWEEP_BATCH", "200"))
+# 🔥 C7 — busy rule. False (default): callee dusri call me ho to caller ko 409 `callee_busy`
+# ("Line busy"), ring nahi. True: callee ki chalti call ke upar ring jaati hai +
+# push/WS me `call_waiting` flag (client ka call-waiting banner). Ek call ki ring
+# ke dauran doosri ring (ringing elsewhere) har haal me busy maani jaati hai.
+CALL_WAITING_ENABLED = os.getenv("CALL_WAITING_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+# 🔥 C5 — killed-state incoming calls
+# Ring push (FCM `ttl` + APNs `apns-expiration`) itne second baad expire. Phone
+# offline tha to purani ring baad me achanak "incoming call" na dikhaye.
+# Client ke 30s ring timeout ke barabar rakho.
+CALL_PUSH_TTL_SECONDS = int(os.getenv("CALL_PUSH_TTL_SECONDS", "30"))
+
+# 🔥 C11 — group call scale (fan-out)
+# Group call me pehle itne members ko hi RING hota hai (online wale pehle). Baaki members ko
+# ring/push nahi jaata — chat me "Join" banner dikhta hai (GET /message/calls/history/active/
+# + POST /message/calls/<id>/action/ {"action": "join"}). 1:1 par koi asar nahi.
+CALL_GROUP_RING_CAP = max(int(os.getenv("CALL_GROUP_RING_CAP", "10")), 1)
+# Ek group call (LiveKit room) me max kitne log. `join` isi par 409 `call_full` deta hai aur
+# LiveKit room `max_participants` bhi yahi hota hai (livekit_utils.ensure_call_room).
+CALL_GROUP_MAX_PARTICIPANTS = max(int(os.getenv("CALL_GROUP_MAX_PARTICIPANTS", "50")), 2)
+# Group call ki push + bell-notification Celery me jaati hai (request me nahi). Ek task itne
+# recipients sambhalta hai (bade group me kai chhote parallel tasks).
+CALL_PUSH_CHUNK = max(int(os.getenv("CALL_PUSH_CHUNK", "100")), 1)
+# False => group ring push purane tareeke se request ke andar (debug ke liye). Default True.
+CALL_GROUP_PUSH_ASYNC = os.getenv("CALL_GROUP_PUSH_ASYNC", "true").strip().lower() in ("1", "true", "yes", "on")
+# LiveKit CreateRoom (max_participants set karne wala) call ka max wait (sec). Fail => call phir bhi chalti hai.
+CALL_ROOM_CREATE_TIMEOUT_SECONDS = float(os.getenv("CALL_ROOM_CREATE_TIMEOUT_SECONDS", "3"))
+
+# 🔥 C12 — missed-call push + chat bubble (message/missed_calls.py). Koi migration nahi.
+# Missed-call data-only push (type='missed_call'). False => sirf bell row + chat bubble.
+CALL_MISSED_PUSH_ENABLED = os.getenv("CALL_MISSED_PUSH_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+# Kabhi connect na hui call ka chat me "Missed call" bubble (ek call = ek system message).
+CALL_MISSED_BUBBLE_ENABLED = os.getenv("CALL_MISSED_BUBBLE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+# Missed-call push kitni der tak valid (phone offline tha to online aane par bhi dikhe). Default 24h.
+CALL_MISSED_PUSH_TTL_SECONDS = max(int(os.getenv("CALL_MISSED_PUSH_TTL_SECONDS", str(24 * 3600))), 60)
+# False => missed-call kaam sweeper/request ke andar sync (debug / broker ke bina). Default True (Celery).
+CALL_MISSED_NOTIFY_ASYNC = os.getenv("CALL_MISSED_NOTIFY_ASYNC", "true").strip().lower() in ("1", "true", "yes", "on")
+# iOS PushKit/VoIP push (message/voip_push.py). Sab set na hon to iOS bhi purane
+# FCM-only path par chalta hai (killed state me unreliable). Details:
+# STATUS_C5_KILLED_STATE_CALLS.md
+APNS_VOIP_KEY_PATH = os.getenv("APNS_VOIP_KEY_PATH", "")   # AuthKey_XXXXXXXXXX.p8
+APNS_KEY_ID = os.getenv("APNS_KEY_ID", "")
+APNS_TEAM_ID = os.getenv("APNS_TEAM_ID", "")
+APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "")           # e.g. com.learnscroll.app
+# Xcode debug build = sandbox, TestFlight/App Store = production.
+APNS_USE_SANDBOX = os.getenv("APNS_USE_SANDBOX", "true" if DEBUG else "false").strip().lower() in ("1", "true", "yes", "on")
+
+LIVE_CHAT_FILTER_DEFAULT = os.getenv("LIVE_CHAT_FILTER_DEFAULT", "mask")
+# Flood guard: more than MAX lines inside WINDOW seconds -> 429 chat_flood (host tier exempt).
+LIVE_CHAT_FLOOD_WINDOW_SECONDS = int(os.getenv("LIVE_CHAT_FLOOD_WINDOW_SECONDS", "10"))
+LIVE_CHAT_FLOOD_MAX = int(os.getenv("LIVE_CHAT_FLOOD_MAX", "6"))
+# The same line again inside this many seconds is a double tap (rejected, not a strike).
+LIVE_DUP_GRACE_SECONDS = int(os.getenv("LIVE_DUP_GRACE_SECONDS", "3"))
+# Strikes (blocked line / flood / repeated line): LIMIT inside WINDOW -> automatic chat mute; every further auto mute
+# of the same person in the same class doubles the time (x2, x4, x8), capped by MAX.
+LIVE_STRIKE_WINDOW_SECONDS = int(os.getenv("LIVE_STRIKE_WINDOW_SECONDS", "600"))
+LIVE_STRIKE_LIMIT = int(os.getenv("LIVE_STRIKE_LIMIT", "3"))
+LIVE_AUTO_MUTE_MINUTES = int(os.getenv("LIVE_AUTO_MUTE_MINUTES", "5"))
+LIVE_AUTO_MUTE_MAX_MINUTES = int(os.getenv("LIVE_AUTO_MUTE_MAX_MINUTES", "60"))
+# NEW reports one person may file (per class / per hour). child-safety reports are never limited.
+LIVE_REPORT_MAX_PER_SESSION = int(os.getenv("LIVE_REPORT_MAX_PER_SESSION", "5"))
+LIVE_REPORT_MAX_PER_HOUR = int(os.getenv("LIVE_REPORT_MAX_PER_HOUR", "20"))
+# Minors: allow | with_notice | never (on stage). with_notice = only after the recording notice was acknowledged.
+LIVE_MINOR_STAGE_POLICY = os.getenv("LIVE_MINOR_STAGE_POLICY", "with_notice")
+# False = a class that ever had a minor in it can only be saved class-only (no public / followers clip).
+LIVE_PUBLIC_RECORDING_WITH_MINORS = os.getenv("LIVE_PUBLIC_RECORDING_WITH_MINORS", "0") == "1"
+LIVE_MINOR_CACHE_SECONDS = int(os.getenv("LIVE_MINOR_CACHE_SECONDS", "60"))
+# "recording is ready" push: how many attendees at most (same cap as the live-now push).
+LIVE_NOTIFY_MAX_AUDIENCE = int(os.getenv("LIVE_NOTIFY_MAX_AUDIENCE", "5000"))
+# X12 L-D #3: optional separate Redis DB for the live-chat hot keys (slow mode, flood / strike counters, mute lookup).
+# Unset = they share CACHES["default"] (Redis already when REDIS_URL is set). See tuitionclass/live_cache.py.
+if os.getenv("LIVE_REDIS_URL"):
+    CACHES["live"] = {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.getenv("LIVE_REDIS_URL"),
+        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+        "KEY_PREFIX": "live",
+    }
+# X12 L-D #4: how long (seconds) a "is this person chat-muted?" answer is cached per (class, person). The answer is also
+# written / deleted the moment a moderator mutes / unmutes, so on a shared Redis this is only the safety net. 0 = no
+# cache (one DB query per chat message, the old behaviour).
+LIVE_MUTE_CACHE_SECONDS = int(os.getenv("LIVE_MUTE_CACHE_SECONDS", "20"))
+# X12 L-D #1: listener mode as the platform default. False (default) = old behaviour: every student token can publish.
+# True = a class starts STAGE-ONLY when it goes LIVE: plain students can listen, chat, raise a hand - they publish only
+# once the host puts them on stage. The host can still switch it off per class (More sheet -> Stage only).
+LIVE_STAGE_ONLY_DEFAULT = os.getenv("LIVE_STAGE_ONLY_DEFAULT", "0") == "1"
+# False = the older tuitionclass pushes (waitlist, refund, reminders ...) ignore quiet hours / Do Not Disturb again.
+TUITIONCLASS_PUSH_RESPECT_QUIET_HOURS = os.getenv("TUITIONCLASS_PUSH_RESPECT_QUIET_HOURS", "1") == "1"
+if not globals().get("DEBUG", True) and any(h in PUBLIC_WEB_BASE_URL for h in ("example.com", "localhost", "127.0.0.1")):
+    import warnings as _w
+    _w.warn(
+        f"PUBLIC_WEB_BASE_URL={PUBLIC_WEB_BASE_URL!r} is a placeholder: share links and "
+        "referral commission links will not open the app. Set PUBLIC_WEB_BASE_URL.",
+        stacklevel=1,
+    )
+
 AUTH_USER_MODEL = "login.User"
 # NOTE (fix — security): CORS_ALLOW_ALL_ORIGINS=True means ANY website can
 # call this API using a logged-in user's browser session/cookies (relevant
@@ -1013,12 +1812,36 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_ALL_ORIGINS = DEBUG and not CORS_ALLOWED_ORIGINS
 
+# P-B1 -- API docs lock. /api/schema/, /swagger/, /redoc/ (and the duplicate /tuitionclass/schema/ + /tuitionclass/schema/docs/)
+# list every endpoint, field and permission of the API: a free map for an attacker and an expensive request to render.
+# drf-spectacular's own default for SERVE_PERMISSIONS is AllowAny, so before this block all five URLs were public.
+#   API_DOCS_PUBLIC=false (DEFAULT)  only logged-in STAFF (is_staff) can open them. Two ways in: a browser session
+#                                    (log in at /admin/, then open /swagger/) or a staff JWT in the Authorization header.
+#                                    Anonymous -> 401, non-staff -> 403.
+#   API_DOCS_PUBLIC=true             open to everyone. Local / throw-away staging only: `manage.py release_check` and
+#                                    `manage.py check_security_settings --production` both FAIL while it is true.
+# Read here (not via _env_bool, which is defined further down this file). The routes themselves stay mounted
+# (LearnScroll/urls.py) - the lock is the permission class, so there is one rule for all five URLs.
+API_DOCS_PUBLIC = os.getenv("API_DOCS_PUBLIC", "false").strip().lower() in ("1", "true", "yes", "on")
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'LearnScroll API',
     'DESCRIPTION': 'LearnScroll Production API',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
+    # P-B1: who may open the schema / Swagger UI / Redoc pages (see the block above).
+    'SERVE_PERMISSIONS': (
+        ['rest_framework.permissions.AllowAny'] if API_DOCS_PUBLIC
+        else ['rest_framework.permissions.IsAdminUser']
+    ),
+    # JWT first so an anonymous caller gets 401 + WWW-Authenticate (not a bare 403); SessionAuthentication second so a
+    # staff member who logged in at /admin/ can use Swagger UI in the browser (a browser cannot send a Bearer header).
+    # Both only authenticate; IsAdminUser above decides. Session auth enforces CSRF on unsafe methods only - these views are GET.
+    'SERVE_AUTHENTICATION': [
+        'login.authentication.SlidingSessionAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
 }
 
 # Upload limits
@@ -1040,7 +1863,19 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
 
 FCM_SERVICE_ACCOUNT_JSON_PATH = BASE_DIR / "firebase-service-account.json"
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+# T1 - web + android + ios ke ID tokens ka `aud` alag hota hai: GOOGLE_CLIENT_IDS="web.apps...,android.apps...,ios.apps..."
+# (comma list). GOOGLE_CLIENT_ID (purana, single) fallback ke taur par chalta rahta hai - login/google_verify.py dono merge karta hai.
+GOOGLE_CLIENT_IDS = [x.strip() for x in os.environ.get("GOOGLE_CLIENT_IDS", "").split(",") if x.strip()]
+# Google ke certs fetch / verify ke har HTTP call ka timeout (seconds) aur certs cache ki umar. Dev PC pe network atke
+# to worker latakne ki jagah 5 s me 503 `google_unreachable` milta hai.
+GOOGLE_VERIFY_TIMEOUT = float(os.environ.get("GOOGLE_VERIFY_TIMEOUT", "5"))
+GOOGLE_CERTS_CACHE_SECONDS = int(os.environ.get("GOOGLE_CERTS_CACHE_SECONDS", "3600"))
 FREESOUND_API_KEY = os.environ.get('FREESOUND_API_KEY')
+# Story studio F3 - GIF sticker. Giphy API key for GET /post/gifs/search/ (post/views.py GifSearchAPIView); stays on the
+# server. Unset = the endpoint answers 503 "not configured" and the app hides nothing else.
+GIPHY_API_KEY = os.environ.get('GIPHY_API_KEY')
+# Hosts a stored GIF url may point at (exact host or any subdomain) - post/story_gifs.py. Default: Giphy only.
+# STORY_GIF_ALLOWED_HOSTS = ("giphy.com",)
 # NOTE (fix — Feature 9, Message Translate): translation_service.py's
 # translate_text() reads this via getattr(settings, 'GOOGLE_TRANSLATE_API_KEY',
 # None). It was never set anywhere, so MessageViewSet.translate 503'd with
@@ -1061,6 +1896,47 @@ GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")
 REFERRAL_BONUS_COINS = int(os.environ.get("REFERRAL_BONUS_COINS", 50))
 REFERRAL_REDEEM_WINDOW_DAYS = int(os.environ.get("REFERRAL_REDEEM_WINDOW_DAYS", 7))
 
+# T2.7 (Loop 7) — COST-FREE referral rewards (no coins leave the platform):
+#   REFERRAL_REWARD_FREEZE_REFERRER / _REFEREE -- streak-freeze tokens handed
+#       to each side when a referral is redeemed (capped by
+#       STREAK_FREEZE_MAX_TOKENS, so a full holder simply gets 0).
+#   REFERRER_BADGE_FIRST_AT / REFERRER_BADGE_COMMUNITY_AT -- how many
+#       redeemed referrals earn the "referrer_first" / "referrer_5" badges.
+#   FOUNDING_MEMBER_UNTIL (ISO date, "" = no date limit) and
+#   FOUNDING_MEMBER_MAX_AWARDS -- the founding window: while it is open, a
+#       referee who redeems a code, a referrer who reaches
+#       FOUNDING_MEMBER_REFERRALS_NEEDED referrals, or a student who joins a
+#       campus via an invite code gets the "founding_member" badge.
+REFERRAL_REWARD_FREEZE_REFERRER = int(os.environ.get("REFERRAL_REWARD_FREEZE_REFERRER", 1))
+REFERRAL_REWARD_FREEZE_REFEREE = int(os.environ.get("REFERRAL_REWARD_FREEZE_REFEREE", 1))
+REFERRER_BADGE_FIRST_AT = int(os.environ.get("REFERRER_BADGE_FIRST_AT", 1))
+REFERRER_BADGE_COMMUNITY_AT = int(os.environ.get("REFERRER_BADGE_COMMUNITY_AT", 5))
+FOUNDING_MEMBER_UNTIL = os.environ.get("FOUNDING_MEMBER_UNTIL", "")
+FOUNDING_MEMBER_MAX_AWARDS = int(os.environ.get("FOUNDING_MEMBER_MAX_AWARDS", 1000))
+# T2.8 — students needed for the last step of the campus pilot checklist
+# (campus/pilot_kit.py).
+CAMPUS_PILOT_TARGET_STUDENTS = int(os.environ.get("CAMPUS_PILOT_TARGET_STUDENTS", 10))
+
+# SAFETY (campus/backup.py, campus/data_deletion.py, campus/consent.py) -- all optional, defaults shown.
+#   CAMPUS_BACKUP_RETENTION_DAYS    a backup is deleted after this many days (0 = keep until the count limit)
+#   CAMPUS_BACKUP_MAX_PER_CAMPUS    newest N backups kept per campus (0 = no count limit)
+#   CAMPUS_BACKUP_MAX_ROWS          refuse a backup bigger than this many rows
+#   CAMPUS_BACKUP_MAX_UNPACKED_MB   restore refuses a file that unpacks to more than this (zip-bomb guard)
+#   CAMPUS_BACKUP_SCHEDULE_DAYS     nightly job backs a campus up when its last scheduled backup is older than this
+#   CAMPUS_DELETION_SLA_DAYS        promised answer time for a data-deletion request (shown as its due date)
+#   CAMPUS_CONSENT_POLICY_VERSION   bump when the privacy text changes -> every earlier "granted" shows "needs update"
+CAMPUS_BACKUP_RETENTION_DAYS = int(os.environ.get("CAMPUS_BACKUP_RETENTION_DAYS", 90))
+# Soft-deleted campus records (trash) stay restorable this many days; `manage.py purge_soft_deleted --execute`
+# erases the older ones for real. See campus/soft_delete.py.
+CAMPUS_SOFT_DELETE_RETENTION_DAYS = int(os.environ.get("CAMPUS_SOFT_DELETE_RETENTION_DAYS", 90))
+CAMPUS_BACKUP_MAX_PER_CAMPUS = int(os.environ.get("CAMPUS_BACKUP_MAX_PER_CAMPUS", 20))
+CAMPUS_BACKUP_MAX_ROWS = int(os.environ.get("CAMPUS_BACKUP_MAX_ROWS", 300000))
+CAMPUS_BACKUP_MAX_UNPACKED_MB = int(os.environ.get("CAMPUS_BACKUP_MAX_UNPACKED_MB", 400))
+CAMPUS_BACKUP_SCHEDULE_DAYS = int(os.environ.get("CAMPUS_BACKUP_SCHEDULE_DAYS", 7))
+CAMPUS_DELETION_SLA_DAYS = int(os.environ.get("CAMPUS_DELETION_SLA_DAYS", 30))
+CAMPUS_CONSENT_POLICY_VERSION = os.environ.get("CAMPUS_CONSENT_POLICY_VERSION", "2026-10")
+FOUNDING_MEMBER_REFERRALS_NEEDED = int(os.environ.get("FOUNDING_MEMBER_REFERRALS_NEEDED", 3))
+
 # TASK G10 (growth_and_feature_tasks.md — certificates as a share loop):
 # general app web base URL, used to build a `?ref=<code>` signup link that
 # rides along on a certificate share card (testseries/certificate_share_card.py,
@@ -1069,7 +1945,7 @@ REFERRAL_REDEEM_WINDOW_DAYS = int(os.environ.get("REFERRAL_REDEEM_WINDOW_DAYS", 
 # for `TUITIONCLASS_WEB_BASE_URL` — this is the app-wide equivalent, not scoped
 # to one classroom, since a certificate's referral link should land a new
 # signup on the general signup screen, not inside someone else's classroom.
-APP_WEB_BASE_URL = os.environ.get("APP_WEB_BASE_URL", "https://app.example.com")
+APP_WEB_BASE_URL = os.environ.get("APP_WEB_BASE_URL", PUBLIC_WEB_BASE_URL)
 
 # NEW (task 65 — classroom refer & earn, student side): one-time,
 # platform-funded coin bonus credited to a STUDENT who joins a classroom via
@@ -1138,6 +2014,37 @@ CAMPUS_assigments_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_assigments_STR
 # days" warning. Same env-overridable-constant shape as
 # CAMPUS_ATTENDANCE_STREAK_DAYS above.
 CAMPUS_FEE_REMINDER_DAYS_BEFORE = int(os.environ.get("CAMPUS_FEE_REMINDER_DAYS_BEFORE", 3))
+# Homework Diary: how many days before `due_date` the "homework due" push goes
+# out (campus.tasks.send_homework_diary_due_reminders). 1 = the evening before.
+CAMPUS_HOMEWORK_DIARY_REMINDER_DAYS_BEFORE = int(os.environ.get("CAMPUS_HOMEWORK_DIARY_REMINDER_DAYS_BEFORE", 1))
+# Class resources (content share) — all optional, defaults shown.
+#   * file size limits live in campus/resource_rules.py (CAMPUS_RESOURCE_MAX_MB 25 /
+#     CAMPUS_RESOURCE_VIDEO_MAX_MB 200 / CAMPUS_RESOURCE_THUMB_MAX_MB 2);
+#   * push anti-spam: once the same teacher has pushed this many resources into
+#     ONE folder within the window, further uploads are still visible in the
+#     app but no longer buzz the students/parents (campus/resource_push.py);
+#   * "copy to other sections": max target sections per request.
+CAMPUS_RESOURCE_PUSH_BURST_LIMIT = int(os.environ.get("CAMPUS_RESOURCE_PUSH_BURST_LIMIT", 3))
+CAMPUS_RESOURCE_PUSH_BURST_MINUTES = int(os.environ.get("CAMPUS_RESOURCE_PUSH_BURST_MINUTES", 10))
+CAMPUS_RESOURCE_COPY_MAX_SECTIONS = int(os.environ.get("CAMPUS_RESOURCE_COPY_MAX_SECTIONS", 10))
+
+# Live class (one-tap go-live + automatic attendance) — all optional, defaults
+# shown; the rules live in campus/live_class.py.
+#   * Go live is allowed from EARLY minutes before the period starts until
+#     LATE_GRACE minutes after it ends; an ended class can be re-opened for REOPEN minutes.
+#   * A stay with no heartbeat for PRESENCE_TTL seconds counts as closed at its last
+#     sign of life; a LIVE session whose TEACHER heartbeat is silent for STALE minutes
+#     is auto-ended by the beat sweeper; MAX_HOURS is a hard cap on any live class.
+#   * A session shorter than ATTENDANCE_MIN_SESSION minutes marks nobody absent.
+#   * Per-campus switches (auto on/off, min % stayed, late-after minutes) are fields
+#     on `campus.Campus`, editable by admin / principal.
+CAMPUS_GO_LIVE_EARLY_MINUTES = int(os.environ.get("CAMPUS_GO_LIVE_EARLY_MINUTES", 15))
+CAMPUS_GO_LIVE_LATE_GRACE_MINUTES = int(os.environ.get("CAMPUS_GO_LIVE_LATE_GRACE_MINUTES", 15))
+CAMPUS_LIVE_REOPEN_MINUTES = int(os.environ.get("CAMPUS_LIVE_REOPEN_MINUTES", 60))
+CAMPUS_LIVE_PRESENCE_TTL_SECONDS = int(os.environ.get("CAMPUS_LIVE_PRESENCE_TTL_SECONDS", 90))
+CAMPUS_LIVE_STALE_MINUTES = int(os.environ.get("CAMPUS_LIVE_STALE_MINUTES", 5))
+CAMPUS_LIVE_MAX_HOURS = int(os.environ.get("CAMPUS_LIVE_MAX_HOURS", 6))
+CAMPUS_LIVE_ATTENDANCE_MIN_SESSION_MINUTES = int(os.environ.get("CAMPUS_LIVE_ATTENDANCE_MIN_SESSION_MINUTES", 5))
 
 # ---------------------------------------------------------------------------
 # TASK G1 (growth_and_feature_tasks.md — Streaks): app-wide daily-open streak
@@ -1156,6 +2063,24 @@ CAMPUS_FEE_REMINDER_DAYS_BEFORE = int(os.environ.get("CAMPUS_FEE_REMINDER_DAYS_B
 # start; changing this env var needs a beat restart to take effect, same as
 # any other crontab-shaped schedule in this file.
 # ---------------------------------------------------------------------------
+# T2.9: also read by core.tasks.send_streak_at_risk_reminders (it does nothing
+# before this server-local hour); the beat entry fires every 30 min from here.
+STREAK_REMINDER_HOUR = int(os.environ.get("STREAK_REMINDER_HOUR", 22))
+# P-F3_F4 habit loop (core/habit_loop.py). SMART TIMING: the streak warning goes out HABIT_LEAD_HOURS before the hour
+# the user usually finishes studying (median of their last 14 days), clamped to [HABIT_EARLIEST_HOUR, HABIT_LATEST_HOUR];
+# users with < 3 days of history keep STREAK_REMINDER_HOUR. HABIT_SMART_TIMING=0 -> everyone gets STREAK_REMINDER_HOUR.
+# Revision reminder: user-local HABIT_REVISION_HOUR (+ 3 h window), at most one per HABIT_REVISION_EVERY_DAYS, only for
+# decks with >= HABIT_REVISION_MIN_ITEMS items saved >= 2 days ago. HABIT_WEEKLY_EMAIL=0 turns the weekly report e-mail off.
+HABIT_LOOP = {
+    "smart_timing": os.environ.get("HABIT_SMART_TIMING", "1") not in ("0", "false", "False", ""),
+    "lead_hours": int(os.environ.get("HABIT_LEAD_HOURS", 1)),
+    "earliest_hour": int(os.environ.get("HABIT_EARLIEST_HOUR", 18)),
+    "latest_hour": int(os.environ.get("HABIT_LATEST_HOUR", 22)),
+    "revision_hour": int(os.environ.get("HABIT_REVISION_HOUR", 18)),
+    "revision_every_days": int(os.environ.get("HABIT_REVISION_EVERY_DAYS", 3)),
+    "revision_min_items": int(os.environ.get("HABIT_REVISION_MIN_ITEMS", 3)),
+    "weekly_email": os.environ.get("HABIT_WEEKLY_EMAIL", "1") not in ("0", "false", "False", ""),
+}
 STREAK_MILESTONE_DAYS = tuple(
     int(d) for d in os.environ.get("STREAK_MILESTONE_DAYS", "7,30,100").split(",") if d.strip()
 )
@@ -1253,6 +2178,34 @@ PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {
     "razorpay": "X-Razorpay-Signature",
 }
 
+# T0.4 (B4) — coin top-up pricing, owned by the SERVER (user_profile/payments.py).
+# Packs the app may buy. For the Rs 1 live test add `1` temporarily (COIN_PURCHASE_PACKS=1,100,250,...)
+# and remove it afterwards. Rate = INR charged per coin (keep in sync with the app's kCoinToInrRate,
+# or better: show the `amount` the /buy-coin/order/ response returns).
+COIN_PURCHASE_PACKS = os.getenv("COIN_PURCHASE_PACKS", "100,250,500,1000,2500")
+COIN_PURCHASE_INR_PER_COIN = os.getenv("COIN_PURCHASE_INR_PER_COIN", "1")
+RAZORPAY_API_BASE = os.getenv("RAZORPAY_API_BASE", "https://api.razorpay.com/v1")
+
+# FEE-5 — campus fees paid online (UPI / card) through the same Razorpay account (campus/fee_gateway.py).
+# Needs RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET; webhook: https://<host>/campus/fee-payments/webhook/razorpay/
+# (events payment.captured, order.paid, refund.processed; same RAZORPAY_WEBHOOK_SECRET).
+CAMPUS_FEE_ONLINE_ENABLED = os.getenv("CAMPUS_FEE_ONLINE_ENABLED", "1").lower() not in ("0", "false", "no")
+CAMPUS_FEE_ONLINE_METHODS = os.getenv("CAMPUS_FEE_ONLINE_METHODS", "upi,card")
+CAMPUS_FEE_ONLINE_MAX_PENDING = int(os.getenv("CAMPUS_FEE_ONLINE_MAX_PENDING", "5"))
+CAMPUS_FEE_ONLINE_MIN_AMOUNT = os.getenv("CAMPUS_FEE_ONLINE_MIN_AMOUNT", "1")
+
+# P-G2 — reconcile job (common/payment_reconcile.py, Celery task user_profile.reconcile_payments, every 15 min):
+# asks Razorpay about PENDING online rows (coin top-ups + campus fees) whose webhook never arrived.
+PAYMENT_RECONCILE_ENABLED = os.getenv("PAYMENT_RECONCILE_ENABLED", "1").lower() not in ("0", "false", "no")
+PAYMENT_RECONCILE_MIN_AGE_MINUTES = int(os.getenv("PAYMENT_RECONCILE_MIN_AGE_MINUTES", "10"))  # never race the webhook
+PAYMENT_RECONCILE_MAX_AGE_DAYS = int(os.getenv("PAYMENT_RECONCILE_MAX_AGE_DAYS", "7"))        # older: reported, not touched
+PAYMENT_RECONCILE_EXPIRE_HOURS = int(os.getenv("PAYMENT_RECONCILE_EXPIRE_HOURS", "168"))      # no attempt at all -> FAILED
+PAYMENT_RECONCILE_BATCH = int(os.getenv("PAYMENT_RECONCILE_BATCH", "200"))
+
+# P-G2 — emailed coin top-up receipt (PDF attached). Transactional; needs EMAIL_* below. 0 = off.
+COIN_RECEIPT_EMAIL_ENABLED = os.getenv("COIN_RECEIPT_EMAIL_ENABLED", "1").lower() not in ("0", "false", "no")
+
+
 # ---------------------------------------------------------------------------
 # MSG91 (see tuitionclass/notifications.py _send_sms / _send_whatsapp).
 # MSG91_AUTH_KEY is shared by both channels. SMS additionally needs a
@@ -1311,6 +2264,17 @@ CELERY_TIMEZONE = TIME_ZONE
 # Belt-and-suspenders: if a worker dies mid-task, don't silently lose it.
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
+# P-C3: every task gets a time limit (a hung task must not hold a worker slot forever). Heavy tasks set their own (post/tasks.py,
+# login/tasks.py, tuitionclass save_recording_clip). soft raises SoftTimeLimitExceeded inside the task, hard kills the child.
+CELERY_TASK_SOFT_TIME_LIMIT = env_int("CELERY_TASK_SOFT_TIME_LIMIT", 600, lo=30)
+CELERY_TASK_TIME_LIMIT = max(env_int("CELERY_TASK_TIME_LIMIT", 660, lo=60), CELERY_TASK_SOFT_TIME_LIMIT + 30)
+# acks_late + prefetch 4 lets one worker hoard 4 messages while it runs a slow one -> prefetch 1.
+CELERY_WORKER_PREFETCH_MULTIPLIER = env_int("CELERY_WORKER_PREFETCH_MULTIPLIER", 1, lo=1)
+# failed-task alert (LearnScroll/celery_ops.py) and the single-beat guard (LearnScroll/beat_guard.py)
+CELERY_FAIL_ALERT_THRESHOLD = env_int("CELERY_FAIL_ALERT_THRESHOLD", 5, lo=1)
+CELERY_FAIL_ALERT_WINDOW_SECONDS = env_int("CELERY_FAIL_ALERT_WINDOW_SECONDS", 900, lo=60)
+BEAT_SINGLE_INSTANCE_GUARD = env_bool("BEAT_SINGLE_INSTANCE_GUARD", True)
+BEAT_LOCK_TTL = env_int("BEAT_LOCK_TTL", 60, lo=10)
 
 # Cross-app side effects (notifications, chat-group sync — see
 # core/async_utils.py + core/tasks.py) are enqueued from inside web requests,
@@ -1318,7 +2282,9 @@ CELERY_TASK_REJECT_ON_WORKER_LOST = True
 # running the task inline) instead of hanging the request on kombu's default
 # multi-second connection retries.
 CELERY_BROKER_CONNECTION_TIMEOUT = 2
-CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_connect_timeout": 2}
+# visibility_timeout: Redis re-delivers an un-acked message after this long. With acks_late it MUST be longer than the longest
+# task (save_recording_clip = 5 h), else a still-running task is delivered a second time. 6 h.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_connect_timeout": 2, "visibility_timeout": env_int("CELERY_VISIBILITY_TIMEOUT", 6 * 3600, lo=3600)}
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
 # Under `manage.py test` / pytest there is no worker: run tasks inline so
@@ -1330,9 +2296,127 @@ TESTING = "test" in _sys.argv or "pytest" in _sys.modules
 CELERY_TASK_ALWAYS_EAGER = TESTING or os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
 CELERY_TASK_EAGER_PROPAGATES = False
 
+# ---------------------------------------------------------------------------
+# Task 14 -- admin / moderator security (common/admin_site.py, common/password_policy.py)
+#   ADMIN_REQUIRE_2FA            TOTP code needed for /admin/ (default: on whenever DEBUG=False).
+#                                Enrol each moderator: python manage.py setup_staff_2fa <username>
+#   STAFF_PASSWORD_MIN_LENGTH    minimum staff password length (default 14)
+#   ADMIN_LOGIN_MAX_FAILURES     failed logins before a username is locked (default 5)
+#   ADMIN_LOGIN_LOCKOUT_SECONDS  lock duration / failure window (default 900 = 15 min)
+# ---------------------------------------------------------------------------
+ADMIN_REQUIRE_2FA = os.getenv("ADMIN_REQUIRE_2FA", "").strip().lower() in ("1", "true", "yes") if os.getenv("ADMIN_REQUIRE_2FA") else (not DEBUG and not TESTING)
+STAFF_PASSWORD_MIN_LENGTH = int(os.getenv("STAFF_PASSWORD_MIN_LENGTH", "14"))
+ADMIN_LOGIN_MAX_FAILURES = int(os.getenv("ADMIN_LOGIN_MAX_FAILURES", "5"))
+ADMIN_LOGIN_LOCKOUT_SECONDS = int(os.getenv("ADMIN_LOGIN_LOCKOUT_SECONDS", "900"))
+
+# P-B6 -- admin hardening.
+#   ADMIN_URL        where the Django admin lives (default "admin/"). Set a private path in production, e.g.
+#                    ADMIN_URL=ops-9f3k2/ ; slashes at the ends are normalised. `manage.py release_check` warns while it is "admin/".
+#   CSP_PUBLIC_MODE  Content-Security-Policy on public HTML pages (SEO / share links / legal): enforce | report-only | off
+#   CSP_ADMIN_MODE   same for the admin; default report-only, switch to enforce after one look at the browser console on staging
+#   CSP_REPORT_URI   optional endpoint that collects violation reports
+ADMIN_URL = (os.getenv("ADMIN_URL", "admin/").strip().strip("/") or "admin") + "/"
+CSP_PUBLIC_MODE = os.getenv("CSP_PUBLIC_MODE", "enforce").strip().lower()
+CSP_ADMIN_MODE = os.getenv("CSP_ADMIN_MODE", "report-only").strip().lower()
+CSP_REPORT_URI = os.getenv("CSP_REPORT_URI", "").strip()
+OTP_TOTP_ISSUER = "LearnScroll"  # name shown in the authenticator app
+
+# P-B8 -- admin IP allow-list (common/admin_ip_allowlist.py).
+#   ADMIN_IP_ALLOWLIST  comma / space separated IPs or CIDRs allowed to reach /<ADMIN_URL>. EMPTY = off (default).
+#                       Set but all entries invalid = everybody refused (fails closed). Blocked requests get a plain 404.
+#   ADMIN_NUM_PROXIES   trusted reverse proxies in front of Django (nginx = 1). Unset -> falls back to NUM_PROXIES; both
+#                       unset -> only REMOTE_ADDR is used and X-Forwarded-For is ignored. Also used by the admin login lockout.
+ADMIN_IP_ALLOWLIST = os.getenv("ADMIN_IP_ALLOWLIST", "").strip()
+ADMIN_NUM_PROXIES = int(os.getenv("ADMIN_NUM_PROXIES")) if os.getenv("ADMIN_NUM_PROXIES", "").strip().isdigit() else None
+
 from celery.schedules import crontab  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# N6 - reminder throttling (core/notification_reminders.py reads both at call time).
+#   NOTIF_REMINDER_DAILY_CAP        max NON-urgent reminder pushes per user per local day (streak-at-risk, weekly recap,
+#                                   study digest, PTM reminder). 0 = cap off. Urgent ones (class starts, test /
+#                                   assignment / homework due) are never capped. The bell row is always written.
+#   NOTIF_REMINDER_COLLAPSE_MINUTES the same reminder TYPE is not pushed twice inside this window. 0 = off.
+# ---------------------------------------------------------------------------
+NOTIF_REMINDER_DAILY_CAP = int(os.environ.get("NOTIF_REMINDER_DAILY_CAP", 3))
+NOTIF_REMINDER_COLLAPSE_MINUTES = int(os.environ.get("NOTIF_REMINDER_COLLAPSE_MINUTES", 240))
+
+# ---------------------------------------------------------------------------
+# N7 - rich notifications (core/notification_rich.py reads this at call time).
+#   NOTIF_PUSH_MARK_READ_BUTTON  "Mark as read" button on reply / informational pushes. Default ON; set to 0 / false / off
+#                                to stop adding it (Accept / Decline, Follow back, reminders, locked types never get it).
+# ---------------------------------------------------------------------------
+NOTIF_PUSH_MARK_READ_BUTTON = os.environ.get("NOTIF_PUSH_MARK_READ_BUTTON", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+# --- N8: e-mail / SMS / WhatsApp channels (core/channel_policy.py) ---------------------------------------------------
+#   Per-event e-mail needs a VERIFIED address; SMS / WhatsApp need User.phone_verified + a consent row for the number.
+#   NOTIF_EMAIL_DAILY_CAP / NOTIF_SMS_DAILY_CAP / NOTIF_WHATSAPP_DAILY_CAP   per user, rolling 24 h (locked / safety types skip it)
+#   NOTIF_SMS_GLOBAL_DAILY_CAP / NOTIF_WHATSAPP_GLOBAL_DAILY_CAP             platform cost guard per rolling 24 h (0 = no limit)
+#   NOTIF_EMAIL_SOFT_BOUNCE_LIMIT        soft bounces within 7 days before the address is suppressed
+#   NOTIF_CONSENT_TEXT_VERSION           bump when the wording of the consent text in the app changes
+#   NOTIF_EMAIL_CODE_TTL_SECONDS / _RESEND_SECONDS / _MAX_ATTEMPTS / _MAX_SENDS_PER_DAY   verification code limits
+#   NOTIF_WEBHOOK_SECRET                 header X-Webhook-Secret for core/channel-webhooks/<provider>/ ("" = endpoint OFF)
+#   NOTIF_SMS_APPEND_STOP / NOTIF_SMS_MAX_SEGMENTS                           SMS wording (set APPEND_STOP=0 if your DLT text has it)
+#   MSG91_WHATSAPP_TEMPLATE_NAME_HI / _EN  per-language approved WhatsApp templates (falls back to MSG91_WHATSAPP_TEMPLATE_NAME)
+#   SITE_URL (already above) is REQUIRED for the unsubscribe link in e-mails.
+# N9 - notification centre extras:
+#   NOTIFICATION_HISTORY_DAYS          how long a normal notification stays in the bell (default 30). Older rows are deleted
+#                                      by the daily task core.prune_notification_history (read, unread and archived alike).
+#   NOTIFICATION_LOCKED_HISTORY_DAYS   same for locked / safety types (emergency, copyright, withdrawals ...) - default 90,
+#                                      never shorter than the normal window.
+#   (the older `manage.py cleanup_notifications` command keeps its own read 30d / unread 90d rule - it is a manual tool.)
+NOTIFICATION_HISTORY_DAYS = int(os.environ.get("NOTIFICATION_HISTORY_DAYS", 30))
+NOTIFICATION_LOCKED_HISTORY_DAYS = int(os.environ.get("NOTIFICATION_LOCKED_HISTORY_DAYS", 90))
+
+
+def _env_bool(name, default):
+    return os.environ.get(name, default).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+NOTIF_EMAIL_DAILY_CAP = int(os.environ.get("NOTIF_EMAIL_DAILY_CAP", 10))
+NOTIF_SMS_DAILY_CAP = int(os.environ.get("NOTIF_SMS_DAILY_CAP", 3))
+NOTIF_WHATSAPP_DAILY_CAP = int(os.environ.get("NOTIF_WHATSAPP_DAILY_CAP", 3))
+NOTIF_SMS_GLOBAL_DAILY_CAP = int(os.environ.get("NOTIF_SMS_GLOBAL_DAILY_CAP", 0))
+NOTIF_WHATSAPP_GLOBAL_DAILY_CAP = int(os.environ.get("NOTIF_WHATSAPP_GLOBAL_DAILY_CAP", 0))
+NOTIF_EMAIL_SOFT_BOUNCE_LIMIT = int(os.environ.get("NOTIF_EMAIL_SOFT_BOUNCE_LIMIT", 3))
+NOTIF_CONSENT_TEXT_VERSION = os.environ.get("NOTIF_CONSENT_TEXT_VERSION", "2026-10")
+NOTIF_EMAIL_CODE_TTL_SECONDS = int(os.environ.get("NOTIF_EMAIL_CODE_TTL_SECONDS", 600))
+NOTIF_EMAIL_CODE_RESEND_SECONDS = int(os.environ.get("NOTIF_EMAIL_CODE_RESEND_SECONDS", 60))
+NOTIF_EMAIL_CODE_MAX_ATTEMPTS = int(os.environ.get("NOTIF_EMAIL_CODE_MAX_ATTEMPTS", 5))
+NOTIF_EMAIL_CODE_MAX_SENDS_PER_DAY = int(os.environ.get("NOTIF_EMAIL_CODE_MAX_SENDS_PER_DAY", 5))
+NOTIF_WEBHOOK_SECRET = os.environ.get("NOTIF_WEBHOOK_SECRET", "")
+NOTIF_SMS_APPEND_STOP = _env_bool("NOTIF_SMS_APPEND_STOP", "1")
+NOTIF_SMS_MAX_SEGMENTS = int(os.environ.get("NOTIF_SMS_MAX_SEGMENTS", 2))
+MSG91_WHATSAPP_TEMPLATE_NAME_HI = os.environ.get("MSG91_WHATSAPP_TEMPLATE_NAME_HI", "")
+MSG91_WHATSAPP_TEMPLATE_NAME_EN = os.environ.get("MSG91_WHATSAPP_TEMPLATE_NAME_EN", "")
+
 CELERY_BEAT_SCHEDULE = {
+    # L1 gaps 9/11 -- drop dead AuthToken rows + expired blacklist rows (login/tasks.py).
+    "login-cleanup-stale-sessions": {
+        "task": "login.cleanup_stale_sessions",
+        "schedule": crontab(hour=3, minute=30),
+    },
+    # L1 gap 19 -- drop auth audit rows older than AUTH_AUDIT_RETENTION_DAYS (login/tasks.py).
+    "login-purge-auth-audit-logs": {
+        "task": "login.purge_auth_audit_logs",
+        "schedule": crontab(hour=4, minute=15),
+    },
+    # S5 -- DPDP data rights (login/tasks.py): expire old export ZIPs / build late ones, and erase accounts whose
+    # 30-day deletion grace has ended (+ one "3 days left" e-mail).
+    "login-sweep-data-exports": {
+        "task": "login.sweep_data_exports",
+        "schedule": crontab(minute="*/30"),
+    },
+    "login-run-due-account-deletions": {
+        "task": "login.run_due_account_deletions",
+        "schedule": crontab(hour=2, minute=10),
+    },
+    # S10 -- stale QR sign-in requests (login/connected_accounts.purge_old_qr_requests).
+    "login-purge-old-qr-requests": {
+        "task": "login.purge_old_qr_requests",
+        "schedule": crontab(minute=20),
+    },
     "tuitionclass-generate-upcoming-sessions": {
         "task": "tuitionclass.generate_upcoming_sessions",
         # Hourly is plenty — the task looks 14 days ahead and is fully
@@ -1342,6 +2426,18 @@ CELERY_BEAT_SCHEDULE = {
     "tuitionclass-auto-complete-overdue-sessions": {
         "task": "tuitionclass.auto_complete_overdue_sessions",
         "schedule": crontab(minute="*/5"),
+    },
+    # LV1 — a LIVE session whose host app stopped heartbeating for
+    # LIVE_STALE_COMPLETE_MINUTES gets completed (the story-tray ring itself
+    # already drops after LIVE_HEARTBEAT_TTL_SECONDS without needing this).
+    "tuitionclass-sweep-stale-live-sessions": {
+        "task": "tuitionclass.sweep_stale_live_sessions",
+        "schedule": crontab(minute="*"),
+    },
+    # X12 L-C - reminders for scheduled standalone lives ("starts in 15 minutes").
+    "tuitionclass-send-standalone-live-reminders": {
+        "task": "tuitionclass.send_standalone_live_reminders",
+        "schedule": crontab(minute="*"),
     },
     "tuitionclass-send-due-reminders": {
         "task": "tuitionclass.send_due_reminders",
@@ -1409,6 +2505,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "tuitionclass.cleanup_stale_chunked_uploads",
         "schedule": crontab(minute=0),
     },
+    # X12 (auto recording): "Save as lecture / reel / post" jobs (tuitionclass/recording_save.py). Re-queues a clip whose
+    # Celery message was lost and fails one stuck pending / processing for hours, so the save screen never spins for ever.
+    "tuitionclass-sweep-recording-saves": {
+        "task": "tuitionclass.sweep_recording_saves",
+        "schedule": crontab(minute="*/10"),
+    },
     # NOTE (fix — same "written but never registered" bug the
     # refresh-stale-enrolled-counts entry above already had to fix once):
     # tasks.reconcile_stuck_coin_purchases (Pass 7) exists specifically to
@@ -1469,6 +2571,23 @@ CELERY_BEAT_SCHEDULE = {
         # zaroori hai (query sasti hai - is_scheduled+scheduled_for pe
         # composite index already model pe hai, aur bounded 200/run batch).
         "schedule": crontab(minute="*"),
+    },
+    # 🔥 C1 — stuck/ghost calls sweeper (ring timeout server-side). 30s
+    # cadence: client ring timeout 30s hai, server 45s pe safety-net.
+    "message-sweep-stale-calls": {
+        "task": "message.sweep_stale_calls",
+        "schedule": 30.0,
+    },
+    # X1 — call SLO fast-burn check (message/call_ops.py): connect-success % < CALL_SLO over the last 15 min =>
+    # one ERROR log + Sentry message. Cheap (a few cache reads).
+    "message-call-slo-watch": {
+        "task": "message.call_slo_watch",
+        "schedule": crontab(minute="*/5"),
+    },
+    # S5 — study room: leave webhook kho gaya ho to khule presence intervals band (minutes attendance me).
+    "message-sweep-stale-study-presence": {
+        "task": "message.sweep_stale_study_presence",
+        "schedule": crontab(minute="*/10"),
     },
     "message-cleanup-expired-messages": {
         "task": "message.cleanup_expired_messages",
@@ -1536,6 +2655,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "message.expire_stale_parent_access",
         "schedule": crontab(hour=4, minute=0),
     },
+    # N3 — FCM device-token hygiene (stale 60d / lagataar fail / orphan session / per-user 10+). Roz 04:30, DB-only, idempotent.
+    "message-cleanup-stale-device-tokens": {
+        "task": "message.cleanup_stale_device_tokens",
+        "schedule": crontab(hour=4, minute=30),
+    },
     # 🔧 TASK 28 — followers_count/following_count drift reconciliation.
     #
     # Both counters are updated atomically per-operation today
@@ -1559,6 +2683,11 @@ CELERY_BEAT_SCHEDULE = {
     # never emit signals (QuerySet.update()/bulk_create()/raw SQL), so it
     # was moved from every-6-hours to Sunday 03:15. If its log line ever
     # reports corrections, some code path is bypassing the signals.
+    # P9 - profile visit rows older than PROFILE_VISIT_RETENTION_DAYS (user_profile/profile_insights.py), daily.
+    "user-profile-prune-profile-visits": {
+        "task": "user_profile.tasks.prune_old_profile_visits",
+        "schedule": crontab(hour=3, minute=40),
+    },
     "user-profile-reconcile-follow-counts": {
         "task": "user_profile.tasks.reconcile_follow_counts",
         "schedule": crontab(hour=3, minute=15, day_of_week=0),
@@ -1574,11 +2703,67 @@ CELERY_BEAT_SCHEDULE = {
     # window; same "no state of its own, occasional extra run is
     # harmless" reasoning campus's own daily reminder jobs already rely
     # on above.
+    #
+    # T2.9 — NOW every 30 minutes from STREAK_REMINDER_HOUR to 23:30 (not one
+    # shot at the hour): `core.tasks.send_streak_at_risk_reminders` writes the
+    # bell row once per user per day and retries the PUSH each run while the
+    # user is in quiet hours / DND, so a user whose quiet window ends at 22:30
+    # still gets it — and nobody is pushed during their quiet hours, with push
+    # off, or with the type muted. The task is idempotent per user per day.
+    # H18 - study digest: hourly; each user is handled once per local day at their own hour (content_digest_hour in
+    # their timezone), and pushes held back by quiet hours / DND are retried every run. Tune / disable with
+    # settings.CONTENT_DIGEST (see core/content_digest.py DEFAULTS).
+    "core-send-content-digests": {
+        "task": "core.send_content_digests",
+        "schedule": crontab(minute=7),
+    },
+    # S8 - the student's own study reminder (Settings > Learning): every 15 min, each user is handled once per local
+    # day inside a 3 h window after the time they chose; quiet-hours pushes are retried every run (core/study_reminders.py).
+    "core-send-study-reminders": {
+        "task": "core.send_study_reminders",
+        "schedule": crontab(minute="*/15"),
+    },
+    # N5 - low-priority roll-up (likes / reactions / "new post from ..." -> one summary push per user per day).
+    # N8 - drop channel send-log rows older than 35 days (the caps only look back 24 h).
+    "core-prune-channel-send-log": {
+        "task": "core.prune_channel_send_log",
+        "schedule": crontab(hour=3, minute=15),
+    },
+    # N10 - push SLO watch (delivery success %, unexplained skips) every 10 minutes.
+    "core-notification-slo-watch": {
+        "task": "core.notification_slo_watch",
+        "schedule": crontab(minute="*/10"),
+    },
+    # N9 - notification history 30 days (+ expired class / chat / post mutes).
+    "core-prune-notification-history": {
+        "task": "core.prune_notification_history",
+        "schedule": crontab(hour=3, minute=20),
+    },
+    "core-send-notification-rollups": {
+        "task": "core.send_notification_rollups",
+        "schedule": crontab(minute=37),
+    },
     "user-profile-send-streak-risk-reminders": {
-        "task": "user_profile.tasks.send_streak_risk_reminders",
+        "task": "core.send_streak_at_risk_reminders",
         "schedule": crontab(
-            hour=int(os.environ.get("STREAK_REMINDER_HOUR", 22)), minute=0,
+            # P-F3_F4: smart timing can move a user's warning before STREAK_REMINDER_HOUR (never before HABIT_LOOP earliest_hour)
+            hour=f"{min(STREAK_REMINDER_HOUR, HABIT_LOOP['earliest_hour']) if HABIT_LOOP['smart_timing'] else STREAK_REMINDER_HOUR}-23",
+            minute="*/30",
         ),
+    },
+    # P-F6 - AI quality loop: prune old call logs daily; cost-guard budget alert every 30 min (no-op while AI_DAILY_BUDGET_USD=0).
+    # P-F5 - social learning (social_learning/tasks.py)
+    "social-season-tick": {"task": "social_learning.season_tick", "schedule": crontab(minute="*/15")},
+    "social-pomodoro-sweep": {"task": "social_learning.pomodoro_sweep", "schedule": crontab(minute="*/10")},
+    "social-partner-daily": {"task": "social_learning.partner_daily", "schedule": crontab(hour=0, minute=20)},
+    "social-partner-evening": {"task": "social_learning.partner_evening", "schedule": crontab(hour=19, minute=30)},
+    "aiquality-prune-logs": {"task": "aiquality.prune_logs", "schedule": crontab(hour=3, minute=40)},
+    "aiquality-check-budget": {"task": "aiquality.check_budget", "schedule": crontab(minute="*/30")},
+    # P-F3_F4 - revision-deck reminder (core/habit_loop.py): every 15 min, each eligible user at most once per
+    # HABIT_REVISION_EVERY_DAYS days inside a 3 h window after their local HABIT_REVISION_HOUR.
+    "core-send-revision-reminders": {
+        "task": "core.send_revision_reminders",
+        "schedule": crontab(minute="*/15"),
     },
     # TASK G2 (growth_and_feature_tasks.md — recap screen) —
     # user_profile.tasks.generate_weekly_recaps. Sunday only (day_of_week=0
@@ -1588,6 +2773,13 @@ CELERY_BEAT_SCHEDULE = {
     # (update_or_create in recap.py), so a re-run within the same week just
     # recomputes and re-notifies, which is harmless but pointless to do on
     # a tighter schedule.
+    # H15 — post.creator_feedback.send_creator_feedback: weekly "N read / M saved / K helpful" to authors of
+    # Notes / Resource posts. Monday morning; idempotent (skips an author who got one in the last 6 days).
+    "post-creator-feedback-weekly": {
+        "task": "post.creator_feedback.send_creator_feedback",
+        "schedule": crontab(hour=9, minute=0, day_of_week=1),
+    },
+
     "user-profile-generate-weekly-recaps": {
         "task": "user_profile.tasks.generate_weekly_recaps",
         "schedule": crontab(
@@ -1611,9 +2803,41 @@ CELERY_BEAT_SCHEDULE = {
     # produces) — read directly by send_fee_due_reminders() at call
     # time, same "settings knob, not a code constant" pattern this
     # file already uses elsewhere (e.g. CAMPUS_ATTENDANCE_STREAK_DAYS).
+    # FINANCE — accrue late fines first so the 08:00 reminder below quotes the right balance.
+    "campus-accrue-late-fines": {
+        "task": "campus.tasks.accrue_late_fines",
+        "schedule": crontab(hour=7, minute=30),
+    },
     "campus-send-fee-due-reminders": {
         "task": "campus.tasks.send_fee_due_reminders",
         "schedule": crontab(hour=8, minute=0),
+    },
+    # P-F14 — weekly parent report (attendance + marks trend + fees): Sunday 18:00 (CELERY_TIMEZONE). One send per
+    # parent per ISO week, so a re-run is harmless. Kill switch: CAMPUS_PARENT_WEEKLY_ENABLED=false.
+    "campus-send-parent-weekly-summaries": {
+        "task": "campus.tasks.send_parent_weekly_summaries",
+        "schedule": crontab(hour=int(os.environ.get("CAMPUS_PARENT_WEEKLY_HOUR", 18)), minute=0, day_of_week=0),
+    },
+    # SAFETY — nightly campus backups (a campus is only backed up when it has none newer than
+    # CAMPUS_BACKUP_SCHEDULE_DAYS) and a daily nudge for data-deletion requests past their due date.
+    "campus-run-scheduled-backups": {
+        "task": "campus.tasks.run_scheduled_campus_backups",
+        "schedule": crontab(hour=2, minute=30),
+    },
+    # ADMISSION — one push per campus whose admins have follow-ups due.
+    "campus-admission-followup-digest": {
+        "task": "campus.tasks.send_admission_followup_digest",
+        "schedule": crontab(hour=9, minute=30),
+    },
+    "campus-warn-overdue-deletion-requests": {
+        "task": "campus.tasks.warn_overdue_deletion_requests",
+        "schedule": crontab(hour=9, minute=0),
+    },
+    # COMMUNICATION — publish scheduled notices whose time has come (claims each one atomically, so
+    # overlapping runs / a manual "send now" can never push a notice twice).
+    "campus-publish-due-notices": {
+        "task": "campus.tasks.publish_due_notices",
+        "schedule": crontab(minute="*"),
     },
     # 🔧 FIX (this pass) — same "written but never registered" bug class
     # this file has already had to fix repeatedly for tuitionclass/message/
@@ -1633,6 +2857,17 @@ CELERY_BEAT_SCHEDULE = {
         # fee-reminder job above so both don't hit the DB in the same
         # minute.
         "schedule": crontab(hour=8, minute=30),
+    },
+    # PUSH — platform-wide assignment-due sweep (personal + tuitionclass
+    # assignments; campus-sourced ones are excluded inside the sweep because
+    # campus-send-assigments-due-reminders above owns them). This function +
+    # management command existed but nothing ever scheduled them, so no
+    # assignment reminder was ever sent. Idempotent per (submission, due_date)
+    # via a cache marker, so an extra run is harmless. Staggered after the
+    # two campus jobs above.
+    "assignments-send-due-reminders": {
+        "task": "assignments.send_due_reminders",
+        "schedule": crontab(hour=8, minute=45),
     },
     # 🔧 FIX (this pass) — same "written but never registered" bug this
     # file already had to fix for check_low_attendance/
@@ -1669,6 +2904,39 @@ CELERY_BEAT_SCHEDULE = {
     "campus-prune-timetable-reminder-logs": {
         "task": "campus.tasks.prune_timetable_reminder_logs",
         "schedule": crontab(hour=3, minute=15),
+    },
+    # Live class (one-tap go-live + auto attendance): every minute — auto-end a
+    # LIVE session whose teacher app went silent (CAMPUS_LIVE_STALE_MINUTES, 5),
+    # force-end anything older than CAMPUS_LIVE_MAX_HOURS (6) and rebuild
+    # attendance that never completed. Idempotent (see campus/live_class.py).
+    "campus-sweep-live-sessions": {
+        "task": "campus.tasks.sweep_live_sessions",
+        "schedule": crontab(minute="*"),
+    },
+    # Homework Diary — "homework due tomorrow" push to the section's students
+    # and parents. Once a day, early evening (before dinner / study time).
+    # Each entry is claimed atomically (`due_reminder_sent_at`), so a re-run
+    # or an overlapping worker never double-sends. Days ahead:
+    # CAMPUS_HOMEWORK_DIARY_REMINDER_DAYS_BEFORE (default 1) — read at task
+    # call time; the crontab hour itself needs a beat restart to change.
+    "campus-send-homework-diary-due-reminders": {
+        "task": "campus.tasks.send_homework_diary_due_reminders",
+        "schedule": crontab(hour=17, minute=0),
+    },
+    # Parents se baat — PTM "tomorrow / in an hour" reminders. Every 5 minutes;
+    # each reminder is claimed atomically (`PTMBooking.reminder_*_sent_at`), so
+    # an overlapping worker or a re-run never double-sends.
+    "campus-send-ptm-reminders": {
+        "task": "campus.tasks.send_ptm_reminders",
+        "schedule": crontab(minute="*/5"),
+    },
+    # Parents se baat — one "parent messages waiting" push per teacher when the
+    # campus chat window opens. Every 10 minutes; the task only acts on the tick
+    # in which a campus's chat_start_time falls (campus.tasks.
+    # PARENT_CHAT_DIGEST_TICK_MINUTES must match this 10).
+    "campus-send-parent-chat-morning-digest": {
+        "task": "campus.tasks.send_parent_chat_morning_digest",
+        "schedule": crontab(minute="*/10"),
     },
     # 🔴 REMOVED (this pass) — "campus-rollover-session" and
     # "campus-refresh-analytics-snapshot" were both registered here with
@@ -1719,6 +2987,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "testseries.tasks.send_pending_check_reminders",
         "schedule": crontab(hour=9, minute=0),
     },
+    # N6 - "test closing soon" push for IN_PROGRESS attempts: 24h and 1h before deadline_at (bands + dedupe in the task).
+    "testseries-send-test-deadline-reminders": {
+        "task": "testseries.send_test_deadline_reminders",
+        "schedule": crontab(minute="*/10"),
+    },
     # Server-side timer: closes attempts whose deadline + grace passed and
     # that the student never submitted (autosave draft is graded).
     "testseries-auto-submit-expired-attempts": {
@@ -1756,9 +3029,56 @@ CELERY_BEAT_SCHEDULE = {
     # C1-BE — post.tasks.prune_old_post_events: deletes PostEvent analytics
     # rows older than 30 days, in batches. Daily, off-peak (03:15, just before
     # the 03:30 leaderboard job above so the two heavy jobs never overlap).
+    # Scheduled posts go live (post.tasks.publish_scheduled_posts) - every minute.
+    "post-publish-scheduled": {
+        "task": "post.tasks.publish_scheduled_posts",
+        "schedule": 60.0,
+    },
+    # Doubt post upgrade: unsolved doubt bounties go back to the asker after DOUBT_BOUNTY_EXPIRY_DAYS (hourly).
+    "post-refund-doubt-bounties": {
+        "task": "post.tasks.refund_stale_doubt_bounties",
+        "schedule": 3600.0,
+    },
+    # H20 - chunks of abandoned uploads, old idempotency records, old deleted drafts. Daily 03:40 (off-peak).
+    "post-purge-stale-uploads": {
+        "task": "post.tasks.purge_stale_uploads",
+        "schedule": crontab(hour=3, minute=40),
+    },
+    # H23 - duplicate-content memory of the publish gate (post/publish_gate.py). Daily 03:50.
+    "post-purge-publish-fingerprints": {
+        "task": "post.tasks.purge_publish_fingerprints",
+        "schedule": crontab(hour=3, minute=50),
+    },
+    # Video lectures (round 4): collect finished speech-to-text jobs of auto captions (post/tasks.py), every 2 minutes.
+    "post-poll-video-captions": {
+        "task": "post.tasks.poll_video_caption_jobs",
+        "schedule": 120.0,
+    },
+    # Failed / stuck video conversions are retried with a back-off (post/tasks.py retry_failed_video_processing).
+    "post-retry-failed-video-processing": {
+        "task": "post.tasks.retry_failed_video_processing",
+        "schedule": 600.0,
+    },
     "post-prune-old-events": {
         "task": "post.tasks.prune_old_post_events",
         "schedule": crontab(hour=3, minute=15),
+    },
+    # H10 - the other two write-heavy feed tables (post/feed_retention.py): "seen" markers older than the seen
+    # window (+7 d), then PII (ip / user agent) of old PostView rows. Staggered between the event prune (03:15)
+    # and the leaderboard job (03:30); each run is time-budgeted (FEED_RETENTION["max_seconds"]).
+    "post-prune-seen-views": {
+        "task": "post.tasks.prune_seen_post_views",
+        "schedule": crontab(hour=3, minute=20),
+    },
+    "post-scrub-view-pii": {
+        "task": "post.tasks.scrub_post_view_pii",
+        "schedule": crontab(hour=3, minute=25),
+    },
+    # H10 - feed SLO fast-burn check (post/feed_ops.py): availability / p95 / Redis-down / fallback-failed over the
+    # last 15 min. Cheap (a few cache reads); one ERROR + Sentry message when something is wrong.
+    "post-feed-slo-watch": {
+        "task": "post.tasks.feed_slo_watch",
+        "schedule": crontab(minute="*/5"),
     },
     # T1 item 9 — post.tasks.feed_daily_metrics: yesterday's feed summary (impressions, CTR, dwell,
     # sessions, show-fewer rate, diversity, per A/B variant) logged + cached. 02:45 = BEFORE the 03:15
@@ -1766,6 +3086,18 @@ CELERY_BEAT_SCHEDULE = {
     "post-feed-daily-metrics": {
         "task": "post.tasks.feed_daily_metrics",
         "schedule": crontab(hour=2, minute=45),
+    },
+    # F2 - stories. Expired stories are already invisible live (every listing filters expires_at__gt=now); this sweep
+    # soft-deletes them (batch UPDATE) so they leave the live set / the active-cap count and land in the owner's
+    # archive. Every 10 min keeps a story's tail short; the weekly purge removes rows soft-deleted > 30 days ago
+    # (stories in a Highlight are never purged). Both tasks are idempotent.
+    "post-expire-old-stories": {
+        "task": "post.tasks.expire_old_stories",
+        "schedule": crontab(minute="*/10"),
+    },
+    "post-purge-ancient-stories": {
+        "task": "post.tasks.hard_delete_ancient_stories",
+        "schedule": crontab(hour=3, minute=5, day_of_week=0),  # Sunday 03:05, off-peak
     },
     # --- copyrights app automations (copyrights/tasks.py) ---
     "copyrights-auto-restore-counter-notices": {
@@ -1783,6 +3115,26 @@ CELERY_BEAT_SCHEDULE = {
     "copyrights-expire-needs-info": {
         "task": "copyrights.expire_needs_info",
         "schedule": 12 * 3600.0,
+    },
+    "child-safety-warn-overdue-cases": {
+        "task": "user_profile.warn_overdue_child_safety_cases",
+        "schedule": 3600.0,  # hourly: child-safety case still open after its SLA -> warn staff
+    },
+    "payment-reconcile": {
+        "task": "user_profile.reconcile_payments",
+        "schedule": 900.0,  # P-G2: every 15 min - settle PENDING coin / fee orders whose webhook was lost
+    },
+    "report-sla-sweep": {
+        "task": "user_profile.sweep_report_sla",
+        "schedule": 3600.0,  # hourly: open user reports past their review deadline -> mark breached + alert staff once
+    },
+    "copyrights-warn-due-legal-orders": {
+        "task": "copyrights.warn_due_legal_orders",
+        "schedule": 3600.0,  # hourly: court / government order deadline warnings
+    },
+    "copyrights-purge-personal-data": {
+        "task": "copyrights.purge_personal_data",
+        "schedule": crontab(hour=4, minute=0),  # daily, off-peak: DPDP Act - erase claimant data past its retention period
     },
 }
 
@@ -1820,7 +3172,8 @@ GROUP_SOFT_DELETE_GRACE_DAYS = int(os.getenv("GROUP_SOFT_DELETE_GRACE_DAYS", "7"
 # any doc reviewed so far that they were considered or excluded on
 # purpose; left out rather than guessed onto this list. Add them in a
 # future pass once that's an explicit decision, not a default.
-CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus", "support"]
+# NOTE: "assigments" is the app LABEL (the package dir is now `assignments/`, T3.10).
+CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus", "support", "doubts"]
 
 # Escape hatches for the same command — intentionally left empty. Per
 # §11's own guidance, only add an entry here once a specific check has
@@ -1829,6 +3182,13 @@ CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus
 CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
 CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
 CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
+
+# T3.5 (R10) — acknowledged stale-comment WARNINGS (fingerprints, not line numbers).
+# `check_config_drift --strict` fails on anything NOT listed there, so the backlog
+# can't grow while it is worked down. Errors (ALLOWED_HOSTS wildcard, DEBUG) are
+# never baselined. Regenerate after cleaning up comments:
+#   python manage.py check_config_drift --write-baseline config_drift_baseline.json
+CONFIG_DRIFT_BASELINE = BASE_DIR / "config_drift_baseline.json"
 
 
 # =====================================================================
@@ -1840,15 +3200,17 @@ CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
 # Who may charge for a test series.
 #   mode "required"  -> must be paid   "optional" -> creator chooses
 #         "forbidden" -> always free
-# Product rule: a test series a user creates on their own (individual) is
-# PAID; a campus one AND a tuition-class one are always FREE (TASK 9.1 — this is
-# hard-coded in testseries/policy.py::ALWAYS_FREE_SOURCES, so the "campus" /
-# "tuitionclass" entries below cannot make them paid). Flip the individual mode
-# to change that one — e.g. TESTSERIES_INDIVIDUAL_PRICING=optional lets
-# individuals publish free tests.
+# Product rule (T3, create-flow upgrade): a test series a user creates on their own
+# (individual) may be FREE or PAID - the creator chooses in the app (default mode
+# "optional"; a paid one still needs price >= TESTSERIES_MIN_PRICE_COINS). A campus
+# one AND a tuition-class one are always FREE (TASK 9.1 — this is hard-coded in
+# testseries/policy.py::ALWAYS_FREE_SOURCES, so the "campus" / "tuitionclass"
+# entries below cannot make them paid). To go back to "individuals must charge" set
+# TESTSERIES_INDIVIDUAL_PRICING=required (the app then shows the server's message
+# next to the Free/Paid switch).
 TESTSERIES_PRICING_POLICY = {
     "individual": {
-        "mode": os.getenv("TESTSERIES_INDIVIDUAL_PRICING", "required"),
+        "mode": os.getenv("TESTSERIES_INDIVIDUAL_PRICING", "optional"),
         "min_coins": int(os.getenv("TESTSERIES_MIN_PRICE_COINS", "1")),
         "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
     },
@@ -1908,7 +3270,7 @@ TESTSERIES_LIVE_OVERRUN_MINUTES = int(os.getenv("TESTSERIES_LIVE_OVERRUN_MINUTES
 
 
 # =====================================================================
-# ASSIGNMENTS — PUBLISHING (assigments/views.py: publish / explore / join)
+# ASSIGNMENTS — PUBLISHING (assignments/views.py: publish / explore / join)
 # =====================================================================
 # Public share link of a published assignment / project, e.g.
 # "https://learnscroll.app/a/{slug}". Empty = the API preview URL
@@ -2095,6 +3457,82 @@ FEED_SNAPSHOT = {
 }
 
 # =====================================================================
+# H10 - FEED RESILIENCE / SLO / RETENTION
+# FEED_RESILIENCE (post/feed_resilience.py): GET /post/feed/ never 500s because ranking, Redis or a slow query broke.
+#   enabled              master switch (env FEED_RESILIENCE_ENABLED=0/1); off -> errors propagate as before
+#   pool_timeout_ms      PostgreSQL statement_timeout around the ranking queries (env FEED_POOL_TIMEOUT_MS, 0 = off)
+#   lock_*               cache-stampede lock: parallel page-1 calls of one user build the pools once; a follower waits at
+#                        most lock_wait_seconds for the builder, then builds itself (env FEED_LOCK_ENABLED=0/1)
+#   fallback_*           the simple feed served when ranking fails: newest posts of followed accounts + recent public
+# FEED_SLO (post/feed_ops.py): availability >= 99.5 %, p95 <= 800 ms; checked every 5 min over the last 15 min
+#   (alert_window_minutes) once there are alert_min_requests requests (celery beat "post-feed-slo-watch").
+# FEED_OPS_SCRAPE_TOKEN: bearer token Prometheus uses on GET /post/feed/ops/?format=prom (staff users may also read it).
+# FEED_RETENTION (post/feed_retention.py): PostEvent / PostView(seen) / PostView PII lifetime, see that docstring.
+# =====================================================================
+FEED_RESILIENCE = {
+    "enabled": os.getenv("FEED_RESILIENCE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "pool_timeout_ms": _env_int("FEED_POOL_TIMEOUT_MS", 4000),
+    "lock_enabled": os.getenv("FEED_LOCK_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "lock_ttl_seconds": _env_int("FEED_LOCK_TTL_SECONDS", 20),
+    "lock_wait_seconds": _env_float("FEED_LOCK_WAIT_SECONDS", 3.0),
+}
+FEED_SLO = {
+    "availability_pct": _env_float("FEED_SLO_AVAILABILITY_PCT", 99.5),
+    "p95_ms": _env_int("FEED_SLO_P95_MS", 800),
+    "alert_window_minutes": _env_int("FEED_SLO_ALERT_WINDOW_MINUTES", 15),
+    "alert_min_requests": _env_int("FEED_SLO_ALERT_MIN_REQUESTS", 50),
+}
+FEED_OPS_SCRAPE_TOKEN = os.getenv("FEED_OPS_SCRAPE_TOKEN", "")
+# N10 - notification observability (core/notification_ops.py). delivery_success_pct = delivered / (delivered + failed),
+# dead tokens (uninstalled apps) excluded; judged only when the window has >= alert_min_attempts pushes (beat
+# "core-notification-slo-watch" every 10 min). NOTIFICATION_OPS_SCRAPE_TOKEN = bearer token for
+# GET /core/notification-ops/?format=prom (empty => FEED_OPS_SCRAPE_TOKEN is used).
+NOTIFICATION_SLO = {
+    "delivery_success_pct": _env_float("NOTIFICATION_SLO_DELIVERY_SUCCESS_PCT", 97.0),
+    "alert_window_minutes": _env_int("NOTIFICATION_SLO_ALERT_WINDOW_MINUTES", 15),
+    "alert_min_attempts": _env_int("NOTIFICATION_SLO_ALERT_MIN_ATTEMPTS", 50),
+    "max_not_allowed_pct": _env_float("NOTIFICATION_SLO_MAX_UNEXPLAINED_SKIP_PCT", 5.0),
+}
+NOTIFICATION_OPS_SCRAPE_TOKEN = os.getenv("NOTIFICATION_OPS_SCRAPE_TOKEN", "")
+# X1 — call observability (message/call_ops.py). connect_success_pct: alert when LOWER over `alert_window_minutes`
+# with at least `alert_min_attempts` connect attempts (celery beat "message-call-slo-watch").
+# CALL_OPS_SCRAPE_TOKEN: bearer token for GET /message/calls/ops/?format=prom (empty => FEED_OPS_SCRAPE_TOKEN is used).
+CALL_SLO = {
+    "connect_success_pct": _env_float("CALL_SLO_CONNECT_SUCCESS_PCT", 95.0),
+    "alert_window_minutes": _env_int("CALL_SLO_ALERT_WINDOW_MINUTES", 15),
+    "alert_min_attempts": _env_int("CALL_SLO_ALERT_MIN_ATTEMPTS", 20),
+}
+CALL_OPS_SCRAPE_TOKEN = os.getenv("CALL_OPS_SCRAPE_TOKEN", "")
+
+# X3 - privacy-safe product analytics + A/B experiments (core/product_analytics.py, core/experiments.py).
+# * Aggregate counters only (no user id / device id / free text), counted ONLY for users whose latest `analytics`
+#   consent (S5 Data & privacy switch) is granted. REQUIRE_OPT_IN=True => "never asked" is NOT collected (DPDP).
+# * Minors are never counted and never put in an experiment unless the *_INCLUDE_MINORS flags are switched on.
+# * PRODUCT_ANALYTICS_SCRAPE_TOKEN: bearer for GET /core/analytics/product/?format=prom (empty => FEED_OPS_SCRAPE_TOKEN).
+# * EXPERIMENTS: per-key overrides merged over core.experiments.DEFAULT_EXPERIMENTS, e.g.
+#     EXPERIMENTS = {"notif_copy_streak_at_risk_v1": {"enabled": True, "rollout_pct": 20, "salt": "r2"}}
+#   or just env EXPERIMENTS_ON="notif_copy_streak_at_risk_v1". EXPERIMENTS_ENABLED=0 stops every experiment at once.
+PRODUCT_ANALYTICS_ENABLED = os.getenv("PRODUCT_ANALYTICS_ENABLED", "1").lower() in ("1", "true", "yes")
+PRODUCT_ANALYTICS_REQUIRE_OPT_IN = os.getenv("PRODUCT_ANALYTICS_REQUIRE_OPT_IN", "1").lower() in ("1", "true", "yes")
+PRODUCT_ANALYTICS_INCLUDE_MINORS = False
+PRODUCT_ANALYTICS_SCRAPE_TOKEN = os.getenv("PRODUCT_ANALYTICS_SCRAPE_TOKEN", "")
+EXPERIMENTS_ENABLED = os.getenv("EXPERIMENTS_ENABLED", "1").lower() in ("1", "true", "yes")
+EXPERIMENTS_INCLUDE_MINORS = False
+EXPERIMENTS = {}
+FEED_RETENTION = {
+    "post_event_days": _env_int("FEED_RETENTION_POST_EVENT_DAYS", 30),
+    "seen_days": _env_int("FEED_RETENTION_SEEN_DAYS", 60),
+    "post_view_pii_days": _env_int("FEED_RETENTION_POST_VIEW_PII_DAYS", 90),
+    "batch_size": _env_int("FEED_RETENTION_BATCH_SIZE", 5000),
+    "max_seconds": _env_int("FEED_RETENTION_MAX_SECONDS", 900),
+}
+
+# H2 (loadtest/README.md): staging-only counters for the feed load test - Redis hit-rate of the feed caches and
+# SQL statements per feed page (post/feed_stats.py). Wraps every feed request in query capture, so keep it OFF
+# everywhere except the staging workers you are load-testing. Read with `manage.py feed_stats`.
+FEED_LOADTEST_STATS = os.getenv("FEED_LOADTEST_STATS", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# =====================================================================
 # FEED_REELS (vertical short-video feed: post/reels.py + post/reels_views.py)
 # GET /post/reels/  [?start=<post_id>] [?cursor=...]. One ranked pool built from
 # the Home pieces (engagement + video watch boost + velocity + interest + taste +
@@ -2115,6 +3553,9 @@ FEED_SNAPSHOT = {
 #                         row) and appended after the better reels; safety rules never loosen
 #                         (env REELS_FALLBACK=0/1, default on)
 #   min_pool              pool size below which the next tier is added (env REELS_MIN_POOL, default 10)
+#   include_own_last_tier small user base: when the pool is still < min_pool after every media tier,
+#                         the caller's OWN public videos are appended LAST (never ahead of other people's;
+#                         env REELS_INCLUDE_OWN_LAST_TIER=0/1, default on). Off = own reels are never served
 # Debug an empty feed: python manage.py reels_diagnose --user <name>
 # =====================================================================
 FEED_REELS = {
@@ -2127,6 +3568,7 @@ FEED_REELS = {
     "max_page_size": 30,
     "fallback": os.getenv("REELS_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off"),
     "min_pool": _env_int("REELS_MIN_POOL", 10),
+    "include_own_last_tier": os.getenv("REELS_INCLUDE_OWN_LAST_TIER", "1").strip().lower() not in ("0", "false", "no", "off"),
 }
 
 # ---------------------------------------------------------------------------
@@ -2238,7 +3680,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # REPORT_* = automation on user reports (user_profile/report_automation.py).
 # ---------------------------------------------------------------------------
 COPYRIGHT_AUTO_HOLD = os.getenv("COPYRIGHT_AUTO_HOLD", "true").lower() == "true"
-COPYRIGHT_COUNTER_WAIT_DAYS = int(os.getenv("COPYRIGHT_COUNTER_WAIT_DAYS", 10))
+COPYRIGHT_COUNTER_WAIT_DAYS = int(os.getenv("COPYRIGHT_COUNTER_WAIT_DAYS", 21))  # Copyright Act s.52(1)(c): 21 days - confirm with your lawyer
 COPYRIGHT_STRIKE_DAYS = int(os.getenv("COPYRIGHT_STRIKE_DAYS", 180))
 COPYRIGHT_RESTRICT_AT = int(os.getenv("COPYRIGHT_RESTRICT_AT", 2))
 COPYRIGHT_REVIEW_AT = int(os.getenv("COPYRIGHT_REVIEW_AT", 3))
@@ -2250,3 +3692,273 @@ COPYRIGHT_HIGH_REACH_FOLLOWERS = int(os.getenv("COPYRIGHT_HIGH_REACH_FOLLOWERS",
 REPORT_HOLD_THRESHOLD_SEVERE = int(os.getenv("REPORT_HOLD_THRESHOLD_SEVERE", 3))
 REPORT_HOLD_THRESHOLD_ANY = int(os.getenv("REPORT_HOLD_THRESHOLD_ANY", 8))
 REPORT_UNRELIABLE_DISMISSED = int(os.getenv("REPORT_UNRELIABLE_DISMISSED", 10))
+# --- brigading guard (user_profile/report_automation.analyse_reports) ---
+REPORT_NEW_ACCOUNT_DAYS = int(os.getenv("REPORT_NEW_ACCOUNT_DAYS", 3))
+REPORT_NEW_ACCOUNT_WEIGHT = float(os.getenv("REPORT_NEW_ACCOUNT_WEIGHT", 0.5))
+REPORT_PERSISTENT_DISMISSED = int(os.getenv("REPORT_PERSISTENT_DISMISSED", 2))
+REPORT_BURST_MIN = int(os.getenv("REPORT_BURST_MIN", 10))
+REPORT_BURST_MINUTES = int(os.getenv("REPORT_BURST_MINUTES", 10))
+REPORT_NEW_SHARE = float(os.getenv("REPORT_NEW_SHARE", 0.7))
+REPORT_BRIGADE_MODE = os.getenv("REPORT_BRIGADE_MODE", "review")  # "review" or "off"
+# --- review deadlines for reports (user_profile/report_sla.py), hours ---
+REPORT_SLA_HOURS_SEVERE = int(os.getenv("REPORT_SLA_HOURS_SEVERE", 24))   # nudity / violence / self-harm / hate / harassment + anything auto-held
+REPORT_SLA_HOURS_NORMAL = int(os.getenv("REPORT_SLA_HOURS_NORMAL", 72))
+REPORT_SLA_SOON_HOURS = int(os.getenv("REPORT_SLA_SOON_HOURS", 4))        # "due soon" bucket in the staff summary
+# --- server-side text / media filters on user content (P-F15, point 3) ---
+#   COMMENT_TEXT_ACTION  what happens to a comment with profanity / adult content:
+#                          "hold" (default) the comment is created but hidden + the author gets a notice with an Appeal button
+#                          "flag" only queue it for a moderator (the old behaviour)   "off" no screening of comments
+#   DM_NSFW_ACTION       adult-content text in a DM: "flag" (default, never hides a private message) or "off"
+#   MEDIA_NSFW_PROVIDER  optional dotted path "pkg.module.func": func(name, file=None, path=None) -> {"nsfw": True, "score": 0.97,
+#                          "label": "porn"} | None. Without it nothing is held on a guess (image bytes are not decoded here).
+#   MEDIA_NSFW_ACTION    "hold" (default: provider says nsfw -> post held + owner notice + appeal) | "flag" | "off"
+#   MEDIA_NSFW_MIN_SCORE a provider answer below this score is only flagged, never held (default 0.85)
+COMMENT_TEXT_ACTION = os.getenv("COMMENT_TEXT_ACTION", "hold").lower()
+DM_NSFW_ACTION = os.getenv("DM_NSFW_ACTION", "flag").lower()
+MEDIA_NSFW_PROVIDER = os.getenv("MEDIA_NSFW_PROVIDER", "")
+MEDIA_NSFW_ACTION = os.getenv("MEDIA_NSFW_ACTION", "hold").lower()
+MEDIA_NSFW_MIN_SCORE = float(os.getenv("MEDIA_NSFW_MIN_SCORE", 0.85))
+# --- appeals (user_profile/appeals.py) ---
+APPEALS_PER_DAY = int(os.getenv("APPEALS_PER_DAY", 5))
+# --- child safety (user_profile/child_safety.py) - confirm the numbers with your lawyer ---
+CHILD_SAFETY_SLA_HOURS = int(os.getenv("CHILD_SAFETY_SLA_HOURS", 24))
+CHILD_SAFETY_PRESERVE_DAYS = int(os.getenv("CHILD_SAFETY_PRESERVE_DAYS", 180))
+# --- strike / termination appeals (copyrights/appeals) ---
+COPYRIGHT_APPEAL_DAYS = int(os.getenv("COPYRIGHT_APPEAL_DAYS", 30))  # a strike can be appealed within this many days of issue
+COPYRIGHT_REAPPEAL_DAYS = int(os.getenv("COPYRIGHT_REAPPEAL_DAYS", 30))  # wait after a rejected termination appeal
+# --- DPDP Act 2023: how long a claimant's personal data is kept (copyrights/retention.py) ---
+#   s.8(7): erase once the purpose is over unless a law says keep. The Act gives NO fixed number for this - these are
+#   OUR defaults, confirm with your lawyer. 0 = never erase (not recommended: system check copyrights.W009).
+#   COPYRIGHT_PII_RETENTION_DAYS         closed claim (rejected / withdrawn / restored): name, e-mail, organisation,
+#                                        signature + proof files erased this many days after the last change
+#   COPYRIGHT_PII_RETENTION_UPHELD_DAYS  same for UPHELD / bad-faith claims (appeals, strike history, 3-year limitation)
+#   COPYRIGHT_EMAIL_CODE_RETENTION_DAYS  e-mail verification codes (never below COPYRIGHT_EMAIL_VERIFY_DAYS + 1)
+#   COPYRIGHT_PII_PURGE_BATCH            max claims erased per daily run
+COPYRIGHT_PII_RETENTION_DAYS = int(os.getenv("COPYRIGHT_PII_RETENTION_DAYS", 365))
+COPYRIGHT_PII_RETENTION_UPHELD_DAYS = int(os.getenv("COPYRIGHT_PII_RETENTION_UPHELD_DAYS", 1095))
+COPYRIGHT_EMAIL_CODE_RETENTION_DAYS = int(os.getenv("COPYRIGHT_EMAIL_CODE_RETENTION_DAYS", 45))
+COPYRIGHT_PII_PURGE_BATCH = int(os.getenv("COPYRIGHT_PII_PURGE_BATCH", 500))
+# --- moderator dashboard (copyrights/dashboard.py, /admin/copyrights/copyrightclaim/dashboard/) ---
+#   COPYRIGHT_DASH_SOON_HOURS  a review deadline with less than this many hours left shows as "due soon" (default 6)
+#   COPYRIGHT_DASH_PAGE_SIZE   rows per page (default 25, max 100). The deadline itself = COPYRIGHT_SLA_HOURS (48) /
+#                              COPYRIGHT_PUBLISHER_SLA_HOURS (12), the same numbers the Celery escalation uses.
+COPYRIGHT_DASH_SOON_HOURS = int(os.getenv("COPYRIGHT_DASH_SOON_HOURS", 6))
+COPYRIGHT_DASH_PAGE_SIZE = int(os.getenv("COPYRIGHT_DASH_PAGE_SIZE", 25))
+
+# ---------------------------------------------------------------------------
+# LEGAL / LAUNCH settings used by the public Copyright Policy page (copyrights/policy.py).
+# Set these in the production environment - `manage.py check` warns while they are empty.
+#   Grievance Officer (IT Rules 2021) - name, email are required; GRIEVANCE_ACK_HOURS (24) and
+#   GRIEVANCE_RESOLVE_DAYS (15) are only the numbers printed on the page - confirm with your lawyer.
+#   DMCA_AGENT_* : only if you have US users (optional).
+#   LEGAL_ORDERS_EMAIL : where courts / authorities send removal orders.
+#   LEGAL_ORDER_SLA_HOURS (36) / LEGAL_ORDER_WARN_HOURS (12): deadline of a legal order, warning window.
+# ---------------------------------------------------------------------------
+APP_NAME = os.getenv("APP_NAME", "LearnScroll")
+COMPANY_LEGAL_NAME = os.getenv("COMPANY_LEGAL_NAME", "")
+COPYRIGHT_EMAIL = os.getenv("COPYRIGHT_EMAIL", "")
+LEGAL_ORDERS_EMAIL = os.getenv("LEGAL_ORDERS_EMAIL", "")
+GRIEVANCE_OFFICER_NAME = os.getenv("GRIEVANCE_OFFICER_NAME", "")
+GRIEVANCE_OFFICER_DESIGNATION = os.getenv("GRIEVANCE_OFFICER_DESIGNATION", "Grievance Officer")
+GRIEVANCE_OFFICER_EMAIL = os.getenv("GRIEVANCE_OFFICER_EMAIL", "")
+GRIEVANCE_OFFICER_PHONE = os.getenv("GRIEVANCE_OFFICER_PHONE", "")
+GRIEVANCE_OFFICER_ADDRESS = os.getenv("GRIEVANCE_OFFICER_ADDRESS", "")
+GRIEVANCE_ACK_HOURS = int(os.getenv("GRIEVANCE_ACK_HOURS", 24))
+GRIEVANCE_RESOLVE_DAYS = int(os.getenv("GRIEVANCE_RESOLVE_DAYS", 15))
+DMCA_AGENT_NAME = os.getenv("DMCA_AGENT_NAME", "")
+DMCA_AGENT_EMAIL = os.getenv("DMCA_AGENT_EMAIL", "")
+DMCA_AGENT_PHONE = os.getenv("DMCA_AGENT_PHONE", "")
+DMCA_AGENT_ADDRESS = os.getenv("DMCA_AGENT_ADDRESS", "")
+LEGAL_ORDER_SLA_HOURS = int(os.getenv("LEGAL_ORDER_SLA_HOURS", 36))
+LEGAL_ORDER_WARN_HOURS = int(os.getenv("LEGAL_ORDER_WARN_HOURS", 12))
+
+# ---------------------------------------------------------------------------
+# COPYRIGHTS: claimant checks, media handling, notifications (copyrights/claimant.py, media.py, notify.py)
+#   COPYRIGHT_REQUIRE_EMAIL_VERIFICATION / _EMAIL_VERIFY_DAYS   notice address must be verified
+#   COPYRIGHT_NEW_ACCOUNT_DAYS, _NEW_CLAIMANT_PER_DAY            young accounts: 1 notice/day, never auto-held
+#   COPYRIGHT_AUTO_HOLDS_PER_DAY                                  brake on automatic holds per claimant
+#   COPYRIGHT_EVIDENCE_MAX_MB / _MAX_FILES                        proof uploads
+#   COPYRIGHT_MEDIA_ASYNC        heavy work (copy evidence, move files, hash uploads, e-mails) runs in Celery after commit
+#   COPYRIGHT_QUARANTINE_PREFIX  removed files are moved to <prefix>/<original name>
+#   COPYRIGHT_CLOUDFRONT_DISTRIBUTION_ID / COPYRIGHT_CDN_PATH_PREFIX  invalidate removed paths on the CDN
+#   COPYRIGHT_EMAILS_ENABLED, SITE_URL                            e-mail notices (+ link in the footer)
+# ---------------------------------------------------------------------------
+COPYRIGHT_REQUIRE_EMAIL_VERIFICATION = os.getenv("COPYRIGHT_REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
+COPYRIGHT_EMAIL_VERIFY_DAYS = int(os.getenv("COPYRIGHT_EMAIL_VERIFY_DAYS", 30))
+COPYRIGHT_NEW_ACCOUNT_DAYS = int(os.getenv("COPYRIGHT_NEW_ACCOUNT_DAYS", 7))
+COPYRIGHT_NEW_CLAIMANT_PER_DAY = int(os.getenv("COPYRIGHT_NEW_CLAIMANT_PER_DAY", 1))
+COPYRIGHT_AUTO_HOLDS_PER_DAY = int(os.getenv("COPYRIGHT_AUTO_HOLDS_PER_DAY", 3))
+# Trusted tiers (TrustedClaimant): "verified" = held at once; "publisher" = fast track (queue priority HIGH,
+# shorter review deadline, higher limits). Caps stop a hijacked publisher account from hiding the platform (0 = no cap).
+COPYRIGHT_TRUSTED_HOLDS_PER_DAY = int(os.getenv("COPYRIGHT_TRUSTED_HOLDS_PER_DAY", 50))
+COPYRIGHT_PUBLISHER_HOLDS_PER_DAY = int(os.getenv("COPYRIGHT_PUBLISHER_HOLDS_PER_DAY", 200))
+COPYRIGHT_PUBLISHER_CLAIMS_PER_DAY = int(os.getenv("COPYRIGHT_PUBLISHER_CLAIMS_PER_DAY", 100))
+COPYRIGHT_PUBLISHER_SLA_HOURS = int(os.getenv("COPYRIGHT_PUBLISHER_SLA_HOURS", 12))
+# Public transparency report (copyrights/transparency.py): GET /copyright/transparency/ and /legal/transparency-report/.
+# Counts only (claims, removals, restored, counter-notices, strikes, appeals, court orders). false = the public
+# endpoints answer 404 (the management command copyright_transparency_report still works).
+COPYRIGHT_TRANSPARENCY_PUBLIC = os.getenv("COPYRIGHT_TRANSPARENCY_PUBLIC", "true").lower() == "true"
+COPYRIGHT_TRANSPARENCY_CACHE_SECONDS = int(os.getenv("COPYRIGHT_TRANSPARENCY_CACHE_SECONDS", 600))
+COPYRIGHT_TRANSPARENCY_DEFAULT_DAYS = int(os.getenv("COPYRIGHT_TRANSPARENCY_DEFAULT_DAYS", 180))
+COPYRIGHT_EVIDENCE_MAX_MB = int(os.getenv("COPYRIGHT_EVIDENCE_MAX_MB", 10))
+COPYRIGHT_EVIDENCE_MAX_FILES = int(os.getenv("COPYRIGHT_EVIDENCE_MAX_FILES", 5))
+COPYRIGHT_MEDIA_ASYNC = os.getenv("COPYRIGHT_MEDIA_ASYNC", "true").lower() == "true"
+COPYRIGHT_QUARANTINE_PREFIX = os.getenv("COPYRIGHT_QUARANTINE_PREFIX", "copyright_quarantine")
+COPYRIGHT_CLOUDFRONT_DISTRIBUTION_ID = os.getenv("COPYRIGHT_CLOUDFRONT_DISTRIBUTION_ID", "")
+COPYRIGHT_CDN_PATH_PREFIX = os.getenv("COPYRIGHT_CDN_PATH_PREFIX", "")
+
+# --- automatic re-upload detection (copyrights/fingerprint.py, services.precheck_upload) ---
+#   COPYRIGHT_REJECT_EXACT_REUPLOAD  refuse (403 code copyright_reupload_blocked) a file whose bytes equal a removed
+#                                    file; False = only hold it after saving
+#   COPYRIGHT_FP_ENABLED             perceptual fingerprints (image / video / audio / PDF) of REMOVED files; a similar
+#                                    new upload is HELD and sent to level-2 review (never removed automatically)
+#   needs on the worker image: ffmpeg + ffprobe (video), chromaprint `fpcalc` (audio: apt install libchromaprint-tools),
+#   pypdf (PDF, in requirements.txt). A missing tool only skips that kind and logs an error.
+#   Tuning (defaults are conservative - tune on real removed/uploaded samples before lowering):
+#   _IMAGE_MAX_DISTANCE (bits of 64), _VIDEO_FRAMES / _VIDEO_FRAME_DISTANCE / _VIDEO_MATCH_RATIO,
+#   _AUDIO_MAX_BER / _AUDIO_MIN_SECONDS / _AUDIO_SECONDS / _AUDIO_MAX_SCAN, _PDF_MIN_JACCARD / _PDF_MIN_WORDS / _PDF_MAX_PAGES
+COPYRIGHT_REJECT_EXACT_REUPLOAD = os.getenv("COPYRIGHT_REJECT_EXACT_REUPLOAD", "true").lower() == "true"
+COPYRIGHT_FP_ENABLED = os.getenv("COPYRIGHT_FP_ENABLED", "true").lower() == "true"
+COPYRIGHT_FP_IMAGE_MAX_DISTANCE = int(os.getenv("COPYRIGHT_FP_IMAGE_MAX_DISTANCE", 5))
+COPYRIGHT_FP_VIDEO_FRAMES = int(os.getenv("COPYRIGHT_FP_VIDEO_FRAMES", 12))
+COPYRIGHT_FP_VIDEO_FRAME_DISTANCE = int(os.getenv("COPYRIGHT_FP_VIDEO_FRAME_DISTANCE", 8))
+COPYRIGHT_FP_VIDEO_MATCH_RATIO = float(os.getenv("COPYRIGHT_FP_VIDEO_MATCH_RATIO", 0.6))
+COPYRIGHT_FP_AUDIO_MAX_BER = float(os.getenv("COPYRIGHT_FP_AUDIO_MAX_BER", 0.30))
+COPYRIGHT_FP_AUDIO_MIN_SECONDS = int(os.getenv("COPYRIGHT_FP_AUDIO_MIN_SECONDS", 15))
+COPYRIGHT_FP_PDF_MIN_JACCARD = float(os.getenv("COPYRIGHT_FP_PDF_MIN_JACCARD", 0.6))
+COPYRIGHT_EMAILS_ENABLED = os.getenv("COPYRIGHT_EMAILS_ENABLED", "true").lower() == "true"
+SITE_URL = os.getenv("SITE_URL", "")
+
+# T0.8 (R1) — public legal pages (common/legal_pages.py). Starter text ships with a DRAFT banner:
+# have counsel review it, then set LEGAL_PAGES_DRAFT_BANNER=false. Or host elsewhere and set the *_URL vars (302).
+LEGAL_ENTITY_NAME = os.getenv("LEGAL_ENTITY_NAME", "LearnScroll")
+LEGAL_JURISDICTION = os.getenv("LEGAL_JURISDICTION", "")
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "")
+PRIVACY_POLICY_URL = os.getenv("PRIVACY_POLICY_URL", "")
+TERMS_URL = os.getenv("TERMS_URL", "")
+DELETE_ACCOUNT_URL = os.getenv("DELETE_ACCOUNT_URL", "")
+LEGAL_PAGES_DRAFT_BANNER = os.getenv("LEGAL_PAGES_DRAFT_BANNER", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# L1 -- login / OTP abuse limits (login/login_guard.py, login/otp_service.py).
+# All counters live in the shared CACHES backend (Redis in production), so they hold
+# across gunicorn workers. Every value can be overridden from the environment.
+# ---------------------------------------------------------------------------
+# OTP / reset-code SENDING, per target (email or phone):
+OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", "30"))   # min gap between two codes
+OTP_MAX_SENDS_PER_HOUR = int(os.getenv("OTP_MAX_SENDS_PER_HOUR", "3"))              # codes per target per hour
+OTP_IP_MAX_SENDS_PER_HOUR = int(os.getenv("OTP_IP_MAX_SENDS_PER_HOUR", "20"))       # codes per IP per hour (all targets)
+# Password-login lockout (wrong passwords):
+LOGIN_MAX_FAILURES = int(os.getenv("LOGIN_MAX_FAILURES", "5"))                      # per identifier + IP
+LOGIN_ACCOUNT_MAX_FAILURES = int(os.getenv("LOGIN_ACCOUNT_MAX_FAILURES", "15"))     # per identifier, all IPs
+LOGIN_IP_MAX_FAILURES = int(os.getenv("LOGIN_IP_MAX_FAILURES", "30"))               # per IP, all identifiers
+LOGIN_FAILURE_WINDOW_SECONDS = int(os.getenv("LOGIN_FAILURE_WINDOW_SECONDS", "900"))  # failures counted within this window
+LOGIN_LOCKOUT_SECONDS = int(os.getenv("LOGIN_LOCKOUT_SECONDS", "900"))              # how long a lock lasts
+
+# ---------------------------------------------------------------------------
+# L1 gap 18 -- disposable e-mail / virtual phone block (login/disposable.py)
+#   DISPOSABLE_BLOCK_ENABLED          master switch (default on)
+#   DISPOSABLE_EMAIL_EXTRA_DOMAINS    comma separated, added to the built-in list
+#   DISPOSABLE_EMAIL_LIST_FILE        path to a text file, one domain per line (e.g. the public
+#                                     "disposable-email-domains" list) -- re-read when it changes
+#   DISPOSABLE_EMAIL_ALLOWED_DOMAINS  never blocked, even if listed (false-positive escape hatch)
+#   BLOCKED_PHONE_PREFIXES            comma separated digit prefixes of virtual ranges to refuse
+#   PHONE_LOOKUP_PROVIDER             "" (off, default) or "twilio" -> carrier line-type lookup
+#   PHONE_BLOCKED_LINE_TYPES          line types refused by the lookup (default nonFixedVoip,voip)
+#   TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN   only needed for the lookup
+# And captcha (login/captcha.py):
+#   CAPTCHA_MODE        off | adaptive | always   (default adaptive; OFF under tests)
+#   CAPTCHA_PROVIDER    builtin (default, no keys) | turnstile | hcaptcha | recaptcha
+#   CAPTCHA_SITE_KEY / CAPTCHA_SECRET_KEY   for turnstile / hcaptcha / recaptcha
+#   CAPTCHA_FAIL_OPEN   let requests through if the remote provider is down (default true)
+# ---------------------------------------------------------------------------
+DISPOSABLE_BLOCK_ENABLED = os.getenv("DISPOSABLE_BLOCK_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+DISPOSABLE_EMAIL_EXTRA_DOMAINS = [d.strip().lower() for d in os.getenv("DISPOSABLE_EMAIL_EXTRA_DOMAINS", "").split(",") if d.strip()]
+DISPOSABLE_EMAIL_ALLOWED_DOMAINS = [d.strip().lower() for d in os.getenv("DISPOSABLE_EMAIL_ALLOWED_DOMAINS", "").split(",") if d.strip()]
+DISPOSABLE_EMAIL_LIST_FILE = os.getenv("DISPOSABLE_EMAIL_LIST_FILE", "").strip()
+BLOCKED_PHONE_PREFIXES = [p.strip() for p in os.getenv("BLOCKED_PHONE_PREFIXES", "").split(",") if p.strip()]
+PHONE_LOOKUP_PROVIDER = os.getenv("PHONE_LOOKUP_PROVIDER", "").strip().lower()
+PHONE_BLOCKED_LINE_TYPES = os.getenv("PHONE_BLOCKED_LINE_TYPES", "nonFixedVoip,voip")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+
+CAPTCHA_MODE = os.getenv("CAPTCHA_MODE", "off" if TESTING else "adaptive").strip().lower()
+CAPTCHA_PROVIDER = os.getenv("CAPTCHA_PROVIDER", "builtin").strip().lower()
+CAPTCHA_SITE_KEY = os.getenv("CAPTCHA_SITE_KEY", "")
+CAPTCHA_SECRET_KEY = os.getenv("CAPTCHA_SECRET_KEY", "")
+CAPTCHA_FAIL_OPEN = os.getenv("CAPTCHA_FAIL_OPEN", "true").strip().lower() in ("1", "true", "yes", "on")
+CAPTCHA_TTL_SECONDS = int(os.getenv("CAPTCHA_TTL_SECONDS", "180"))                           # a challenge image stays valid this long
+CAPTCHA_RISK_WINDOW_SECONDS = int(os.getenv("CAPTCHA_RISK_WINDOW_SECONDS", "3600"))          # adaptive volume window
+CAPTCHA_SEND_OTP_FREE_REQUESTS = int(os.getenv("CAPTCHA_SEND_OTP_FREE_REQUESTS", "2"))      # send-otp calls per IP/window before asking
+CAPTCHA_FORGOT_FREE_REQUESTS = int(os.getenv("CAPTCHA_FORGOT_FREE_REQUESTS", "2"))          # forgot-password calls per IP/window before asking
+CAPTCHA_LOGIN_AFTER_FAILURES = int(os.getenv("CAPTCHA_LOGIN_AFTER_FAILURES", "3"))          # wrong passwords before login asks
+
+# ---------------------------------------------------------------------------
+# L1 gap 19 -- audit log of login / OTP / password-reset / session events
+# (login.models.AuthAuditLog, written by login/audit.py, read-only in the admin)
+#   AUTH_AUDIT_ENABLED               master switch (default on)
+#   AUTH_AUDIT_RETENTION_DAYS        rows older than this are purged nightly by
+#                                    login.purge_auth_audit_logs (default 180; 0 = keep forever)
+#   AUTH_AUDIT_NOISE_DEDUPE_SECONDS  attacker-triggerable "blocked" events (captcha asked, OTP rate-limited,
+#                                    login locked, refresh refused) from the same IP + identifier are written
+#                                    once per this window, so they can't be used to fill the table
+# ---------------------------------------------------------------------------
+AUTH_AUDIT_ENABLED = os.getenv("AUTH_AUDIT_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTH_AUDIT_RETENTION_DAYS = int(os.getenv("AUTH_AUDIT_RETENTION_DAYS", "180"))
+AUTH_AUDIT_NOISE_DEDUPE_SECONDS = int(os.getenv("AUTH_AUDIT_NOISE_DEDUPE_SECONDS", "60"))
+
+# ---------------------------------------------------------------------------
+# S5 -- DPDP Act 2023 data rights (login/data_rights.py, login/data_rights_views.py)
+#   DATA_EXPORT_EXPIRY_DAYS          how long the "Download my data" ZIP stays available (default 7)
+#   DATA_EXPORT_MIN_INTERVAL_HOURS   one new export request per this many hours (default 24; 0 = no limit)
+#   DATA_EXPORT_MAX_ROWS             rows per section inside the ZIP (default 50000)
+#   ACCOUNT_DELETION_GRACE_DAYS      days between "Delete account" and the real erase (default 30; 0 = erase at once)
+#   ACCOUNT_DELETION_REMINDER_DAYS   one "your account is deleted soon" e-mail this many days before (default 3; 0 = off)
+#   PRIVACY_NOTICE_VERSION           stamped on every consent row (default "2026-10")
+# ---------------------------------------------------------------------------
+DATA_EXPORT_EXPIRY_DAYS = int(os.getenv("DATA_EXPORT_EXPIRY_DAYS", "7"))
+DATA_EXPORT_MIN_INTERVAL_HOURS = int(os.getenv("DATA_EXPORT_MIN_INTERVAL_HOURS", "24"))
+DATA_EXPORT_MAX_ROWS = int(os.getenv("DATA_EXPORT_MAX_ROWS", "50000"))
+ACCOUNT_DELETION_GRACE_DAYS = int(os.getenv("ACCOUNT_DELETION_GRACE_DAYS", "30"))
+ACCOUNT_DELETION_REMINDER_DAYS = int(os.getenv("ACCOUNT_DELETION_REMINDER_DAYS", "3"))
+PRIVACY_NOTICE_VERSION = os.getenv("PRIVACY_NOTICE_VERSION", "2026-10")
+
+# ---------------------------------------------------------------------------------------------------------------
+# S3 -- change-password re-auth.
+#   CHANGE_PASSWORD_REQUIRE_CURRENT   true (default): POST /login/auth/change-password/ needs `current_password` for
+#                                     accounts that have a password (Google-only accounts have none). Set it to false
+#                                     ONLY for the few days before the app build that sends the field is in the stores,
+#                                     then turn it back on.
+# ---------------------------------------------------------------------------------------------------------------
+CHANGE_PASSWORD_REQUIRE_CURRENT = os.getenv("CHANGE_PASSWORD_REQUIRE_CURRENT", "true").strip().lower() not in ("0", "false", "no", "off")
+
+# P9 - Profile insights (user_profile/profile_insights.py): how long ProfileVisit rows (one per profile / viewer / day)
+# are kept. `user_profile.tasks.prune_old_profile_visits` deletes older ones every day. The app shows 7 / 30 / 90 days.
+PROFILE_VISIT_RETENTION_DAYS = int(os.getenv("PROFILE_VISIT_RETENTION_DAYS", "90"))
+
+
+# =====================================================================================================================
+# P-F5 - social learning (social_learning app). Full list + meaning: social_learning/conf.py
+# =====================================================================================================================
+SOCIAL_LEARNING_ENABLED = os.getenv("SOCIAL_LEARNING_ENABLED", "true").lower() not in ("0", "false", "off", "no")
+SOCIAL_POMODORO_PARTICIPANTS_CAN_CONTROL = os.getenv("SOCIAL_POMODORO_PARTICIPANTS_CAN_CONTROL", "false").lower() in ("1", "true", "on", "yes")
+SOCIAL_POMODORO_MIN_PRESENCE_FRACTION = float(os.getenv("SOCIAL_POMODORO_MIN_PRESENCE_FRACTION", "0.8"))
+SOCIAL_POMODORO_DAILY_CREDIT_CAP = int(os.getenv("SOCIAL_POMODORO_DAILY_CREDIT_CAP", "16"))
+SOCIAL_PARTNER_MAX_ACTIVE = int(os.getenv("SOCIAL_PARTNER_MAX_ACTIVE", "3"))
+SOCIAL_PARTNER_MAX_PENDING_OUT = int(os.getenv("SOCIAL_PARTNER_MAX_PENDING_OUT", "5"))
+SOCIAL_PARTNER_MANUAL_MAX_MINUTES = int(os.getenv("SOCIAL_PARTNER_MANUAL_MAX_MINUTES", "120"))
+SOCIAL_PARTNER_AUTO_NUDGE = os.getenv("SOCIAL_PARTNER_AUTO_NUDGE", "true").lower() not in ("0", "false", "off", "no")
+SOCIAL_SEASON_DAYS = int(os.getenv("SOCIAL_SEASON_DAYS", "28"))
+SOCIAL_SEASON_AUTO_CREATE = os.getenv("SOCIAL_SEASON_AUTO_CREATE", "true").lower() not in ("0", "false", "off", "no")
+
+
+# =====================================================================================================================
+# P-F8 - spaced repetition (spaced_repetition app). Full list + meaning: spaced_repetition/conf.py
+# =====================================================================================================================
+SRS_ENABLED = os.getenv("SRS_ENABLED", "true").lower() not in ("0", "false", "off", "no")
+SRS_NEW_PER_DAY = int(os.getenv("SRS_NEW_PER_DAY", "10"))
+SRS_NEW_MIN_AGE_HOURS = int(os.getenv("SRS_NEW_MIN_AGE_HOURS", "0"))
+SRS_MAX_QUEUE = int(os.getenv("SRS_MAX_QUEUE", "30"))
+SRS_MAX_INTERVAL_DAYS = int(os.getenv("SRS_MAX_INTERVAL_DAYS", "365"))
+SRS_RELEARN_MINUTES = int(os.getenv("SRS_RELEARN_MINUTES", "10"))

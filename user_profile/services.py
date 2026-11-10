@@ -36,9 +36,15 @@ def blocked_user_ids(user):
     if uid is None:
         return set()
     try:
-        ids = set(BlockUser.objects.filter(blocker_id=uid).values_list("blocked_id", flat=True))
-        ids |= set(BlockUser.objects.filter(blocked_id=uid).values_list("blocker_id", flat=True))
-        return ids
+        # P-C5: ONE query (was two) - either direction in a single OR, then pick "the other side" in Python.
+        from django.db.models import Q
+
+        ids = set()
+        for blocker_id, blocked_id in BlockUser.objects.filter(
+            Q(blocker_id=uid) | Q(blocked_id=uid)
+        ).values_list("blocker_id", "blocked_id"):
+            ids.add(blocked_id if str(blocker_id) == str(uid) else blocker_id)  # str(): `user` may be a raw id
+        return {i for i in ids if str(i) != str(uid)}
     except Exception:
         logger.exception("blocked_user_ids failed (user=%s)", uid)
         return set()
@@ -67,47 +73,23 @@ REPORTS_PER_HOUR = 30
 def file_report(reporter, target_type, target_id, reason, details=""):
     """Create (or find, idempotently) a ContentReport.
 
-    target_type: user | post | comment | story. `target_id` is a user id or a
-    post/comment/story uuid. Returns (report, created).
-    Raises LookupError (target doesn't exist), ValueError (own content) or
-    ReportRateLimited. The reported person is never told anything.
+    target_type: user | post | comment | story | message | class_chat | live_session |
+    profile_photo. `target_id` is a user id or a post/comment/story/message uuid, or an
+    int id for class_chat / live_session (see report_targets.resolve_target for who may
+    report what). Returns (report, created).
+    Raises LookupError (target doesn't exist / not yours to see), ValueError (own
+    content) or ReportRateLimited. The reported person is never told anything.
     """
     from datetime import timedelta
 
-    from django.contrib.auth import get_user_model
-    from django.core.exceptions import ValidationError
     from django.utils import timezone
 
     from .models import ContentReport
+    from .report_sla import due_for
+    from .report_targets import resolve_target
 
-    T = ContentReport.TargetType
-    User = get_user_model()
     target_id = str(target_id)
-    reported_user = None
-    try:
-        if target_type == T.USER:
-            reported_user = User.objects.filter(id=int(target_id), is_active=True).first()
-        elif target_type == T.POST:
-            from post.models import Post
-
-            obj = Post.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
-            reported_user = obj.user if obj else None
-        elif target_type == T.COMMENT:
-            from post.models import PostComment
-
-            obj = PostComment.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
-            reported_user = obj.user if obj else None
-        elif target_type == T.STORY:
-            from post.models import Story
-
-            obj = Story.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
-            reported_user = obj.user if obj else None
-    except (ValueError, TypeError, ValidationError):
-        reported_user = None
-    if reported_user is None:
-        raise LookupError("Nothing to report here.")
-    if reported_user.id == reporter.id:
-        raise ValueError("You can't report your own account or content.")
+    reported_user, evidence = resolve_target(reporter, target_type, target_id)
 
     existing = ContentReport.objects.filter(reporter=reporter, target_type=target_type, target_id=target_id).first()
     if existing is not None:
@@ -116,12 +98,18 @@ def file_report(reporter, target_type, target_id, reason, details=""):
     recent = ContentReport.objects.filter(
         reporter=reporter, created_at__gte=timezone.now() - timedelta(hours=1)
     ).count()
-    if recent >= REPORTS_PER_HOUR:
+    # child-safety reports are never rate limited away
+    if recent >= REPORTS_PER_HOUR and reason != ContentReport.Reason.CHILD_SAFETY:
         raise ReportRateLimited()
 
+    urgent = reason == ContentReport.Reason.CHILD_SAFETY
     report = ContentReport.objects.create(
         reporter=reporter, reported_user=reported_user, target_type=target_type,
         target_id=target_id, reason=reason, details=(details or "")[:1000],
+        priority=ContentReport.Priority.URGENT if urgent else ContentReport.Priority.NORMAL,
+        sla_due_at=due_for(reason),  # P-F15: review deadline (report_sla.py)
+        # DMs / chat lines can be unsent later - keep what was reported (also kept for child safety)
+        evidence=evidence if (urgent or target_type in ("message", "class_chat", "profile_photo")) else "",
     )
     # AUTOMATION: exact reported_count + auto-hold at the thresholds (never raises).
     from .report_automation import on_report_created
@@ -294,6 +282,10 @@ def remove_follower(owner, follower_id):
         following=owner,
         status=Follow.Status.ACCEPTED,
     ).delete()
+    if deleted > 0:
+        from .profile_insights import record_loss  # P9b: counter only
+
+        record_loss(owner)
     return deleted > 0
 
 
@@ -339,11 +331,41 @@ BADGE_DEFAULTS = {
         "title": "Verified Teacher", "icon": "✅", "sort_order": 50,
         "description": "Verified as a teacher by LearnScroll.",
     },
+    # T2.7 — cost-free referral recognition.
+    "referrer_first": {
+        "title": "Connector", "icon": "🤝", "sort_order": 60,
+        "description": "Brought your first friend to LearnScroll.",
+    },
+    "referrer_5": {
+        "title": "Community Builder", "icon": "🌱", "sort_order": 70,
+        "description": "Brought 5 friends to LearnScroll.",
+    },
+    "founding_member": {
+        "title": "Founding Member", "icon": "🌟", "sort_order": 80,
+        "description": "Among the first to build the LearnScroll community.",
+    },
+    # P-F5 - study seasons (social_learning/seasons.py). Recognition only - no coins, no cash.
+    "season_champion": {
+        "title": "Season Champion", "icon": "🥇", "sort_order": 90,
+        "description": "Finished #1 in a study season.",
+    },
+    "season_top3": {
+        "title": "Season Top 3", "icon": "🥈", "sort_order": 91,
+        "description": "Finished in the top 3 of a study season.",
+    },
+    "season_top10": {
+        "title": "Season Top 10", "icon": "🏅", "sort_order": 92,
+        "description": "Finished in the top 10 of a study season.",
+    },
+    "season_finisher": {
+        "title": "Season Finisher", "icon": "📚", "sort_order": 93,
+        "description": "Studied consistently through a whole study season.",
+    },
 }
 
 
 def _get_badge(code):
-    """Active Badge row for `code`, self-seeding the built-in five."""
+    """Active Badge row for `code`, self-seeding every code in BADGE_DEFAULTS."""
     from .models import Badge
 
     badge = Badge.objects.filter(code=code).first()
@@ -456,3 +478,168 @@ def backfill_badges():
                 counts["teacher_verified"] += 1
 
     return counts
+
+
+# ---------------------------------------------------------------------------
+# T2.7 (Loop 7) — COST-FREE referee / referrer rewards.
+#
+# A redeemed referral already pays REFERRAL_BONUS_COINS to both sides (see
+# tuitionclass.views.ReferralViewSet.redeem). This adds the rewards that cost
+# the platform nothing: a streak-freeze token, recognition badges and the
+# founding-member badge. Everything here is idempotent per Referral row (the
+# caller claims `Referral.rewards_granted_at` first), never raises, and never
+# touches the coin ledger.
+# ---------------------------------------------------------------------------
+def founding_window_open() -> bool:
+    """True while founding-member badges can still be handed out: the optional
+    `FOUNDING_MEMBER_UNTIL` date hasn't passed AND fewer than
+    `FOUNDING_MEMBER_MAX_AWARDS` have been awarded. (The count is a soft cap —
+    two awards racing at the very last slot can overshoot by one, which is
+    harmless for a recognition badge.)"""
+    from datetime import date
+
+    from django.conf import settings
+    from django.utils import timezone
+
+    from .models import UserBadge
+
+    until = (getattr(settings, "FOUNDING_MEMBER_UNTIL", "") or "").strip()
+    if until:
+        try:
+            if timezone.localdate() > date.fromisoformat(until):
+                return False
+        except ValueError:
+            logger.warning("FOUNDING_MEMBER_UNTIL=%r is not an ISO date; ignoring it.", until)
+    limit = int(getattr(settings, "FOUNDING_MEMBER_MAX_AWARDS", 1000))
+    if limit <= 0:
+        return False
+    return UserBadge.objects.filter(badge__code="founding_member").count() < limit
+
+
+def award_founding_member(user, *, reason, notify=True):
+    """Founding-member badge if the window is open. `reason` is stored in the
+    award context (e.g. "referee", "referrer", "campus_invite")."""
+    try:
+        if not founding_window_open():
+            return None
+    except Exception:
+        logger.exception("founding_window_open failed")
+        return None
+    return award_badge(user, "founding_member", context={"reason": reason}, notify=notify)
+
+
+def _reward_side(user, *, freezes, badges):
+    """Apply one side's rewards. Returns {"streak_freeze": n, "badges": [codes]}
+    describing what was ACTUALLY granted (freeze at cap -> 0, badge already
+    owned -> not listed)."""
+    from .models import Streak
+
+    granted = {"streak_freeze": 0, "badges": []}
+    if freezes:
+        try:
+            granted["streak_freeze"] = Streak.objects.grant_freeze(user, freezes)
+        except Exception:
+            logger.exception("grant_freeze failed (user=%s)", getattr(user, "pk", user))
+    for code, ctx in badges:
+        if code == "founding_member":
+            row = award_founding_member(user, reason=ctx.get("reason", ""), notify=False)
+        else:
+            row = award_badge(user, code, context=ctx, notify=False)
+        if row is not None:
+            granted["badges"].append(code)
+    return granted
+
+
+def _notify_referral_reward(user, *, as_referrer, granted, other_username=""):
+    if not granted["streak_freeze"] and not granted["badges"]:
+        return None
+    try:
+        from core.models import Notification
+
+        parts = []
+        if granted["streak_freeze"]:
+            n = granted["streak_freeze"]
+            parts.append(f"{n} streak freeze{'s' if n != 1 else ''}")
+        if granted["badges"]:
+            titles = [BADGE_DEFAULTS.get(c, {}).get("title", c) for c in granted["badges"]]
+            parts.append("the " + " + ".join(titles) + (" badges" if len(titles) > 1 else " badge"))
+        title = "Your invite worked! 🎁" if as_referrer else "Welcome gift unlocked! 🎁"
+        message = "You earned " + " and ".join(parts) + " — no coins needed."
+        return _notify(
+            user, Notification.NotifType.REFERRAL_REWARD, title, message,
+            data={
+                "type": "referral_reward",
+                "role": "referrer" if as_referrer else "referee",
+                "reward": granted,
+                "other_username": other_username,
+            },
+            push=True,
+        )
+    except Exception:
+        logger.exception("referral reward notification failed (user=%s)", getattr(user, "pk", user))
+        return None
+
+
+def grant_referral_rewards(referral_id):
+    """Hand out the cost-free rewards for ONE redeemed `tuitionclass.Referral`.
+
+    Exactly-once: the very first thing it does is claim the row with a
+    conditional UPDATE on `rewards_granted_at`; a retry / duplicate task sees
+    0 rows updated and returns {"skipped": "already_granted"}.
+
+      referee  : +REFERRAL_REWARD_FREEZE_REFEREE streak freeze(s), and the
+                 founding-member badge while the window is open.
+      referrer : +REFERRAL_REWARD_FREEZE_REFERRER streak freeze(s), the
+                 "Connector" badge at REFERRER_BADGE_FIRST_AT referrals, the
+                 "Community Builder" badge at REFERRER_BADGE_COMMUNITY_AT, and
+                 the founding-member badge at FOUNDING_MEMBER_REFERRALS_NEEDED
+                 referrals while the window is open.
+
+    Both people get ONE bell row + push (honouring their notification
+    preferences / quiet hours) summarising what they really received.
+    """
+    from django.conf import settings
+    from django.utils import timezone
+
+    from tuitionclass.models import Referral
+
+    claimed = Referral.objects.filter(pk=referral_id, rewards_granted_at__isnull=True).update(
+        rewards_granted_at=timezone.now()
+    )
+    if not claimed:
+        return {"skipped": "already_granted_or_missing"}
+
+    referral = Referral.objects.select_related("referrer", "referred").get(pk=referral_id)
+    referrer, referee = referral.referrer, referral.referred
+    total = Referral.objects.filter(referrer=referrer).count()
+
+    referrer_badges = []
+    if total >= int(getattr(settings, "REFERRER_BADGE_FIRST_AT", 1)):
+        referrer_badges.append(("referrer_first", {"referrals": total}))
+    if total >= int(getattr(settings, "REFERRER_BADGE_COMMUNITY_AT", 5)):
+        referrer_badges.append(("referrer_5", {"referrals": total}))
+    if total >= int(getattr(settings, "FOUNDING_MEMBER_REFERRALS_NEEDED", 3)):
+        referrer_badges.append(("founding_member", {"reason": "referrer", "referrals": total}))
+
+    referrer_granted = _reward_side(
+        referrer, freezes=int(getattr(settings, "REFERRAL_REWARD_FREEZE_REFERRER", 1)), badges=referrer_badges,
+    )
+    referee_granted = _reward_side(
+        referee,
+        freezes=int(getattr(settings, "REFERRAL_REWARD_FREEZE_REFEREE", 1)),
+        badges=[("founding_member", {"reason": "referee"})],
+    )
+
+    # P-F16: an adult referrer is told the first name of a referred minor, not the @username (same stranger rule as boards).
+    from common import minor_policy
+
+    _referee_label = (
+        minor_policy.masked_name(referee)
+        if minor_policy.blocked(referee, minor_policy.REFERRAL) and not minor_policy.is_minor(referrer)
+        else getattr(referee, "username", "")
+    )
+    _notify_referral_reward(referrer, as_referrer=True, granted=referrer_granted,
+                            other_username=_referee_label)
+    _notify_referral_reward(referee, as_referrer=False, granted=referee_granted,
+                            other_username=getattr(referrer, "username", ""))
+    return {"referrer": referrer_granted, "referee": referee_granted, "referrals_total": total}

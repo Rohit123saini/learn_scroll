@@ -1,10 +1,11 @@
 """
 support/models.py — Help & feedback.
 
-Three independent things, one app:
+Four independent things, one app:
   1. SupportTicket + SupportMessage   in-app support chat (user <-> LearnScroll staff)
   2. BugReport                        bug report with optional screenshot + device info
   3. FeatureRequest + FeatureVote     "I want this feature" board with one vote per user
+  4. FaqFeedback                      FAQ "was this helpful?" answers (one row per user per question)
 
 Staff answer tickets from Django admin (support/admin.py), which goes through
 support/services.py so the user is notified and the ticket status stays right.
@@ -88,6 +89,9 @@ class BugReport(models.Model):
     platform = models.CharField(max_length=20, blank=True, default="")
     device_info = models.CharField(max_length=120, blank=True, default="")
     screenshot = models.ImageField(upload_to="support/bugs/%Y/%m/", null=True, blank=True)
+    # S11b: PII-free technical report the app attaches when the user leaves "Attach diagnostics" on
+    # (version, phone model, recent app errors). Scrubbed again on the server in the serializer.
+    diagnostics = models.TextField(max_length=8000, blank=True, default="")
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.NEW, db_index=True)
     admin_note = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -134,3 +138,21 @@ class FeatureVote(models.Model):
 
     class Meta:
         constraints = [UniqueConstraint(fields=["request", "user"], name="unique_feature_vote")]
+
+
+class FaqFeedback(models.Model):
+    """S11b - "Kya yeh kaam aaya?" on a FAQ answer. The FAQ text itself ships inside the app (works offline), so only
+    the app-side question id is stored. One row per (user, faq_id): answering again just changes the answer."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="faq_feedback")
+    faq_id = models.CharField(max_length=60, db_index=True)
+    helpful = models.BooleanField()
+    lang = models.CharField(max_length=8, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [UniqueConstraint(fields=["user", "faq_id"], name="unique_faq_feedback_per_user")]
+
+    def __str__(self):
+        return f"{self.faq_id}: {'helpful' if self.helpful else 'not helpful'}"

@@ -41,6 +41,15 @@ class UserBadgesView(APIView):
             Q(blocker=request.user, blocked=target) | Q(blocker=target, blocked=request.user)
         ).exists():
             raise Http404
+        if target.pk != request.user.pk and not target.is_active:  # P11b: suspended account -> "no such user"
+            raise Http404
+
+        # P3: a private account shows no badges until the viewer follows (the screen already hides the row; this makes
+        # the server agree instead of relying on the client).
+        from .achievements import viewer_may_see
+
+        if not viewer_may_see(target, request.user):
+            return Response({"username": target.username, "count": 0, "badges": []})
 
         badges = (
             UserBadge.objects.filter(user=target, badge__is_active=True)
@@ -54,5 +63,6 @@ class UserBadgesView(APIView):
         })
 
 
-# user_profile/urls.py:
-#   path("profile/<str:username>/badges/", UserBadgesView.as_view(), name="user-badges"),
+# Wired in user_profile/urls.py (P3):
+#   path("profile/<str:username>/badges/", UserBadgesView.as_view(), name="user-badges")
+# i.e. the full URL is /profile/profile/<username>/badges/ - same shape as followers/ and following/.

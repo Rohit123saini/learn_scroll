@@ -104,6 +104,16 @@ def decrement_posts_count_on_soft_delete(post):
     User.objects.filter(pk=post.user_id).update(posts_count=Greatest(F("posts_count") - 1, 0))
 
 
+def increment_posts_count_on_unarchive(post):
+    """Mirror of `decrement_posts_count_on_soft_delete`: archiving takes the post out of the
+    author's `posts_count` (it leaves their profile grid), restoring it puts it back. Called
+    explicitly from `PostArchiveAPIView`."""
+    User = _user_model()
+    if not hasattr(User, "posts_count"):
+        return
+    User.objects.filter(pk=post.user_id).update(posts_count=F("posts_count") + 1)
+
+
 # ----------------------------------------------------------------------
 # TASK 3 — "new post from someone you follow" fan-out, enqueue-only.
 #
@@ -140,11 +150,20 @@ def decrement_posts_count_on_soft_delete(post):
 def queue_new_post_notification_fanout(sender, instance, created, **kwargs):
     if not created:
         return
+    if instance.is_scheduled:
+        return  # a scheduled post is announced by post.tasks.publish_scheduled_posts when it goes live
+    if instance.moderation_status != "approved":
+        return  # H23: a post held at publish is announced when staff approve it (staff_moderation_views)
     from django.db import transaction
 
     from .tasks import notify_followers_new_post
 
     transaction.on_commit(lambda: notify_followers_new_post.delay(instance.id))
+    if instance.post_type == "doubt":
+        # Doubt post upgrade: teachers of the subject (the PostDoubt row is saved in the same transaction)
+        from .tasks import notify_teachers_new_doubt
+
+        transaction.on_commit(lambda: notify_teachers_new_doubt.delay(str(instance.id)))
 
 
 # ----------------------------------------------------------------------
@@ -268,6 +287,36 @@ def queue_video_thumbnail_on_create(sender, instance, created, **kwargs):
     from .tasks import generate_video_thumbnail
 
     transaction.on_commit(lambda: generate_video_thumbnail.delay(instance.id))
+
+    # V1 — also make the video playable everywhere (H.264/AAC + faststart; see
+    # post.tasks.process_video_for_streaming). Marked `pending` right away so the
+    # API can tell clients "still being processed"; the task moves it on to
+    # `ready` / `failed`. A broker outage must never fail the upload itself, so
+    # a failed enqueue just marks the row `failed` (original file keeps playing
+    # where the phone supports it; `manage.py process_videos` can retry).
+    if kwargs.get("raw"):
+        return
+    from .services import video_transcode_enabled
+
+    if not video_transcode_enabled():
+        return
+    media_id = str(instance.id)
+    PostMedia.objects.filter(pk=instance.pk).update(processing_status=PostMedia.PROCESSING_PENDING)
+    instance.processing_status = PostMedia.PROCESSING_PENDING
+
+    def _enqueue_processing():
+        try:
+            from .tasks import process_video_for_streaming
+
+            process_video_for_streaming.delay(media_id)
+        except Exception:
+            logger.exception(
+                "could not enqueue process_video_for_streaming for PostMedia %s "
+                "(run `manage.py process_videos` to retry)", media_id,
+            )
+            PostMedia.objects.filter(pk=media_id).update(processing_status=PostMedia.PROCESSING_FAILED)
+
+    transaction.on_commit(_enqueue_processing)
 
 
 # ----------------------------------------------------------------------

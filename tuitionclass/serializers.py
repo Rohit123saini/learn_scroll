@@ -162,6 +162,8 @@ class ClassroomSerializer(serializers.ModelSerializer):
             # FEATURE (optional Parent) + (student attendance) — teacher-only
             # writes, same as every other setting here (perform_update).
             "parents_enabled", "attendance_min_percent", "attendance_edit_days",
+            # X12 (auto recording): teacher-only toggle (perform_update), needs `recording_enabled` - see validate().
+            "recording_auto",
             "is_active", "is_flagged", "created_at", "updated_at",
         ]
         extra_kwargs = {
@@ -203,6 +205,17 @@ class ClassroomSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"trial_password": "Set a trial password before enabling trial access."}
             )
+
+        # X12 (auto recording): auto-start only makes sense while recording itself is allowed for this class. Turning
+        # recording off switches auto-recording off with it (so it cannot silently come back later); turning
+        # auto-recording ON while recording is off is refused instead of being stored as a dead setting.
+        recording_enabled = attrs.get("recording_enabled", getattr(self.instance, "recording_enabled", False))
+        if attrs.get("recording_auto") and not recording_enabled:
+            raise serializers.ValidationError(
+                {"recording_auto": "Turn on recording for this class before enabling auto-recording."}
+            )
+        if "recording_enabled" in attrs and not attrs["recording_enabled"]:
+            attrs["recording_auto"] = False
         return attrs
 
 
@@ -312,7 +325,8 @@ class ClassScheduleSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 class ClassSessionSerializer(serializers.ModelSerializer):
     is_joinable = serializers.SerializerMethodField()
-    classroom_title = serializers.CharField(source="classroom.title", read_only=True)
+    # X12 L-C: a standalone live shows its own title (the hidden personal classroom's title is just "<name> - Live").
+    classroom_title = serializers.SerializerMethodField()
     # FEATURE (recording): derived, not stored directly — true exactly while
     # egress_id is set (see ClassSession.egress_id / start_recording /
     # stop_recording in views.py). Lets the client show a live "REC"
@@ -329,6 +343,16 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             "scheduled_start", "scheduled_end", "actual_start", "actual_end",
             "status", "recording_url", "is_recording", "whiteboard_snapshot",
             "spotlight_identity", "is_joinable", "created_at", "server_now",
+            "chat_slow_mode_seconds", "stage_only",
+            # X12 live safety: this session's word-filter mode ("" = platform default). Read-only here, written only by
+            # the moderator endpoint sessions/<id>/moderation/chat-filter/ (live_moderation_views.SessionChatFilterView).
+            "chat_filter_mode",
+            "presented_material", "presented_page", "presented_page_count",
+            # X12 (auto recording): when the recording began and how long the file is (read-only, set by the LiveKit
+            # webhook / recording_auto.py). Lets the replay screen show the length and map chapters / chat to the video.
+            "recording_started_at", "recording_duration_seconds",
+            # X12 L-C (standalone Go Live): read-only here, written only by tuitionclass/standalone_live.py.
+            "live_standalone", "live_audience", "live_title", "live_topic", "live_thumbnail", "live_timezone",
         ]
         # NOTE (fix — whiteboard/spotlight persistence): both fields are
         # read-only here on purpose — writes go through
@@ -338,7 +362,22 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         # participant should be able to autosave strokes). Still returned
         # on every read so a reconnecting/late-joining client can restore
         # both from the plain session GET.
-        read_only_fields = ["id", "room_id", "created_at", "whiteboard_snapshot", "spotlight_identity", "server_now"]
+        read_only_fields = [
+            "id", "room_id", "created_at", "whiteboard_snapshot", "spotlight_identity", "server_now",
+            "chat_slow_mode_seconds",  # written only by ClassSessionViewSet.slow_mode
+            "chat_filter_mode",  # X12: written only by SessionChatFilterView
+            "stage_only",  # written only by ClassSessionViewSet.stage_only
+            "live_standalone", "live_audience", "live_title", "live_topic", "live_thumbnail", "live_timezone",  # X12 L-C
+            # written only by ClassSessionViewSet.present / present_page / present_stop
+            "presented_material", "presented_page", "presented_page_count",
+            # X12: written only by the LiveKit webhook (recording_auto.py) - never by a client PATCH
+            "recording_started_at", "recording_duration_seconds",
+        ]
+
+    def get_classroom_title(self, obj) -> str:
+        if getattr(obj, "live_standalone", False) and (obj.live_title or "").strip():
+            return obj.live_title.strip()
+        return obj.classroom.title
 
     def get_is_joinable(self, obj):
         # NOTE (fix — CRITICAL): was `obj.is_joinable()` with no `is_host`,
@@ -690,11 +729,12 @@ class SessionParticipantSerializer(serializers.ModelSerializer):
         model = SessionParticipant
         fields = [
             "id", "session", "user", "role", "joined_at", "left_at", "hand_raised", "hand_raised_at",
+            "guest_state", "guest_cohost",
             # FEATURE (trial/demo access): lets the host roster show a
             # "Trial" badge instead of treating them as an enrolled student.
             "is_trial",
         ]
-        read_only_fields = ["id", "joined_at", "hand_raised_at"]
+        read_only_fields = ["id", "joined_at", "hand_raised_at", "guest_state", "guest_cohost"]
 
     def get_hand_raised(self, obj):
         return obj.hand_raised_at is not None
@@ -730,14 +770,16 @@ class BreakoutRoomSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 class ClassMaterialSerializer(serializers.ModelSerializer):
     uploaded_by = UserMiniSerializer(read_only=True)
+    # PDF made from a ppt/doc by the live-room "Present" action (null until first presented).
+    presentable_file = serializers.FileField(source="presentable_pdf", read_only=True, allow_null=True)
 
     class Meta:
         model = ClassMaterial
         fields = [
             "id", "classroom", "session", "uploaded_by", "title",
-            "material_type", "file", "external_link", "uploaded_at",
+            "material_type", "file", "presentable_file", "external_link", "uploaded_at",
         ]
-        read_only_fields = ["id", "uploaded_at"]
+        read_only_fields = ["id", "uploaded_at", "presentable_file"]
 
     def validate(self, attrs):
         # NOTE (fix — broke PATCH): these three previously used a bare
@@ -997,16 +1039,74 @@ class ChatMessageReportSerializer(serializers.ModelSerializer):
 # 9. LIVE POLL + RESPONSE
 # ---------------------------------------------------------------------------
 class LivePollSerializer(serializers.ModelSerializer):
+    """QUIZ PUSH: `correct_option_index` / `explanation` are writable (host sets them when creating a
+    quiz) but are only ever READ back when (a) the poll has been revealed, (b) the serializer was given
+    `context["show_answer"]=True` (LivePollViewSet does that for moderators only), or (c) the poll is not
+    a quiz. Socket broadcasts build this serializer without a context on purpose, so a quiz answer can
+    never leak to students before the host's reveal.
+    """
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     result_counts = serializers.SerializerMethodField()
+    is_quiz = serializers.SerializerMethodField()
+    is_revealed = serializers.SerializerMethodField()
+    correct_count = serializers.SerializerMethodField()
+    my_option_index = serializers.SerializerMethodField()
+    correct_option_index = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    explanation = serializers.CharField(required=False, allow_blank=True, max_length=300)
 
     class Meta:
         model = LivePoll
         fields = [
             "id", "session", "created_by", "question", "options",
             "is_active", "created_at", "closed_at", "result_counts",
+            "is_quiz", "is_revealed", "revealed_at", "correct_option_index", "explanation",
+            "correct_count", "my_option_index",
         ]
-        read_only_fields = ["id", "created_at", "closed_at"]
+        read_only_fields = ["id", "created_at", "closed_at", "revealed_at"]
+
+    def _answer_visible(self, obj):
+        if obj.correct_option_index is None:
+            return True  # nothing to hide
+        return obj.revealed_at is not None or bool(self.context.get("show_answer"))
+
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        if not self._answer_visible(obj):
+            data["correct_option_index"] = None
+            data["explanation"] = ""
+        return data
+
+    def get_is_quiz(self, obj):
+        return obj.correct_option_index is not None
+
+    def get_is_revealed(self, obj):
+        return obj.revealed_at is not None
+
+    def get_correct_count(self, obj):
+        """How many students picked the right option - only after reveal (None before)."""
+        if obj.revealed_at is None or obj.correct_option_index is None:
+            return None
+        return sum(1 for idx in obj.responses.values_list("selected_option_index", flat=True)
+                   if idx == obj.correct_option_index)
+
+    def get_my_option_index(self, obj):
+        """The caller's own vote (REST only - LivePollViewSet puts {poll_id: idx} in context)."""
+        votes = self.context.get("my_votes")
+        return votes.get(obj.id) if votes else None
+
+    def validate(self, attrs):
+        options = attrs.get("options", getattr(self.instance, "options", None))
+        idx = attrs.get("correct_option_index", getattr(self.instance, "correct_option_index", None))
+        if idx is not None and options is not None and idx >= len(options):
+            raise serializers.ValidationError({"correct_option_index": "Out of range for this poll's options."})
+        if (
+            self.instance is not None
+            and self.instance.revealed_at is not None
+            and ("correct_option_index" in attrs or "options" in attrs)
+        ):
+            raise serializers.ValidationError("A revealed quiz can't be edited.")
+        return attrs
 
     def get_result_counts(self, obj):
         """{option_index: number_of_votes} — cheap live tally for the UI."""
@@ -1054,8 +1154,15 @@ class PollTemplateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PollTemplate
-        fields = ["id", "classroom", "created_by", "question", "options", "created_at"]
+        fields = ["id", "classroom", "created_by", "question", "options", "correct_option_index", "explanation", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+    def validate(self, attrs):
+        options = attrs.get("options", getattr(self.instance, "options", None)) or []
+        idx = attrs.get("correct_option_index", getattr(self.instance, "correct_option_index", None))
+        if idx is not None and idx >= len(options):
+            raise serializers.ValidationError({"correct_option_index": "Out of range for this template's options."})
+        return attrs
 
     # Reuses LivePollSerializer.validate_options' rule verbatim (at least 2
     # non-empty string options) — a template with 0/1 options would just
@@ -1584,16 +1691,24 @@ class NoticeSerializer(serializers.ModelSerializer):
 class ClassQuerySerializer(serializers.ModelSerializer):
     asked_by = UserMiniSerializer(read_only=True)
     answered_by = UserMiniSerializer(read_only=True)
+    # Whether the CALLER has upvoted this question. The viewset puts the caller's voted ids in
+    # context["upvoted_ids"] (one query per request); without it this is False.
+    has_upvoted = serializers.SerializerMethodField()
+
+    def get_has_upvoted(self, obj):
+        ids = self.context.get("upvoted_ids")
+        return bool(ids) and obj.id in ids
 
     class Meta:
         model = ClassQuery
         fields = [
             "id", "classroom", "session", "asked_by", "question",
             "status", "answer", "answered_by", "answered_at",
-            "created_at",
+            "created_at", "upvote_count", "has_upvoted",
         ]
         read_only_fields = [
             "id", "asked_by", "status", "answer", "answered_by", "answered_at", "created_at",
+            "upvote_count", "has_upvoted",
         ]
         # `asked_by` is set server-side from request.user on create. `answer`/
         # `status`/`answered_by`/`answered_at` are only ever set through the
@@ -1772,7 +1887,6 @@ class MyReferralCodeSerializer(serializers.Serializer):
     code = serializers.CharField()
     referral_count = serializers.IntegerField()
     total_bonus_earned = serializers.IntegerField()
-    bonus_per_referral = serializers.IntegerField()
     # TASK 12: all-source commission total (test series + classroom)
     total_commission_earned = serializers.IntegerField(required=False, default=0)
 
@@ -1812,6 +1926,15 @@ class ReferralCommissionSerializer(serializers.ModelSerializer):
         fields = ["id", "kind", "source_id", "gross_coins", "percent", "commission_coins", "referee", "created_at"]
         read_only_fields = fields
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # P-F16 -- a referred minor is shown masked (the view puts the ids to mask in context, one lookup for the page).
+        if instance.referee_id in (self.context.get("masked_minor_ids") or ()) and isinstance(data.get("referee"), dict):
+            from common.minor_policy import masked_person
+
+            data["referee"] = {"id": data["referee"].get("id"), **masked_person(instance.referee)}
+        return data
+
 
 class ReferralSerializer(serializers.ModelSerializer):
     """Read-only — used by GET /tuitionclass/referrals/ to show a user the
@@ -1823,6 +1946,33 @@ class ReferralSerializer(serializers.ModelSerializer):
         model = Referral
         fields = ["id", "referred", "bonus_amount", "created_at"]
         read_only_fields = fields
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # P-F16 -- the referrer is shown a referred MINOR as a first name only (no @username / photo) unless they are linked
+        # by an accepted follow or are a minor themself. `masked_minor_ids` is filled by the view in one go (see below).
+        try:
+            from common import minor_policy
+
+            request = self.context.get("request")
+            viewer = getattr(request, "user", None)
+            rows = self.context.get("referral_rows") or ()
+            if rows:  # the view handed us the whole page: ONE lookup for all rows
+                cache = self.context.setdefault("_minor_mask_cache", {})
+                if "ids" not in cache:
+                    cache["ids"] = minor_policy.masked_ids_for_viewer(
+                        viewer, [r.referred_id for r in rows], feature=minor_policy.REFERRAL
+                    )
+                masked_ids = cache["ids"]
+            else:  # single object / no page: look this one up
+                masked_ids = minor_policy.masked_ids_for_viewer(viewer, [instance.referred_id], feature=minor_policy.REFERRAL)
+            if instance.referred_id in masked_ids and isinstance(data.get("referred"), dict):
+                data["referred"] = {"id": data["referred"].get("id"), **minor_policy.masked_person(instance.referred)}
+        except Exception:  # privacy masking must never break the list
+            import logging
+
+            logging.getLogger(__name__).exception("referral minor mask failed")
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -1916,5 +2066,7 @@ class SessionRecordingSerializer(serializers.ModelSerializer):
         fields = [
             "id", "classroom", "classroom_title",
             "scheduled_start", "actual_end", "recording_url",
+            # X12 L-A: lets the app show the length and map chapters / chat without an extra call
+            "recording_started_at", "recording_duration_seconds",
         ]
         read_only_fields = fields

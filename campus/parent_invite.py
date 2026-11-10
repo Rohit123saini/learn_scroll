@@ -34,6 +34,7 @@ write path (that's what campus_service.dart's `confirmParentLink()`
 calls); `ParentLinkVerifyView` is kept only so any existing caller of
 its URL/name (`verifyParentLink()`) keeps working too, now correctly.
 """
+import logging
 from django.db.models import Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -53,6 +54,8 @@ from .permissions import is_campus_admin_or_principal, is_campus_approved
 from .serializers import CampusParentLinkSerializer
 from .throttles import CampusParentLinkVerifyThrottle
 
+
+logger = logging.getLogger(__name__)
 
 def _enrolled_student_ids(campus_id, *, department_id=None, school_class_id=None, section_id=None):
     """Currently-ACTIVE enrolled students for a campus, optionally narrowed
@@ -237,7 +240,7 @@ class CampusParentInviteSingleView(_CampusAdminOnlyMixin, APIView):
                 data={"type": "parent_invite_link", "link": link, "campus_id": str(campus.id)},
             )
         except Exception:
-            pass  # never block the response — admin still gets the link below
+            logger.exception("parent invite push failed")
 
         return Response(
             {
@@ -317,7 +320,7 @@ class CampusParentLinkConfirmView(APIView):
                 data={"type": "parent_link_confirmed", "campus_id": str(campus.id)},
             )
         except Exception:
-            pass
+            logger.exception("parent link confirmed push failed")
 
         return Response(
             CampusParentLinkSerializer(link).data,

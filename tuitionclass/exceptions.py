@@ -36,6 +36,7 @@ IntegrityError etc., once DEBUG=False).
 """
 
 import logging
+import math
 
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.db import IntegrityError
@@ -195,6 +196,12 @@ def tuitionclass_exception_handler(exc, context):
             "code": "validation_error",
             "errors": data,
         }
+
+    # L1 gap 16 -- a DRF throttle knows how long to wait; hand it to the client
+    # in the body (the Retry-After header is already set by DRF) so the app can
+    # show a countdown instead of a vague "try later".
+    if isinstance(exc, drf_exceptions.Throttled) and getattr(exc, "wait", None):
+        normalised.setdefault("retry_after", int(math.ceil(exc.wait)))
 
     response.data = normalised
     return response

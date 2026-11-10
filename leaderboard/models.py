@@ -11,6 +11,7 @@ Single table, one row per (board, user). A "board" is the tuple
   - scope_type=test_series,     scope_id=TestSeries.id
   - scope_type=campus_section,  scope_id=campus.Section.id
   - scope_type=engagement,      scope_id=None (one app-wide board)
+  - scope_type=study_time,      scope_id=message.Conversation.id (per study room) / None (app-wide, optional) — S5
   - period_type=all_time,  period_key="all"
   - period_type=weekly,    period_key=ISO week, e.g. "2026-W39"
 
@@ -33,6 +34,9 @@ class LeaderboardEntry(models.Model):
         TEST_SERIES = "test_series", "Test Series"
         CAMPUS_SECTION = "campus_section", "Campus Section"
         ENGAGEMENT = "engagement", "App-wide Engagement"
+        # S5 — study room me guzara hua time (StudyRoomAttendance.total_seconds, LiveKit webhook se).
+        # scope_id = Conversation.id (us room ke members ka board) ya None (app-wide, settings se OFF by default).
+        STUDY_TIME = "study_time", "Study Room Time"
 
     class PeriodType(models.TextChoices):
         WEEKLY = "weekly", "Weekly"

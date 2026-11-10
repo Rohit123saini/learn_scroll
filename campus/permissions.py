@@ -300,12 +300,24 @@ ROLE_ACTIONS = {
     "campus.structure.manage": _AP,
     "staff.manage": _AP,
     "panel.overview": _AP,
+    "dashboard.view": _AP,
+    "session.promote": _AP,
     "panel.assignment_matrix": _AP,
     "assignments.direct_assign": _AP,
     "bulk_import": _AP,
     "audit.view": _AP,
+    # SAFETY — backups / data-deletion queue / consent log. `safety.manage` changes things (restore additionally
+    # needs the campus ADMIN role itself, checked in the view); `safety.view` only reads.
+    "safety.view": _AP,
+    "safety.manage": _AP,
+    # CAMPUS SETTINGS — school profile / grading / working days / holidays / timetable slots (campus/settings_views.py).
+    # Reading is open to every member of the campus, so only the write side is an action.
+    "settings.manage": _AP,
     "capacity.override": _AP,
     "participants.view_campus": _AP,
+    # FINANCE — whole-campus money actions (never section-scoped).
+    "fee.manage": _AP,                              # concessions, waivers, fine/plan setup, reconciliation fixes
+    "fee.view": _AP + (ROLE_NON_TEACHING,),         # summary, exports, reconciliation read (accounts clerk)
     # section-scoped (the role must also be assigned to that section)
     "participants.view_section": _AP + (ROLE_CLASS_TEACHER,),
     "section.dashboard": _AP + (ROLE_CLASS_TEACHER,),
@@ -324,9 +336,10 @@ ROLE_ACTIONS = {
 SCOPED_ACTIONS = frozenset(
     a for a, roles in ROLE_ACTIONS.items()
     if a not in {
-        "campus.structure.manage", "staff.manage", "panel.overview", "panel.assignment_matrix",
+        "campus.structure.manage", "staff.manage", "panel.overview", "dashboard.view", "session.promote", "panel.assignment_matrix",
         "assignments.direct_assign", "bulk_import", "audit.view", "capacity.override",
-        "participants.view_campus",
+        "participants.view_campus", "fee.manage", "fee.view", "safety.view", "safety.manage",
+        "settings.manage",
     }
 )
 

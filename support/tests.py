@@ -11,7 +11,7 @@ from rest_framework.test import APITestCase
 from user_profile.models import AutoModerationFlag
 
 from . import services
-from .models import BugReport, FeatureRequest, FeatureVote, SupportMessage, SupportTicket
+from .models import BugReport, FaqFeedback, FeatureRequest, FeatureVote, SupportMessage, SupportTicket
 
 User = get_user_model()
 
@@ -257,3 +257,53 @@ class FeatureBoardTests(Base):
         self.assertEqual(r.status_code, 201)
         f = AutoModerationFlag.objects.get(target_type="feature")
         self.assertEqual((f.reason, f.target_id), ("profanity", r.data["id"]))
+
+
+# ----------------------------------------------------- S11b: FAQ feedback + diagnostics
+class FaqFeedbackTests(Base):
+    URL = "/support/faq-feedback/"
+
+    def test_save_and_overwrite_is_one_row(self):
+        r = self.client.post(self.URL, {"faq_id": "acc_forgot_password", "helpful": True, "lang": "hi"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.client.post(self.URL, {"faq_id": "acc_forgot_password", "helpful": False}, format="json")
+        rows = FaqFeedback.objects.filter(user=self.me)
+        self.assertEqual(rows.count(), 1)
+        self.assertFalse(rows.get().helpful)
+
+    def test_rejects_bad_faq_id_and_needs_login(self):
+        self.assertEqual(self.client.post(self.URL, {"faq_id": "Bad Id!", "helpful": True}, format="json").status_code, 400)
+        self.assertEqual(self.client.post(self.URL, {"faq_id": "ok_id"}, format="json").status_code, 400)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.post(self.URL, {"faq_id": "ok_id", "helpful": True}, format="json").status_code, 401)
+
+    def test_users_have_separate_rows(self):
+        self.client.post(self.URL, {"faq_id": "ok_id", "helpful": True}, format="json")
+        self.client.force_authenticate(self.other)
+        self.client.post(self.URL, {"faq_id": "ok_id", "helpful": False}, format="json")
+        self.assertEqual(FaqFeedback.objects.filter(faq_id="ok_id").count(), 2)
+
+
+class BugReportDiagnosticsTests(Base):
+    URL = "/support/bug-reports/"
+
+    def _post(self, **extra):
+        data = {"title": "App crashes", "description": "It crashes when I open the feed.", **extra}
+        return self.client.post(self.URL, data, format="multipart")
+
+    def test_diagnostics_saved_and_scrubbed(self):
+        raw = "version: 1.2.3\nuser a.b@example.com phone +91 98765 43210 Bearer abc.def.ghi"
+        r = self._post(diagnostics=raw)
+        self.assertEqual(r.status_code, 201)
+        d = BugReport.objects.get().diagnostics
+        self.assertIn("version: 1.2.3", d)
+        self.assertNotIn("example.com", d)
+        self.assertNotIn("98765", d)
+        self.assertNotIn("abc.def.ghi", d)
+
+    def test_diagnostics_optional_and_trimmed(self):
+        self.assertEqual(self._post().status_code, 201)
+        self.assertEqual(BugReport.objects.get().diagnostics, "")
+        BugReport.objects.all().delete()
+        self.assertEqual(self._post(diagnostics="x" * 20000).status_code, 201)
+        self.assertEqual(len(BugReport.objects.get().diagnostics), 8000)

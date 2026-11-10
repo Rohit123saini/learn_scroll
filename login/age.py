@@ -43,16 +43,23 @@ def is_adult_dob(dob: date | None, today: date | None = None) -> bool:
     return dob is not None and age_on(dob, today) >= adult_age()
 
 
-def dob_error(dob: date, today: date | None = None) -> str | None:
-    """Return a user-facing error string if `dob` can't be accepted, else None."""
+def dob_problem(dob: date, today: date | None = None) -> tuple[str, str] | None:
+    """``(code, message)`` if `dob` can't be accepted, else None. The code is what the
+    app translates (L1 gap 17); the message is the English fallback."""
     today = today or timezone.localdate()
     if dob > today:
-        return "Date of birth cannot be in the future."
+        return "dob_future", "Date of birth cannot be in the future."
     if age_on(dob, today) > 120:
-        return "Please enter a valid date of birth."
+        return "dob_invalid", "Please enter a valid date of birth."
     if age_on(dob, today) < min_signup_age():
-        return f"You must be at least {min_signup_age()} years old to use LearnScroll."
+        return "dob_too_young", f"You must be at least {min_signup_age()} years old to use LearnScroll."
     return None
+
+
+def dob_error(dob: date, today: date | None = None) -> str | None:
+    """Return a user-facing error string if `dob` can't be accepted, else None."""
+    problem = dob_problem(dob, today)
+    return problem[1] if problem else None
 
 
 def minor_cutoff_date(today: date | None = None) -> date:

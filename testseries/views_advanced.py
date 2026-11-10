@@ -55,7 +55,7 @@ from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import generics, status
+from rest_framework import generics, serializers, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -250,6 +250,46 @@ class SeriesAdvancedActionsMixin:
             raise ValidationError({"file": "Image is larger than 5 MB."})
         name = default_storage.save(f"testseries/option_images/{uuid.uuid4().hex}.{ext}", upload)
         return Response({"url": request.build_absolute_uri(default_storage.url(name))}, status=status.HTTP_201_CREATED)
+
+    # ------------------------------------------------------ TS3 cover picture
+    @action(
+        detail=True, methods=["post", "delete"], url_path="cover",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def cover(self, request, pk=None):
+        """TS3 - set (POST multipart `file`) or remove (DELETE) the series' cover picture. Creator only (the object
+        permission already says so for every non-editor action). Allowed in any status: a cover is cosmetic, so it can
+        be changed after publishing. JPG / PNG / WEBP, 5 MB. Returns the series (with `cover_url`)."""
+        series = self.get_object()
+        _require_creator(request.user, series)
+        old_name = series.cover_image.name if series.cover_image else ""
+
+        if request.method == "DELETE":
+            series.cover_image = None
+            series.save(update_fields=["cover_image", "updated_at"])
+            if old_name:
+                default_storage.delete(old_name)
+            return Response(TestSeriesSerializer(series, context={"request": request}).data)
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "Attach an image."})
+        ext = os.path.splitext(upload.name or "")[1].lower().lstrip(".")
+        if ext not in OPTION_IMAGE_EXTENSIONS:
+            raise ValidationError({"file": "Only JPG, PNG or WEBP images are allowed."})
+        if upload.size > OPTION_IMAGE_MAX_BYTES:
+            raise ValidationError({"file": "Image is larger than 5 MB."})
+        # Pillow check BEFORE anything is stored: a text file renamed to .jpg is refused here.
+        try:
+            serializers.ImageField().run_validation(upload)
+        except serializers.ValidationError:
+            raise ValidationError({"file": "That file is not a valid image."})
+        upload.seek(0)
+        series.cover_image.save(f"{uuid.uuid4().hex}.{ext}", upload, save=False)
+        series.save(update_fields=["cover_image", "updated_at"])
+        if old_name and old_name != series.cover_image.name:
+            default_storage.delete(old_name)
+        return Response(TestSeriesSerializer(series, context={"request": request}).data)
 
     # ------------------------------------------------------ results
     @action(detail=True, methods=["post"], url_path="release-results")
@@ -1097,6 +1137,35 @@ class MyCertificatesView(generics.ListAPIView):
 
     def get_queryset(self):
         return TestCertificate.objects.filter(student=self.request.user).select_related("student", "series")
+
+
+class UserCertificatesView(generics.ListAPIView):
+    """P2 - `GET /testseries/certificates/of/<username>/` - the VALID certificates shown on someone's profile.
+
+    Same gate as their posts: a blocked person sees "no such user" (404), a private account shows nothing (empty
+    list) until the viewer follows. Revoked certificates are never listed for visitors. Your own profile uses
+    `certificates/mine/` (which keeps revoked ones visible to you)."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = TestCertificateSerializer
+
+    def get_queryset(self):
+        from user_profile.models import Follow
+        from user_profile.views import is_blocked_between
+
+        owner = User.objects.filter(username__iexact=self.kwargs["username"], is_active=True).first()
+        me = self.request.user
+        if owner is None:
+            raise NotFound("No such user.")
+        if owner.id != me.id:
+            if is_blocked_between(me, owner):
+                raise NotFound("No such user.")
+            if owner.is_private and not Follow.objects.filter(follower=me, following=owner, status=Follow.Status.ACCEPTED).exists():
+                return TestCertificate.objects.none()
+        qs = TestCertificate.objects.filter(student=owner).select_related("student", "series")
+        if owner.id != me.id:
+            qs = qs.filter(revoked_at__isnull=True)
+        return qs
 
 
 class LiveKitWebhookView(APIView):

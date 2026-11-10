@@ -1,0 +1,38 @@
+// P-D9 - size-related Gradle settings. MERGE by hand into android/app/build.gradle (Groovy; for .kts translate the syntax).
+// Not applied to a real android/ folder (it was not in the zip) and never built. Each block says if it needs YOUR decision.
+
+android {
+    defaultConfig {
+        // 1) Only ship string resources for the languages the app has (en + hi). Libraries such as Play Services / Firebase bring ~80 locales.
+        //    Safe for the AAB (Play already splits by language) and for a fat APK. Add "mr","bn","ta","te" when LOCALE_ROADMAP.md ships them.
+        resConfigs "en", "hi"
+
+        // 2) DECISION: drop x86 / x86_64 native libs (only emulators + a few Chromebooks). Saves a full ABI copy of ffmpeg / webrtc / mlkit
+        //    in the AAB. Leave commented if you must support x86 emulators in release builds.
+        // ndk { abiFilters "arm64-v8a", "armeabi-v7a" }
+    }
+
+    bundle {
+        // 3) Defaults are already "true"; written out so nobody turns one off by accident (a false here = every user downloads everything).
+        language { enableSplit = true }
+        density  { enableSplit = true }
+        abi      { enableSplit = true }
+    }
+
+    buildTypes {
+        release {
+            // already in store_readiness/android/app-build.gradle.snippet - repeated here as the size-relevant pair:
+            minifyEnabled true
+            shrinkResources true
+        }
+    }
+
+    // 4) Do NOT set packagingOptions.jniLibs.useLegacyPackaging = true: it compresses .so in the APK (smaller file) but makes installs
+    //    bigger on disk and slower; Play's own download is compressed anyway.
+}
+
+// Flutter build flags that matter for size (also in CI "app-size" job and `make size-check-*`):
+//   flutter build appbundle --release --tree-shake-icons
+//   (default) tree-shaking of Material icon fonts is ON for release; `--no-tree-shake-icons` would add ~1 MB.
+//   DECISION: --obfuscate --split-debug-info=build/symbols  -> a few % smaller Dart code, BUT crash stack traces in Sentry become unreadable
+//   until the symbols are uploaded (sentry_dart_plugin / `sentry-cli debug-files upload build/symbols`). Do it only together with that upload step.

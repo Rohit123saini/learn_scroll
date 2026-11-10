@@ -6,7 +6,7 @@ import logging
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import Http404
 from django.utils import timezone
 from django.http.request import RawPostDataException
@@ -25,7 +25,12 @@ from common.pagination import get_max_page_size
 from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 
 from . import activity, fraud
+from . import profile_header  # P1
+from . import privacy as privacy_rules  # S4
+from .pref_etag import if_match_state, if_none_match_hits, make_etag  # S2
 from .discovery import mutual_followers_queryset, suggested_users_queryset  # P8-BE
+from . import relationships  # P8
+from . import profile_state  # P10
 from .models import (
     BlockUser,
     CoinLedger,
@@ -34,14 +39,17 @@ from .models import (
     CoinWithdrawalRequest,
     DailyUsage,
     Follow,
+    PrivacySettings,
     RestrictUser,
     Streak,
     StreakFreezeError,
+    SpendLimitExceeded,
     UserPreference,
     WeeklyRecap,
     WithdrawalNotEligible,
 )
 from .activity import ActivityLimitSerializer, HeartbeatSerializer  # P14-BE
+from . import role_settings  # S12
 from .services import (  # P11-BE
     ReportRateLimited,
     blocked_user_ids,
@@ -50,11 +58,14 @@ from .services import (  # P11-BE
     remove_follower,
 )
 from .throttles import CoinPurchaseBurstThrottle, CoinPurchaseDailyThrottle
+from login.sensitive import SensitiveWriteThrottle, changed_fields as _x6_changed_fields, record_change as _x6_record_change  # X6
+from login import audit as _x6_audit  # X6 -- audit Event names
 from .serializers import (
     MutualFollowersResponseSerializer,  # P8-BE
     SimilarUsersResponseSerializer,  # P8-BE
     BlockUserSerializer,
     BlockedTargetUserProfileSerializer,
+    BulkFollowRequestSerializer,  # P8
     ContentReportCreateSerializer,
     CoinLedgerSerializer,
     CoinPurchaseConfirmSerializer,
@@ -65,6 +76,7 @@ from .serializers import (
     FollowActionResponseSerializer,
     FollowListRowSerializer,
     MessageContactSearchSerializer,
+    PrivacySettingsSerializer,
     ProfileUpdateSerializer,
     RestrictedTargetUserProfileSerializer,
     RestrictUserSerializer,
@@ -180,6 +192,7 @@ class UserProfileDetailView(GenericAPIView):
     )
     def get(self, request, username):
         target_user = get_object_or_404(User, username=username)
+        is_self = target_user == request.user
 
         # 🔥 FIX: block wasn't checked anywhere — a blocked/blocking user
         # could still look up the full profile. Mimic "user not found"
@@ -187,25 +200,38 @@ class UserProfileDetailView(GenericAPIView):
         # Instagram behaviour: the person who got blocked sees "not found";
         # the person who did the blocking still gets a minimal card so the
         # app can show "You blocked this account" + an Unblock button.
+        # P10: both directions in ONE query (was two), both follow rows in ONE query (was two).
         is_blocked_by_me = False
-        if target_user != request.user:
-            if BlockUser.objects.filter(blocker=target_user, blocked=request.user).exists():
+        my_follow_obj = None
+        their_follow_obj = None
+        if not is_self:
+            blockers = set(
+                BlockUser.objects.filter(
+                    Q(blocker=target_user, blocked=request.user) | Q(blocker=request.user, blocked=target_user)
+                ).values_list("blocker_id", flat=True)
+            )
+            if target_user.pk in blockers:
                 raise Http404
-            is_blocked_by_me = BlockUser.objects.filter(
-                blocker=request.user, blocked=target_user
-            ).exists()
+            is_blocked_by_me = request.user.pk in blockers
 
-        my_follow_obj = Follow.objects.filter(
-            follower=request.user, following=target_user
-        ).first()
-        their_follow_obj = Follow.objects.filter(
-            follower=target_user, following=request.user
-        ).first()
+            for f in Follow.objects.filter(
+                Q(follower=request.user, following=target_user) | Q(follower=target_user, following=request.user)
+            ):
+                if f.follower_id == request.user.pk:
+                    my_follow_obj = f
+                else:
+                    their_follow_obj = f
 
-        is_self = target_user == request.user
         is_accepted_follower = bool(
             my_follow_obj and my_follow_obj.status == Follow.Status.ACCEPTED
         )
+
+        # P9 - one profile open counts as one visit for the owner's insights (counts only, never who; not for
+        # yourself, blocked pairs or under-18 visitors; failures are swallowed inside record_visit).
+        if not is_self and not is_blocked_by_me:
+            from .profile_insights import record_visit
+
+            record_visit(target_user, request.user, blocks_checked=True)
 
         # 🔥 FIX: `is_private` existed on the model and was even returned
         # in the response body, but nothing ever *enforced* it — anyone
@@ -214,20 +240,33 @@ class UserProfileDetailView(GenericAPIView):
         # public accounts, or accepted followers; everyone else gets a
         # minimal "this account is private" style payload.
         is_muted_by_me = False
+        mute_posts = False
+        mute_stories = False
         if not is_self:
             from post.models import MutedAccount
 
-            is_muted_by_me = MutedAccount.objects.filter(user=request.user, muted_user=target_user).exists()
+            mute_row = MutedAccount.objects.filter(user=request.user, muted_user=target_user).first()
+            if mute_row is not None:
+                is_muted_by_me = True
+                mute_posts, mute_stories = mute_row.mute_posts, mute_row.mute_stories  # P8
 
         is_restricted_view = target_user.is_private and not is_self and not is_accepted_follower
+        # P10: a suspended / deactivated account is "not available" to everybody but its owner (blocker still gets the
+        # Unblock card first - they need that button).
+        is_suspended = (not is_self) and not target_user.is_active
         if is_blocked_by_me:
             # Only identity (photo/name) — no bio, counts, links or posts.
             is_restricted_view = True
             profile_data = BlockedTargetUserProfileSerializer(target_user).data
+        elif is_suspended:
+            is_restricted_view = True
+            profile_data = profile_state.unavailable_card(target_user)
         elif is_restricted_view:
             profile_data = RestrictedTargetUserProfileSerializer(target_user).data
         else:
-            profile_data = TargetUserProfileSerializer(target_user).data
+            # P1: `viewer` lets the serializer hide location/links of under-18 accounts and show
+            # owner-only extras (completeness, username_change) on your own profile.
+            profile_data = TargetUserProfileSerializer(target_user, context={"viewer": request.user}).data
 
         # TASK 18: whether *I* restrict the target — never the reverse
         # (see is_restricted_between's docstring). False for your own
@@ -248,10 +287,15 @@ class UserProfileDetailView(GenericAPIView):
                 "my_follow_id": my_follow_obj.id if my_follow_obj else None,
                 "their_follow_status": their_follow_obj.status if their_follow_obj else None,
                 "their_follow_id": their_follow_obj.id if their_follow_obj else None,
+                "profile_state": profile_state.classify(
+                    is_blocked_by_me=is_blocked_by_me, is_suspended=is_suspended, is_restricted_view=is_restricted_view
+                ),  # P10 - ok | private | blocked_by_me | suspended (blocked-ME = 404 on purpose)
                 "is_restricted_view": is_restricted_view,
                 "am_i_restricting": am_i_restricting,
                 "is_blocked_by_me": is_blocked_by_me,
                 "is_muted_by_me": is_muted_by_me,
+                "mute_posts": mute_posts,  # P8 - what the mute covers (both False when not muted)
+                "mute_stories": mute_stories,
                 "data": profile_data,
             },
             status=status.HTTP_200_OK,
@@ -278,7 +322,9 @@ class UserSearchView(ListAPIView):
             excluded_ids.add(blocker_id)
             excluded_ids.add(blocked_id)
 
-        return User.objects.filter(is_active=True).exclude(id__in=excluded_ids)
+        qs = User.objects.filter(is_active=True).exclude(id__in=excluded_ids)
+        # S4 -- "hide me from search": gone for everyone except people with an accepted follow link.
+        return privacy_rules.exclude_hidden_from_search(qs, self.request.user)
 
     @extend_schema(
         parameters=[
@@ -330,6 +376,8 @@ class MutualFollowersView(APIView):
         me = request.user
 
         if target != me and is_blocked_between(me, target):
+            raise Http404
+        if target != me and not target.is_active:  # P11b: a switched-off account is "no such user" here too
             raise Http404
 
         empty = Response({"status": True, "preview": [], "total": 0}, status=status.HTTP_200_OK)
@@ -405,7 +453,9 @@ class MessageContactSearchView(ListAPIView):
     ALAG hai: yahan poore app ke users nahi, sirf wahi log aate hain
     jinko maine follow kiya hua hai YA jinhone mujhe follow kiya hua hai
     (dono me se ek bhi kaafi hai, pura mutual hona zaroori nahi — warna
-    list bahut chhoti reh jaati). Response me profile_photo/bio waghera
+    list bahut chhoti reh jaati) AUR unke friends-of-friends (mere kisi
+    connection ke connection) — wo list me direct connections ke BAAD aate
+    hain, `is_friend_of_friend: true` ke saath. Response me profile_photo/bio waghera
     nahi, sirf id/username/first_name/last_name/mutual_friends.
 
     🔥 FIX (private-profile discovery leak): `is_private` accounts were
@@ -442,20 +492,51 @@ class MessageContactSearchView(ListAPIView):
         # 🔥 FIX: someone you've since blocked (or who blocked you) could
         # still show up here as a "connection" and be pickable as a chat
         # contact — excluded in both directions.
-        return (
-            User.objects.filter(
-                Q(id__in=my_following_ids) | Q(id__in=my_follower_ids)
+        # Friends-of-friends: accepted connections of MY connections (either
+        # direction). Still pure subqueries — no Python set, no giant IN-list.
+        fof_via_follower = accepted.filter(
+            Q(follower_id__in=my_following_ids) | Q(follower_id__in=my_follower_ids)
+        ).values("following_id")
+        fof_via_following = accepted.filter(
+            Q(following_id__in=my_following_ids) | Q(following_id__in=my_follower_ids)
+        ).values("follower_id")
+
+        # Chat-side block table (message.BlockedUser) is separate from
+        # user_profile.BlockUser — local import, message imports user_profile.
+        from message.models import BlockedUser as ChatBlockedUser
+
+        qs = (
+            User.objects.filter(is_active=True)
+            .filter(
+                Q(id__in=my_following_ids)
+                | Q(id__in=my_follower_ids)
+                | Q(id__in=fof_via_follower)
+                | Q(id__in=fof_via_following)
             )
             # Private-profile gate: public users always pass; a private
             # user only passes if I'm already their accepted follower
             # (same "can I actually see this profile" test as
             # `UserProfileDetailView.is_accepted_follower`) — a person who
-            # merely follows *me* doesn't clear that bar.
+            # merely follows *me* (or is only a friend-of-friend) doesn't
+            # clear that bar.
             .filter(Q(is_private=False) | Q(id__in=my_following_ids))
             .exclude(id=me.id)
             .exclude(id__in=BlockUser.objects.filter(blocker=me).values("blocked_id"))
             .exclude(id__in=BlockUser.objects.filter(blocked=me).values("blocker_id"))
+            .exclude(id__in=ChatBlockedUser.objects.filter(blocker=me).values("blocked_id"))
+            .exclude(id__in=ChatBlockedUser.objects.filter(blocked=me).values("blocker_id"))
+            # Direct connections first, friends-of-friends after them.
+            .annotate(
+                _direct=Case(
+                    When(Q(id__in=my_following_ids) | Q(id__in=my_follower_ids), then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by("_direct", "username", "id")
         )
+        # S4 -- direct connections stay findable even when hidden; friends-of-friends who hid themselves do not.
+        return privacy_rules.exclude_hidden_from_search(qs, me)
 
     def get_serializer_context(self):
         return {
@@ -506,6 +587,34 @@ class MessageContactSearchView(ListAPIView):
         })
 
 
+def _follow_lists_hidden_response(view, request, message):
+    """S4 -- None when `request.user` may open the followers / following list of `<username>`, else the 200 reply with
+    `hidden: true` and an empty page (same shape as the real answer, so no client has to special-case an error)."""
+    target = get_object_or_404(User, username=view.kwargs["username"])
+    me = request.user
+    allowed = True
+    if target.pk != me.pk:
+        # P11b - the same rules the profile page itself follows (UserProfileDetailView / MutualFollowersView):
+        #   * a block in EITHER direction looks exactly like "no such user" (404, nothing leaks);
+        #   * a switched-off (suspended) account shows nothing;
+        #   * a PRIVATE account's lists are for its accepted followers only - who follows a private account is not
+        #     something a stranger or a pending requester may read (before this the owner's audience control alone
+        #     decided, and its default is "everyone").
+        if is_blocked_between(me, target):
+            raise Http404
+        if not target.is_active:
+            allowed = False
+        elif target.is_private and not Follow.objects.filter(
+            follower=me, following=target, status=Follow.Status.ACCEPTED
+        ).exists():
+            allowed = False
+    if allowed and privacy_rules.can_see_follow_lists(target, me):
+        return None
+    paginator = view.paginator
+    empty = {"count": 0, "next": None, "previous": None, "results": []} if paginator is not None else []
+    return Response({"status": True, "message": message, "hidden": True, "data": empty})
+
+
 class FollowersListView(ListAPIView):
     """
     GET /profile/profile/<username>/followers/
@@ -519,12 +628,13 @@ class FollowersListView(ListAPIView):
     serializer_class = FollowListRowSerializer
 
     def get_queryset(self):
+        # P8: ?q= search, ?sort=latest|oldest|name, ?filter=all|mutual|not_following_back
+        # (see user_profile/relationships.py for the exact meaning of each).
         target_user = get_object_or_404(User, username=self.kwargs["username"])
-        follower_ids = Follow.objects.filter(
-            following=target_user, status=Follow.Status.ACCEPTED
-        ).values_list("follower_id", flat=True)
-        return User.objects.filter(id__in=follower_ids).exclude(
-            id__in=blocked_user_ids(self.request.user)
+        q, sort, flt = relationships.parse_list_params(self.request.query_params)
+        return relationships.follow_list_queryset(
+            target_user, self.request.user, followers=True, q=q, sort=sort, flt=flt,
+            exclude_ids=blocked_user_ids(self.request.user),
         )
 
     def get_serializer_context(self):
@@ -538,6 +648,11 @@ class FollowersListView(ListAPIView):
 
     @extend_schema(description="List of a user's followers, with mutual_friends relative to you")
     def list(self, request, *args, **kwargs):
+        # S4 -- the owner chose who may open this list. Answer 200 + `hidden: true` + an empty page (an old app build
+        # then just shows an empty list instead of an error dialog).
+        hidden = _follow_lists_hidden_response(self, request, "Followers fetched successfully.")
+        if hidden is not None:
+            return hidden
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         if page is None:
@@ -578,12 +693,12 @@ class FollowingListView(ListAPIView):
     serializer_class = FollowListRowSerializer
 
     def get_queryset(self):
+        # P8: same query params as the followers list.
         target_user = get_object_or_404(User, username=self.kwargs["username"])
-        following_ids = Follow.objects.filter(
-            follower=target_user, status=Follow.Status.ACCEPTED
-        ).values_list("following_id", flat=True)
-        return User.objects.filter(id__in=following_ids).exclude(
-            id__in=blocked_user_ids(self.request.user)
+        q, sort, flt = relationships.parse_list_params(self.request.query_params)
+        return relationships.follow_list_queryset(
+            target_user, self.request.user, followers=False, q=q, sort=sort, flt=flt,
+            exclude_ids=blocked_user_ids(self.request.user),
         )
 
     def get_serializer_context(self):
@@ -597,6 +712,9 @@ class FollowingListView(ListAPIView):
 
     @extend_schema(description="List of who a user is following, with mutual_friends relative to you")
     def list(self, request, *args, **kwargs):
+        hidden = _follow_lists_hidden_response(self, request, "Following fetched successfully.")  # S4
+        if hidden is not None:
+            return hidden
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         if page is None:
@@ -695,6 +813,25 @@ class FollowAPIView(GenericAPIView):
             follower=request.user, following=following_user
         ).first()
 
+        # T0.6: `only_follow=true` (push-notification "Follow back" button) makes this
+        # idempotent — if the relationship already exists, report it instead of
+        # toggling it off. Without this, tapping "Follow back" on a stale push would
+        # silently UNFOLLOW the user.
+        only_follow = str(request.data.get("only_follow", "")).lower() in ("1", "true", "yes")
+        # H5 - explicit intent for replaying a queued offline tap: desired="follow" behaves like only_follow
+        # (never toggles an existing relation off), desired="unfollow" never creates one.
+        desired = str(request.data.get("desired", "")).lower()
+        if desired == "follow":
+            only_follow = True
+        if desired == "unfollow" and not follow_obj:
+            return Response({"message": "Not following", "status": None}, status=status.HTTP_200_OK)
+        if follow_obj and only_follow:
+            return Response({
+                "message": "Follow request sent" if follow_obj.status == Follow.Status.PENDING else "Already following",
+                "status": follow_obj.status,
+                "follow_id": follow_obj.id,
+            }, status=status.HTTP_200_OK)
+
         if follow_obj:
             # Unfollow. followers_count/following_count are NOT touched
             # here any more — the Follow post_delete signal
@@ -702,6 +839,9 @@ class FollowAPIView(GenericAPIView):
             was_accepted = follow_obj.status == Follow.Status.ACCEPTED
             follow_obj.delete()
             if was_accepted:
+                from .profile_insights import record_loss  # P9b: a number only, never who
+
+                record_loss(following_user)
                 # N2-BE: drop them from the recipient's OPEN "new followers"
                 # batch (no-op once the window closed; never raises).
                 from core.notification_batching import remove_actor_from_batch
@@ -794,21 +934,12 @@ class FollowAPIView(GenericAPIView):
             )
             from .services import push_for_row
 
-            def _follow_back_data(count, actors, latest):
-                # Follow-back button only makes sense for ONE actor; a
-                # merged row (count > 1) has no single "actor" to follow back.
-                if count != 1:
-                    return {"is_following_actor": None}
-                return {
-                    "is_following_actor": Follow.objects.filter(
-                        follower=following_user, following=request.user,
-                        status=Follow.Status.ACCEPTED,
-                    ).exists(),
-                }
-
+            # N2 — `is_following_actor` is NOT stored in the row's data any
+            # more (it was a snapshot taken at creation time and went stale
+            # the moment the user followed back). NotificationSerializer now
+            # computes it live from the Follow table on every list/retrieve.
             create_batched_notification(
                 actor=request.user,
-                data_fn=_follow_back_data,
                 extra_data={"kind": "new_follower"},
                 max_age_seconds=get_batch_max_age("new_follower"),
                 # 3.2: push only for the FIRST follower of a batch (later ones
@@ -870,12 +1001,8 @@ class AcceptFollowRequestView(GenericAPIView):
             "Follow request accepted",
             f"{request.user.username} accepted your follow request.",
             actor=request.user,
-            # TASK 6: accepting IS the follower relationship — the
-            # recipient (the original requester) is guaranteed to already
-            # follow the actor at this point, no query needed (contrast
-            # with the public-auto-follow branch in FollowAPIView.post
-            # above, which can't assume this and checks).
-            data={"is_following_actor": True},
+            # N2 — no `is_following_actor` snapshot in data: the serializer
+            # derives it live from the Follow table (see NotificationSerializer).
         )
 
         return Response({
@@ -1017,14 +1144,80 @@ class FollowRequestsListView(ListAPIView):
         })
 
 
+class BulkFollowRequestsView(GenericAPIView):
+    """
+    P8 - POST /profile/follow-requests/bulk/
+
+        {"action": "accept" | "decline", "follow_ids": [12, 15, ...]}      (max 100)
+        {"action": "accept" | "decline", "select_all": true}               (newest 100 pending)
+
+    Answer: {"status": true, "action", "processed", "ids", "skipped", "remaining"}.
+    Only requests addressed to the logged-in user count; anything else lands in `skipped` (no error), so an
+    app that raced a single accept/delete just sees it in `skipped`. `remaining` > 0 -> call again.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = BulkFollowRequestSerializer
+
+    @extend_schema(
+        request=BulkFollowRequestSerializer,
+        responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT},
+        description="Accept or decline many pending follow requests at once",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+        data = serializer.validated_data
+        result = relationships.bulk_resolve_requests(
+            request.user,
+            action=data["action"],
+            follow_ids=data.get("follow_ids"),
+            select_all=data.get("select_all", False),
+        )
+        return Response({"status": True, **result}, status=status.HTTP_200_OK)
+
+
+class RelationshipSummaryView(APIView):
+    """
+    P8 - GET /profile/relationships/summary/
+
+    Counts for the "Relationships" hub (followers, following, requests, not_following_back, close_friends,
+    restricted, blocked, muted) - one call instead of eight list requests.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: OpenApiTypes.OBJECT}, description="Counts for the relationships hub")
+    def get(self, request):
+        return Response({
+            "status": True,
+            "data": relationships.relationship_counts(request.user),
+        }, status=status.HTTP_200_OK)
+
+
+# X6 -- profile fields whose change is written to the audit trail (login.AuthAuditLog) -> event name.
+_X6_PROFILE_SENSITIVE = {
+    "username": _x6_audit.Event.USERNAME_CHANGED,
+    "date_of_birth": _x6_audit.Event.DOB_CHANGED,
+    "is_private": _x6_audit.Event.ACCOUNT_PRIVACY_CHANGED,
+}
+
+
 class UpdateProfileView(GenericAPIView):
     """
     Update logged-in user's profile
-    Allowed fields: username, first_name, last_name, bio, profile_photo, is_private
+    Allowed fields: username, first_name, last_name, bio, profile_photo, is_private,
+    pronouns, category_label, links (max 5), location, cover_photo, remove_profile_photo, remove_cover_photo
     """
     permission_classes = [IsAuthenticated]
     serializer_class = ProfileUpdateSerializer
     parser_classes = [MultiPartParser, FormParser]  # Image upload ke liye zaruri
+    # X6 -- profile edits (username / DOB / private account) are writes to the account's identity: capped per hour.
+    throttle_classes = [UserRateThrottle, SensitiveWriteThrottle]  # + the project-wide per-user floor
+    throttle_scope = "profile_update"
 
     @extend_schema(
         request=ProfileUpdateSerializer,
@@ -1056,18 +1249,73 @@ class UpdateProfileView(GenericAPIView):
         )
 
         if serializer.is_valid():
-            serializer.save()
+            try:  # X3 - completeness BEFORE the save (the instance is mutated by it)
+                completeness_before = profile_header.profile_completeness(request.user)
+            except Exception:
+                completeness_before = None
+            # X6 - values BEFORE the save (same reason); only the field NAMES that changed are ever audited.
+            sensitive_before = {k: getattr(request.user, k, None) for k in _X6_PROFILE_SENSITIVE}
+            try:
+                with transaction.atomic():
+                    serializer.save()
+            except IntegrityError:
+                # P1: two people grabbed the same username in the same instant (the DB unique key decided).
+                return Response({
+                    "status": False,
+                    "message": "Validation failed.",
+                    "errors": {"username": [profile_header.username_message("taken")]},
+                    "username_code": "taken",
+                }, status=status.HTTP_400_BAD_REQUEST)
+            try:  # X6 - audit trail for identity-level changes (field names only, never the values)
+                sensitive_after = {k: getattr(request.user, k, None) for k in _X6_PROFILE_SENSITIVE}
+                for _field, _event in _X6_PROFILE_SENSITIVE.items():
+                    if _x6_changed_fields(request.data, [_field], sensitive_before, sensitive_after):
+                        _x6_record_change(_event, request, request.user, [_field])
+            except Exception:
+                logger.warning("profile sensitive-change audit failed (user=%s)", request.user.pk, exc_info=True)
+            try:  # X3 - profile funnel: which field got filled, new progress bucket, reached 100 % (consent-gated)
+                from core import product_analytics as _pa
+
+                _pa.track_profile_change(request.user, completeness_before,
+                                         profile_header.profile_completeness(request.user))
+            except Exception:
+                pass
             return Response({
                 "status": True,
                 "message": "Profile updated successfully.",
                 "data": serializer.data,
             }, status=status.HTTP_200_OK)
 
-        return Response({
-            "status": False,
-            "message": "Validation failed.",
-            "errors": serializer.errors,
-        }, status=status.HTTP_400_BAD_REQUEST)
+        errors = serializer.errors
+        body = {"status": False, "message": "Validation failed.", "errors": errors}
+        uname = errors.get("username")
+        if uname:  # P1: machine-readable reason (taken | limit | reserved | too_short | bad_chars ...) for the app's own texts
+            body["username_code"] = getattr(uname[0], "code", "") or "invalid"
+        dob = errors.get("date_of_birth")
+        if dob:  # P7: dob_future | dob_too_young | dob_invalid | dob_locked (the app has its own EN/HI text per code)
+            body["dob_code"] = getattr(dob[0], "code", "") or "dob_invalid"
+        return Response(body, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UsernameCheckView(APIView):
+    """GET /profile/username/check/?username=<name>   (P1)
+
+    "Is this name free?" while typing (the app debounces ~400 ms). Always 200 with
+        {"status": true, "data": {"username", "valid", "available", "code", "message",
+                                  "can_change", "next_change_at", "days_left", "window_days"}}
+    code: ok | same | empty | too_short | too_long | bad_chars | bad_edges | all_digits | reserved | limit | taken.
+    Throttled (profile_username_check) so it can't be used to list every taken name.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "profile_username_check"
+
+    def get(self, request):
+        raw = request.query_params.get("username")
+        if raw is None:
+            return Response({"status": False, "message": "username is required."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"status": True, "data": profile_header.check_username(request.user, raw[:100])})
 
 
 # Block / Unblock user
@@ -1194,7 +1442,7 @@ class BlockedUsersView(GenericAPIView):
 
 class ContentReportView(GenericAPIView):
     """
-    POST /profile/reports/ {"target_type": "user|post|comment|story",
+    POST /profile/reports/ {"target_type": "user|post|comment|story|message|class_chat|live_session|profile_photo",
                             "target_id": "...", "reason": "...", "details": "..."}
 
     201 first time, 200 if I had already reported the same thing. The
@@ -1232,6 +1480,13 @@ class ContentReportView(GenericAPIView):
         if d["reason"] == "copyright" and d["target_type"] in ("post", "story"):
             body["next"] = "copyright_claim"
             body["message"] = "To take this down, please complete the copyright notice."
+        if d["reason"] == "child_safety":
+            # Urgent: tell the reporter what to do next (Childline 1098 / police 112 / online portals).
+            from .child_safety import help_info
+
+            body["next"] = "child_safety_help"
+            body["help"] = help_info()
+            body["message"] = help_info()["message"]
         return Response(body, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
@@ -1290,11 +1545,23 @@ class RestrictedUsersView(GenericAPIView):
     )
     def get(self, request):
         qs = RestrictUser.objects.filter(user=request.user).select_related("restricted")
-        serializer = self.get_serializer(qs, many=True)
+        # P8: ?q= search + optional ?limit=&offset= paging (same contract as blocked-users/;
+        # without `limit` the whole list comes back like before, capped at 500).
+        q = (request.query_params.get("q") or "").strip()[:relationships.MAX_QUERY_LEN]
+        if q:
+            qs = qs.filter(
+                Q(restricted__username__icontains=q)
+                | Q(restricted__first_name__icontains=q)
+                | Q(restricted__last_name__icontains=q)
+            )
+        rows, has_more, next_offset = relationships.paged_rows(request.query_params, qs)
+        serializer = self.get_serializer(rows, many=True)
         return Response({
             "status": True,
             "message": "Restricted users fetched successfully.",
             "data": serializer.data,
+            "has_more": has_more,
+            "next_offset": next_offset,
         }, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -1961,6 +2228,9 @@ class CoinWithdrawalRequestView(GenericAPIView):
     """
     permission_classes = [IsAuthenticated]
     serializer_class = CoinWithdrawalRequestSerializer
+    # X6 -- money leaves the wallet here: POSTs capped per hour (GET list is free), a refusal is audited.
+    throttle_classes = [UserRateThrottle, SensitiveWriteThrottle]  # + the project-wide per-user floor
+    throttle_scope = "withdrawal_request"
 
     @extend_schema(
         responses={200: CoinWithdrawalRequestSerializer(many=True)},
@@ -2003,6 +2273,10 @@ class CoinWithdrawalRequestView(GenericAPIView):
         # from the 402 below.
         is_eligible, reason = fraud.is_withdrawal_eligible(request.user, data["coins"])
         if not is_eligible:
+            _x6_record_change(  # X6 -- no amount, no payout details: just that a request was refused
+                _x6_audit.Event.WITHDRAWAL_BLOCKED, request, request.user, outcome=_x6_audit.BLOCKED,
+                reason="not_eligible",
+            )
             return Response({
                 "status": False,
                 "message": reason,
@@ -2036,6 +2310,10 @@ class CoinWithdrawalRequestView(GenericAPIView):
                 "message": str(exc),
             }, status=status.HTTP_402_PAYMENT_REQUIRED)
 
+        _x6_record_change(  # X6 -- the request id + payout METHOD only; never the amount or the UPI / bank details
+            _x6_audit.Event.WITHDRAWAL_REQUESTED, request, request.user,
+            withdrawal_id=getattr(withdrawal, "pk", 0) or 0, payout_method=str(data.get("payout_method", ""))[:20],
+        )
         return Response({
             "status": True,
             "message": "Withdrawal requested successfully.",
@@ -2255,12 +2533,16 @@ class UserPreferenceView(GenericAPIView):
     )
     def get(self, request):
         preference = UserPreference.for_user(request.user)
+        etag = make_etag(preference)
+        # S2 — client ke paas yahi version hai to body mat bhejo.
+        if if_none_match_hits(request.headers.get("If-None-Match"), etag):
+            return Response(status=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
         serializer = self.get_serializer(preference)
         return Response({
             "status": True,
             "message": "Preferences fetched successfully.",
             "data": serializer.data,
-        }, status=status.HTTP_200_OK)
+        }, status=status.HTTP_200_OK, headers={"ETag": etag})
 
     @extend_schema(
         request=UserPreferenceSerializer,
@@ -2268,11 +2550,49 @@ class UserPreferenceView(GenericAPIView):
         description="Update current user's theme/language preferences. Send only fields you want to update.",
     )
     def patch(self, request):
-        preference = UserPreference.for_user(request.user)
-        serializer = self.get_serializer(preference, data=request.data, partial=True)
+        # S2 — optional optimistic concurrency. `If-Match` na ho (purane clients) to pehle jaisa field-wise
+        # last-write-wins; ho aur stale ho to 412 + current preferences, kuch save nahi hota.
+        # Row lock: check aur save beech me doosra device ghus na sake.
+        with transaction.atomic():
+            UserPreference.for_user(request.user)  # lazy get-or-create
+            preference = UserPreference.objects.select_for_update().get(user=request.user)
+            current_etag = make_etag(preference)
 
-        if serializer.is_valid():
-            serializer.save()
+            if if_match_state(request.headers.get("If-Match"), current_etag) == "stale":
+                return Response({
+                    "status": False,
+                    "code": "preferences_conflict",
+                    "message": "Preferences kisi aur device se badal chuki hain.",
+                    "data": self.get_serializer(preference).data,
+                }, status=status.HTTP_412_PRECONDITION_FAILED, headers={"ETag": current_etag})
+
+            alerts_before = preference.login_alerts  # S3 -- audit when the new-device e-mail switch flips
+            serializer = self.get_serializer(preference, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                saved = True
+            else:
+                saved = False
+
+        if saved:
+            # S3 -- turning login alerts off/on is a security-relevant change: leave a trail in the Security activity.
+            try:
+                if serializer.instance.login_alerts != alerts_before:
+                    from login import audit as _auth_audit
+
+                    _auth_audit.record(
+                        _auth_audit.Event.LOGIN_ALERTS_CHANGED, request, user=request.user,
+                        enabled=bool(serializer.instance.login_alerts),
+                    )
+            except Exception:
+                logger.warning("login_alerts audit failed (user=%s)", request.user.pk, exc_info=True)
+            try:  # X3 - which preference fields changed (names only, consent-gated, never the values)
+                from core import product_analytics as _pa
+
+                _pa.track_settings_changed(request.user, "learning", request.data, serializer.fields,
+                                           section_of=_pa.user_pref_section)
+            except Exception:
+                pass
             # Study profile / Exam Mode badla to feed ke cached candidate pools purane
             # ho gaye — invalidate, taaki agla feed refresh naye settings dikhaye.
             if any(f in request.data for f in UserPreferenceSerializer.STUDY_PROFILE_FIELDS):
@@ -2286,13 +2606,118 @@ class UserPreferenceView(GenericAPIView):
                 "status": True,
                 "message": "Preferences updated successfully.",
                 "data": serializer.data,
-            }, status=status.HTTP_200_OK)
+            }, status=status.HTTP_200_OK, headers={"ETag": make_etag(serializer.instance)})
 
         return Response({
             "status": False,
             "message": "Validation failed.",
             "errors": serializer.errors,
         }, status=status.HTTP_400_BAD_REQUEST)
+
+class LearningPreferencesView(GenericAPIView):
+    """
+    S8 -- GET /profile/learning/ : the whole "Learning preferences" screen in ONE read-only response.
+
+    Joins UserPreference (exam target / class / subjects / exam date / Exam Mode / study reminder / focus schedule /
+    content level + languages) with Streak (daily goal) and adds "what do these choices change" codes + a setup
+    completeness %. WRITES do not go here: they use the existing endpoints (PATCH /profile/preferences/me/ for the
+    preference fields - offline queue + ETag from S2 keep working - and PATCH /profile/daily-goal/ for the goal),
+    so there is exactly one write path per field.
+
+    Never creates rows (GET without side effects): no UserPreference row = defaults.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(description="Learning preferences summary (read-only). Write through preferences/me/ + daily-goal/.")
+    def get(self, request):
+        from . import learning_prefs
+
+        pref = UserPreference.objects.filter(user=request.user).first() or UserPreference(user=request.user)
+        streak = Streak.objects.filter(user=request.user).first()
+        tz = learning_prefs.user_tz(request.user.pk)
+        return Response({
+            "status": True,
+            "message": "Learning preferences fetched successfully.",
+            "data": learning_prefs.build_summary(pref, streak, tz=tz),
+        }, status=status.HTTP_200_OK)
+
+
+class PrivacySettingsView(GenericAPIView):
+    """
+    S4 -- GET / PATCH /profile/privacy/ : the person's own privacy controls (who can message / call / tag / mention /
+    add them, who sees their online status and followers list, search visibility). Rules + defaults: privacy.py.
+
+    GET never writes (no row = all defaults). PATCH takes only the fields that changed and creates the row lazily.
+    `is_private` (private account) is shown for the screen but is still changed through /profile/ as before.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PrivacySettingsSerializer
+    # X6 -- privacy controls decide who can reach / see a person: capped per hour, a refusal is audited.
+    throttle_classes = [UserRateThrottle, SensitiveWriteThrottle]  # + the project-wide per-user floor
+    throttle_scope = "privacy_write"
+
+    def _body(self, request, row, message):
+        from . import privacy as privacy_rules
+
+        data = dict(self.get_serializer(row).data)
+        data["is_private"] = bool(request.user.is_private)
+        # Minors: show the value that is really enforced, and tell the app which controls are locked.
+        locks = privacy_rules.locks_for(request.user)
+        if locks["is_minor"]:
+            data = privacy_rules.apply_minor_floor(data)
+        data["is_minor"] = locks["is_minor"]
+        data["locked_fields"] = locks["locked_fields"]
+        return {"status": True, "message": message, "data": data}
+
+    @extend_schema(responses={200: PrivacySettingsSerializer}, description="Read my privacy controls")
+    def get(self, request):
+        row = PrivacySettings.objects.filter(user=request.user).first() or PrivacySettings(user=request.user)
+        return Response(self._body(request, row, "Privacy settings fetched successfully."))
+
+    @extend_schema(request=PrivacySettingsSerializer, responses={200: PrivacySettingsSerializer},
+                   description="Change my privacy controls. Send only the fields you want to change.")
+    def patch(self, request):
+        from . import privacy as privacy_rules
+
+        # Minor-safety locks: a minor may not open a control to everyone / turn find-by-phone/e-mail on.
+        bad = privacy_rules.minor_violations(request.user, request.data)
+        if bad:
+            return Response(
+                {
+                    "status": False,
+                    "code": privacy_rules.MINOR_LOCKED_CODE,
+                    "message": privacy_rules.MINOR_LOCKED_TEXT,
+                    "errors": {name: [text] for name, text in bad.items()},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            PrivacySettings.for_user(request.user)  # lazy get-or-create
+            row = PrivacySettings.objects.select_for_update().get(user=request.user)
+            serializer = self.get_serializer(row, data=request.data, partial=True)
+            if not serializer.is_valid():
+                return Response(
+                    {"status": False, "message": "Validation failed.", "errors": serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # X6 -- which controls really change (names only, never the values) -> one audit row after the save
+            _x6_names = [n for n in serializer.fields if n in request.data and not serializer.fields[n].read_only]
+            _x6_before = {n: getattr(row, n, None) for n in _x6_names}
+            serializer.save()
+            _x6_after = {n: getattr(serializer.instance, n, None) for n in _x6_names}
+        _x6_changed = _x6_changed_fields(request.data, _x6_names, _x6_before, _x6_after)
+        if _x6_changed:
+            _x6_record_change(_x6_audit.Event.PRIVACY_CONTROLS_CHANGED, request, request.user, _x6_changed)
+        try:  # X3 - which privacy controls change (field names only, consent-gated)
+            from core import product_analytics as _pa
+
+            _pa.track_settings_changed(request.user, "privacy", request.data, serializer.fields)
+        except Exception:
+            pass
+        return Response(self._body(request, serializer.instance, "Privacy settings updated successfully."))
+
 
 class StreakView(GenericAPIView):
     """
@@ -2402,6 +2827,11 @@ class StreakFreezeBuyView(GenericAPIView):
             return Response(
                 {"status": False, "code": "freeze_limit", "message": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        except SpendLimitExceeded as exc:  # S9: user ki spend limit / minor cap (ValueError ka subclass, isliye pehle)
+            return Response(
+                {"status": False, "code": "spend_limit", "message": str(exc)},
+                status=status.HTTP_403_FORBIDDEN,
             )
         except ValueError:
             # CoinLedger.record_transaction: balance negative ho jaata.
@@ -2615,6 +3045,7 @@ class ActivityView(GenericAPIView):
                     "limit_reached": bool(daily_limit and today_seconds >= daily_limit * 60),
                 },
                 "daily_limit_minutes": daily_limit,
+                "parent_limit_minutes": role_settings.parent_limit_floor(request.user),  # S12 (null = no parent limit)
                 "saved_posts": activity.saved_posts(request.user, limit),
                 "liked_posts": activity.liked_posts(request.user, limit),
             },
@@ -2635,6 +3066,15 @@ class ActivityView(GenericAPIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         limit = serializer.validated_data["daily_limit_minutes"]
+        # S12: a parent-set limit can be lowered by the child, never raised or removed.
+        floor = role_settings.parent_limit_floor(request.user)
+        if floor is not None and (limit is None or limit > floor):
+            return Response({
+                "status": False,
+                "code": "limit_set_by_parent",
+                "message": f"Your parent set a daily limit of {floor} minutes. You can only choose a lower limit.",
+                "parent_limit_minutes": floor,
+            }, status=status.HTTP_403_FORBIDDEN)
         preference = UserPreference.for_user(request.user)
         preference.daily_limit_minutes = limit
         preference.save(update_fields=["daily_limit_minutes", "updated_at"])

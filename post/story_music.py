@@ -31,7 +31,13 @@ huge file, `file://`, an internal address...). So:
 * only CC0 is accepted - it needs no attribution, which is the only kind of
   track the app can safely show without a credit line;
 * text is stripped of control characters and length-capped;
-* `start` must lie inside the track when the duration is known.
+* `start` must lie inside the track when the duration is known;
+* `clip` (F3, optional) is the number of seconds to play, 1..30, shortened to what is left of the track.
+* `baked` (X5, optional bool) = the app mixed this CC0 track INTO the story's video (a photo story with music becomes a
+  15 s mp4), so viewers must not play `url` again. Only stored when true. It is just a playback hint: the story is
+  still an upload that goes through the whole publish gate (audio copyright flag, duplicates, ...) - the licence check
+  above (CC0 only, host allow-list) is what keeps the baked audio copyright-free, and a client cannot use `baked` to
+  skip any check.
 
 All of the rules live here so the serializer and the tests cannot drift apart.
 """
@@ -51,6 +57,9 @@ MAX_TITLE_LENGTH = 100
 MAX_ARTIST_LENGTH = 60
 MAX_URL_LENGTH = 500
 MAX_TRACK_SECONDS = 600.0                     # nobody attaches a 10+ minute track to a story
+MIN_CLIP_SECONDS = 1.0                        # F3: how long the track plays (the "clip" the owner picked)
+MAX_CLIP_SECONDS = 30.0
+DEFAULT_CLIP_SECONDS = 15.0                   # what the picker pre-selects; NOT stored unless the client sends one
 ALLOWED_EXTENSIONS = (".mp3", ".ogg")
 LICENSE_CC0 = "CC0"
 
@@ -189,6 +198,12 @@ def clean_music(payload):
         raise MusicError("Only CC0 (copyright-free) music can be used.")
     cleaned["license"] = LICENSE_CC0
 
+    # X7: a sound staff took down (post/sounds.py) can't go on a NEW story. Stories that already use it stop playing it.
+    from . import sounds
+
+    if sounds.is_blocked(cleaned["id"]):
+        raise MusicError(sounds.BLOCKED_TEXT)
+
     duration = payload.get("duration")
     if duration is None or duration == "":
         cleaned["duration"] = None
@@ -208,5 +223,23 @@ def clean_music(payload):
     if cleaned["duration"] is not None and start >= cleaned["duration"]:
         raise MusicError("Music start must be inside the track.")
     cleaned["start"] = round(start, 2)
+
+    # F3: optional clip length in seconds (alias `clip_seconds`). Only stored when the client sent one, so stories made
+    # before F3 keep their exact shape; a viewer with no `clip` plays from `start` until the story ends.
+    clip = payload.get("clip", payload.get("clip_seconds"))
+    if clip is not None and clip != "":
+        clip = _clean_number(clip, field="clip")
+        if not MIN_CLIP_SECONDS <= clip <= MAX_CLIP_SECONDS:
+            raise MusicError(
+                f"Music clip must be between {int(MIN_CLIP_SECONDS)} and {int(MAX_CLIP_SECONDS)} seconds."
+            )
+        if cleaned["duration"] is not None:
+            # A clip can't run past the end of the track.
+            clip = min(clip, cleaned["duration"] - cleaned["start"])
+        cleaned["clip"] = round(clip, 2)
+
+    # X5: only a real boolean true counts ("true" / 1 / "yes" are ignored - the shape stays strict).
+    if payload.get("baked") is True:
+        cleaned["baked"] = True
 
     return cleaned

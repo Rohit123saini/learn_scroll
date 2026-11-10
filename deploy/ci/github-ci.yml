@@ -1,0 +1,76 @@
+# X1 — CI gates. COPY this file to  <repo root>/.github/workflows/ci.yml  and fix the two paths in `env:`.
+# (The zip has no .github/ folder and I do not know your repo layout, so nothing is wired in automatically.)
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  BACKEND_DIR: backend          # folder that contains manage.py
+  FLUTTER_DIR: .                # folder that contains pubspec.yaml
+  FLUTTER_VERSION: "3.24.x"     # pin to the version you build releases with
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_USER: ls, POSTGRES_PASSWORD: ls, POSTGRES_DB: ls}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ls" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    defaults:
+      run:
+        working-directory: ${{ env.BACKEND_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip, cache-dependency-path: "${{ env.BACKEND_DIR }}/requirements.txt"}
+      - run: pip install -r requirements.txt
+      # Gate 1-4: migrations drift, check --deploy, release_check rules, config drift (see scripts/ci_release_gate.sh)
+      - name: Release gate
+        run: bash scripts/ci_release_gate.sh
+        env:
+          DATABASE_URL: postgres://ls:ls@localhost:5432/ls
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      - name: Test suite
+        run: python manage.py test --parallel 4
+        env:
+          DEBUG: "False"
+          SECRET_KEY: ci-only-Zp2vQ7xLm4Tn8Rw3Yb6Hc1Df5Gs0Jq9Ua2Ie7Ok4Pl3Mz8Xv5Nb1Cr6Wd
+          JWT_SIGNING_KEY: ci-only-jwt-key-Lm4Tn8Rw3Yb6Hc1Df5Gs0Jq9Ua2Ie7Ok4Pl3Mz8Xv5Nb1Cr6Wd0Ey
+          ALLOWED_HOSTS: ci.example.com
+          DATABASE_URL: postgres://ls:ls@localhost:5432/ls
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/2
+
+  flutter:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.FLUTTER_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: {channel: stable, flutter-version: "${{ env.FLUTTER_VERSION }}", cache: true}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: flutter pub get
+      - name: Imports vs pubspec
+        run: python3 tool/check_pubspec.py
+      - name: Pubspec pins + lock file
+        run: python3 tool/check_pubspec_pins.py --strict
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test

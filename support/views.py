@@ -12,10 +12,11 @@ from rest_framework.views import APIView
 from common.pagination import StandardPagination
 
 from . import services
-from .models import BugReport, FeatureRequest, FeatureVote, SupportMessage, SupportTicket
+from .models import BugReport, FaqFeedback, FeatureRequest, FeatureVote, SupportMessage, SupportTicket
 from .serializers import (
     BugReportCreateSerializer,
     BugReportSerializer,
+    FaqFeedbackSerializer,
     FeatureRequestCreateSerializer,
     FeatureRequestSerializer,
     MessageCreateSerializer,
@@ -26,6 +27,7 @@ from .serializers import (
 )
 from .throttles import (
     BugReportThrottle,
+    FaqFeedbackThrottle,
     FeatureRequestThrottle,
     FeatureVoteThrottle,
     TicketCreateThrottle,
@@ -235,3 +237,21 @@ class FeatureVoteView(APIView):
                 voted = True
         fr.refresh_from_db(fields=["votes_count"])
         return Response({"voted": voted, "votes_count": fr.votes_count})
+
+
+# ------------------------------------------------------------ FAQ feedback
+class FaqFeedbackView(APIView):
+    """POST /support/faq-feedback/ — {faq_id, helpful, lang?}. One row per user per question:
+    answering again overwrites the previous answer (so a mis-tap is fixable)."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [FaqFeedbackThrottle]
+
+    def post(self, request):
+        ser = FaqFeedbackSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+        FaqFeedback.objects.update_or_create(
+            user=request.user, faq_id=d["faq_id"], defaults={"helpful": d["helpful"], "lang": d["lang"]},
+        )
+        return Response({"ok": True}, status=status.HTTP_200_OK)

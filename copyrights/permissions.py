@@ -24,12 +24,13 @@ PERM_REVIEW = "copyrights.review_claim"
 PERM_UPHOLD = "copyrights.uphold_claim"
 PERM_REVOKE = "copyrights.revoke_strike"
 PERM_TERMINATE = "copyrights.terminate_account"
+PERM_LEGAL = "copyrights.handle_legal_order"
 
 # codename lists per role group (setup_copyright_roles command).
 ROLE_GROUPS = {
     "Copyright L1 Reviewer": ["review_claim"],
     "Copyright L2 Senior": ["review_claim", "uphold_claim"],
-    "Copyright L3 Admin": ["review_claim", "uphold_claim", "revoke_strike", "terminate_account"],
+    "Copyright L3 Admin": ["review_claim", "uphold_claim", "revoke_strike", "terminate_account", "handle_legal_order"],
 }
 
 
@@ -42,7 +43,7 @@ def level_for(user) -> int:
             return 0
         if user.is_superuser:
             return L3
-        if user.has_perm(PERM_REVOKE) or user.has_perm(PERM_TERMINATE):
+        if user.has_perm(PERM_REVOKE) or user.has_perm(PERM_TERMINATE) or user.has_perm(PERM_LEGAL):
             return L3
         if user.has_perm(PERM_UPHOLD):
             return L2

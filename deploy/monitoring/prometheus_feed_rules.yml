@@ -1,0 +1,67 @@
+# H10 - Prometheus alert rules for the home feed (metrics come from GET /post/feed/ops/?format=prom, post/feed_ops.py).
+# SLO: availability >= 99.5 %, p95 <= 800 ms. Load with:   rule_files: [ "prometheus_feed_rules.yml" ]
+groups:
+  - name: learnscroll-feed-slo
+    rules:
+      - alert: FeedAvailabilityBelowSLO
+        expr: learnscroll_feed_availability_pct{window="1h"} < 99.5 and learnscroll_feed_requests{window="1h"} > 100
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "Home feed availability {{ $value }}% (SLO 99.5%) over 1h"
+          runbook: "deploy/monitoring/README.md#feedavailabilitybelowslo"
+
+      - alert: FeedFastBurn
+        expr: learnscroll_feed_availability_pct{window="5m"} < 95 and learnscroll_feed_requests{window="5m"} > 20
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Home feed is failing right now ({{ $value }}% available over 5m)"
+          runbook: "deploy/monitoring/README.md#feedavailabilitybelowslo"
+
+      - alert: FeedP95AboveSLO
+        expr: learnscroll_feed_within_p95_target_pct{window="1h"} < 95 and learnscroll_feed_requests{window="1h"} > 100
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Only {{ $value }}% of feed requests are under the p95 target (need 95%) over 1h"
+          runbook: "deploy/monitoring/README.md#feedp95aboveslo"
+
+      - alert: FeedServingFallback
+        expr: 100 * learnscroll_feed_degraded{window="1h"} / clamp_min(learnscroll_feed_requests{window="1h"}, 1) > 5
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $value }}% of feed answers are the simplified fallback feed (ranking failing / timing out)"
+          runbook: "deploy/monitoring/README.md#feedservingfallback"
+
+      - alert: FeedRedisSnapshotDown
+        expr: learnscroll_feed_events{event="snapshot_store_down", window="5m"} > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Feed snapshot store (Redis) is failing - feed is served unfrozen (pages may shift), throttle fails open"
+          runbook: "deploy/monitoring/README.md#feedredissnapshotdown"
+
+      - alert: FeedFallbackFailed
+        expr: learnscroll_feed_events{event="fallback_failed", window="5m"} > 0
+        labels: { severity: page }
+        annotations:
+          summary: "Even the fallback feed failed - users get an EMPTY feed (database problem?)"
+          runbook: "deploy/monitoring/README.md#feedfallbackfailed"
+
+      - alert: FeedOpsScrapeDown
+        expr: up{job="learnscroll-feed-ops"} == 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Cannot scrape /post/feed/ops/ - SLO alerts above are blind"
+
+  - name: learnscroll-feed-quality
+    rules:
+      - alert: FeedQuickSkipSpike
+        expr: learnscroll_feed_daily{metric="quick_skip_rate"} > 1.3 * avg_over_time(learnscroll_feed_daily{metric="quick_skip_rate"}[7d] offset 1d)
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "Quick-skip rate is >30% above its 7-day average (yesterday's daily job) - check the latest ranking/experiment change"

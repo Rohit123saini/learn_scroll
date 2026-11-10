@@ -35,6 +35,8 @@ django.setup()  # <-- models import se pehle zaroori hai
 # into the app — a real dead-code risk exactly as flagged. Now imported
 # and used below instead of reaching into `message.Middleware` directly.
 from LearnScroll.ws_auth import JWTAuthMiddleware  # noqa: E402  (django.setup() ke baad import zaroori)
+from LearnScroll.log_filters import install_on_server_loggers  # noqa: E402  (P-B2)
+install_on_server_loggers()  # P-B2: ?ticket= / ?token= / JWT never in the ASGI server's own access / handshake log lines
 from message import routing as message_routing  # noqa: E402
 
 # NOTE (fix — CRITICAL, production-breaking): this file only ever wired

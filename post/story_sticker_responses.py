@@ -9,6 +9,10 @@ and how it is shown:
               not sway the vote).
     question  one text answer per viewer (max 300 chars). Answers are private:
               only the story owner can list them.
+    quiz      (F3) like a poll but with ONE right answer. One final answer per viewer; the right answer and the counts
+              are shown to the owner, and to a viewer once they have answered.
+    add_yours (F3) not answered here - a viewer joins the chain by posting their own story with an add_yours sticker
+              (`chain_from`, post/story_stickers.py). This module only COUNTS the chain.
 
 The owner can never vote on / answer their own sticker.
 
@@ -21,7 +25,12 @@ import re
 from django.db import IntegrityError, transaction
 from django.db.models import Count
 
-from .models import StoryPollVote, StoryQuestionAnswer, StorySticker
+from .models import StoryPollVote, StoryQuestionAnswer, StoryQuizAnswer, StorySticker
+
+# Kinds whose payload depends on viewer / response state (everything else is shown exactly as stored).
+INTERACTIVE_KINDS = (
+    StorySticker.KIND_POLL, StorySticker.KIND_QUESTION, StorySticker.KIND_QUIZ, StorySticker.KIND_ADD_YOURS,
+)
 
 MAX_ANSWER_LENGTH = 300
 
@@ -93,13 +102,31 @@ def submit_answer(sticker, user, text_raw):
         raise ResponseError("You have already answered this question.", status=409, code="already_answered")
 
 
-def build_interaction_stats(stickers, viewer):
-    """{sticker_id: stats} for every poll / question in `stickers` (any other
-    kind is skipped). At most 2 queries per kind, independent of how many
-    stickers or stories are passed in.
+def cast_quiz_answer(sticker, user, option_raw):
+    """Record `user`'s final answer to a quiz sticker. Raises ResponseError."""
+    if sticker.kind != StorySticker.KIND_QUIZ:
+        raise ResponseError("This sticker is not a quiz.", status=404, code="not_a_quiz")
+    if sticker.story.user_id == user.id:
+        raise ResponseError("You can't answer your own quiz.", code="own_sticker")
+    data = sticker.data or {}
+    index = parse_option_index(option_raw, len(data.get("options", [])))
+    try:
+        with transaction.atomic():
+            return StoryQuizAnswer.objects.create(
+                sticker=sticker, user=user, option_index=index, is_correct=(index == data.get("correct_index")),
+            )
+    except IntegrityError:
+        raise ResponseError("You have already answered this quiz.", status=409, code="already_answered")
 
-        poll     -> {"counts": [n, n, ..], "total": n, "my_vote": int | None}
-        question -> {"answers_count": n, "my_answered": bool}
+
+def build_interaction_stats(stickers, viewer):
+    """{sticker_id: stats} for every poll / question / quiz / add_yours in `stickers` (any other kind is skipped).
+    At most 2 queries per kind (add_yours: 3), independent of how many stickers or stories are passed in.
+
+        poll      -> {"counts": [n, n, ..], "total": n, "my_vote": int | None}
+        question  -> {"answers_count": n, "my_answered": bool}
+        quiz      -> {"counts": [n, n, ..], "total": n, "correct": n, "my_answer": int | None}
+        add_yours -> {"chain_id": uuid, "count": n, "my_joined": bool}
     """
     polls = [s for s in stickers if s.kind == StorySticker.KIND_POLL]
     questions = [s for s in stickers if s.kind == StorySticker.KIND_QUESTION]
@@ -137,11 +164,55 @@ def build_interaction_stats(stickers, viewer):
         for s in questions:
             stats[s.id] = {"answers_count": totals.get(s.id, 0), "my_answered": s.id in answered}
 
+    quizzes = [s for s in stickers if s.kind == StorySticker.KIND_QUIZ]
+    if quizzes:
+        ids = [s.id for s in quizzes]
+        tally, right = {}, {}
+        for row in (
+            StoryQuizAnswer.objects.filter(sticker_id__in=ids)
+            .order_by().values("sticker_id", "option_index", "is_correct").annotate(n=Count("id"))
+        ):
+            tally.setdefault(row["sticker_id"], {})[row["option_index"]] = row["n"]
+            if row["is_correct"]:
+                right[row["sticker_id"]] = right.get(row["sticker_id"], 0) + row["n"]
+        mine = dict(
+            StoryQuizAnswer.objects.filter(sticker_id__in=ids, user_id=user_id)
+            .values_list("sticker_id", "option_index")
+        ) if user_id else {}
+        for s in quizzes:
+            size = len((s.data or {}).get("options", []))
+            per = tally.get(s.id, {})
+            counts = [per.get(i, 0) for i in range(size)]
+            stats[s.id] = {
+                "counts": counts, "total": sum(counts), "correct": right.get(s.id, 0), "my_answer": mine.get(s.id),
+            }
+
+    chains = [s for s in stickers if s.kind == StorySticker.KIND_ADD_YOURS]
+    if chains:
+        root_of = {s.id: (s.chain_root_id or s.id) for s in chains}
+        roots = set(root_of.values())
+        members = dict(
+            StorySticker.objects.filter(chain_root_id__in=roots)
+            .order_by().values_list("chain_root_id").annotate(n=Count("id"))
+        )
+        joined = set()
+        if user_id:
+            joined = set(
+                StorySticker.objects.filter(chain_root_id__in=roots, story__user_id=user_id)
+                .values_list("chain_root_id", flat=True)
+            ) | set(
+                StorySticker.objects.filter(id__in=roots, story__user_id=user_id).values_list("id", flat=True)
+            )
+        for s in chains:
+            root = root_of[s.id]
+            # +1 is the chain's first sticker itself.
+            stats[s.id] = {"chain_id": root, "count": 1 + members.get(root, 0), "my_joined": root in joined}
+
     return stats
 
 
 def sticker_payload(sticker, stats, viewer_id, owner_id):
-    """The kind-specific `data` for a poll / question, as the viewer may see it."""
+    """The kind-specific `data` for a poll / question / quiz / add_yours, as the viewer may see it."""
     data = sticker.data or {}
     is_owner = viewer_id is not None and viewer_id == owner_id
     stat = stats.get(sticker.id) or {}
@@ -156,6 +227,33 @@ def sticker_payload(sticker, stats, viewer_id, owner_id):
             "results": (
                 {"counts": stat.get("counts", []), "total": stat.get("total", 0)} if show_results else None
             ),
+        }
+
+    if sticker.kind == StorySticker.KIND_QUIZ:
+        my_answer = stat.get("my_answer")
+        reveal = is_owner or my_answer is not None
+        payload = {
+            "question": data.get("question", ""),
+            "options": list(data.get("options", [])),
+            "my_answer": my_answer,
+            # The right answer would spoil the quiz: only the owner, or a viewer who has already answered.
+            "correct_index": data.get("correct_index") if reveal else None,
+            "explanation": (data.get("explanation") or None) if reveal else None,
+            "results": None,
+        }
+        if reveal:
+            payload["results"] = {
+                "counts": stat.get("counts", []), "total": stat.get("total", 0), "correct": stat.get("correct", 0),
+            }
+        return payload
+
+    if sticker.kind == StorySticker.KIND_ADD_YOURS:
+        root = stat.get("chain_id") or sticker.chain_root_id or sticker.id
+        return {
+            "prompt": data.get("prompt", ""),
+            "chain_id": str(root),
+            "count": stat.get("count", 1),
+            "my_joined": bool(stat.get("my_joined")) or is_owner,
         }
 
     return {

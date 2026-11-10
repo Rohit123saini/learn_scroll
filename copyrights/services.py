@@ -6,7 +6,7 @@ Views, Django admin and Celery tasks only call these functions, so the rules
 
 Settings (all optional, env-overridable in settings.py):
   COPYRIGHT_AUTO_HOLD            True   hide content as soon as a COMPLETE notice arrives
-  COPYRIGHT_COUNTER_WAIT_DAYS    10     wait before auto-restoring after a counter-notice
+  COPYRIGHT_COUNTER_WAIT_DAYS    21     wait before auto-restoring after a counter-notice
   COPYRIGHT_STRIKE_DAYS          180    a strike counts for this long
   COPYRIGHT_RESTRICT_AT          2      active strikes that block uploads
   COPYRIGHT_REVIEW_AT            3      active strikes that open a termination review
@@ -23,9 +23,10 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
-from . import permissions as perms
+from . import claimant as claimant_rules, media, notify, permissions as perms, targets
 from .models import (
     CopyrightAuditLog,
     CopyrightClaim,
@@ -76,17 +77,8 @@ def _log(claim, action, *, actor=None, label=None, note="", user=None):
 
 
 def _notify(user, title, message="", *, data=None):
-    """In-app notification via core's single choke point. Never raises."""
-    if user is None:
-        return
-    try:
-        from core.services import create_notification
-
-        payload = {"kind": "copyright"}
-        payload.update(data or {})
-        create_notification(user, "generic", title, message, data=payload)
-    except Exception:
-        logger.exception("copyright notification failed")
+    """In-app + push + e-mail (copyrights/notify.py). Never raises."""
+    notify.send(user, title, message, data=data)
 
 
 def _notify_staff(level, title, message="", *, data=None):
@@ -98,103 +90,18 @@ def _notify_staff(level, title, message="", *, data=None):
 
 
 def _load_target(target_type, target_id):
-    """(obj, owner) for a post/story that still exists, else (None, None)."""
-    try:
-        if target_type == C.TargetType.POST:
-            from post.models import Post
-
-            obj = Post.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
-        elif target_type == C.TargetType.STORY:
-            from post.models import Story
-
-            obj = Story.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
-        else:
-            return None, None
-    except (ValueError, TypeError, ValidationError):
-        return None, None
-    return (obj, obj.user) if obj is not None else (None, None)
+    """(obj, owner) for content that can be claimed now, else (None, None). See targets.py."""
+    return targets.load_target(target_type, target_id)
 
 
 def _snapshot(target_type, obj):
-    text = ""
-    if target_type == C.TargetType.POST:
-        text = (getattr(obj, "title", "") or getattr(obj, "content", "") or "")
-    else:
-        text = getattr(obj, "caption", "") or ""
-    return text.strip()[:300]
+    return targets.snapshot_text(target_type, obj)
 
 
 # --------------------------------------------------------------------------
-# content hold / restore (the ONLY place that touches Post / Story visibility)
+# hold / restore: claims only change THEIR OWN CopyrightTakedown row; targets.refresh()
+# recomputes what is visible from all active claims + legal orders (see targets.py)
 # --------------------------------------------------------------------------
-def _other_active_takedowns(takedown):
-    return T.objects.filter(
-        target_type=takedown.target_type, target_id=takedown.target_id,
-        state__in=(T.State.HELD, T.State.REMOVED),
-    ).exclude(pk=takedown.pk)
-
-
-def _has_real_state(prev):
-    return bool(prev) and not prev.get("shared")
-
-
-def _hide_content(takedown, removed=False):
-    """Hide the content (idempotent). Remembers the previous state for the undo."""
-    if takedown.target_type == C.TargetType.POST:
-        from post.models import Post
-
-        post = Post.objects.filter(pk=takedown.target_id).first()
-        if post is None:
-            return
-        if post.moderation_status in COPYRIGHT_POST_STATES:
-            # Already hidden by another claim: share, don't overwrite the real undo data.
-            if not _has_real_state(takedown.previous_state):
-                takedown.previous_state = {"shared": True}
-        else:
-            takedown.previous_state = {"moderation_status": post.moderation_status}
-        Post.objects.filter(pk=post.pk).update(moderation_status=POST_REMOVED if removed else POST_HOLD)
-    else:
-        from post.models import Story
-
-        story = Story.objects.filter(pk=takedown.target_id).first()
-        if story is None:
-            return
-        if story.is_deleted and not _has_real_state(takedown.previous_state):
-            takedown.previous_state = {"shared": True}
-        elif not story.is_deleted:
-            takedown.previous_state = {"is_deleted": False}
-        Story.objects.filter(pk=story.pk).update(is_deleted=True, deleted_at=timezone.now())
-    takedown.save(update_fields=["previous_state"])
-
-
-def _restore_content(takedown):
-    """Undo the hide - unless another claim still has the same content down."""
-    others = list(_other_active_takedowns(takedown))
-    if others:
-        # Pass the real undo data on so the LAST claim to close restores correctly.
-        if _has_real_state(takedown.previous_state):
-            for o in others:
-                if not _has_real_state(o.previous_state):
-                    o.previous_state = takedown.previous_state
-                    o.save(update_fields=["previous_state"])
-                    break
-        return
-    prev = takedown.previous_state if _has_real_state(takedown.previous_state) else {}
-    if takedown.target_type == C.TargetType.POST:
-        from post.models import Post
-
-        Post.objects.filter(pk=takedown.target_id, moderation_status__in=COPYRIGHT_POST_STATES).update(
-            moderation_status=prev.get("moderation_status") or "approved"
-        )
-    else:
-        from post.models import Story
-
-        # An expired story stays gone - there is nothing left to bring back.
-        Story.objects.filter(pk=takedown.target_id, expires_at__gt=timezone.now()).update(
-            is_deleted=False, deleted_at=None
-        )
-
-
 def _ensure_takedown(claim, *, auto):
     td, created = T.objects.get_or_create(
         claim=claim, defaults={"target_type": claim.target_type, "target_id": claim.target_id, "auto_applied": auto},
@@ -202,22 +109,26 @@ def _ensure_takedown(claim, *, auto):
     return td, created
 
 
-def _hold(claim, *, auto):
-    td, _ = _ensure_takedown(claim, auto=auto)
-    td.state = T.State.HELD
-    td.restored_at = None
+def _set_takedown(claim, state, *, auto=None):
+    td, _ = _ensure_takedown(claim, auto=bool(auto))
+    td.state = state
+    td.restored_at = timezone.now() if state == T.State.RESTORED else None
     td.save(update_fields=["state", "restored_at"])
-    _hide_content(td, removed=False)
+    targets.refresh(claim.target_type, claim.target_id)
     return td
 
 
+def _hold(claim, *, auto):
+    return _set_takedown(claim, T.State.HELD, auto=auto)
+
+
 # --------------------------------------------------------------------------
-# claimant side
-# --------------------------------------------------------------------------
-def claimant_can_file(claimant):
+def claimant_can_file(claimant, tier=None):
     """Raise ClaimError if this account may not file a (new) notice."""
+    tier = tier or claimant_rules.tier_for(claimant)
     since_day = timezone.now() - timedelta(days=1)
-    if C.objects.filter(claimant=claimant, created_at__gte=since_day).count() >= _cfg("COPYRIGHT_CLAIMS_PER_DAY", 10):
+    per_day = claimant_rules.claims_per_day(tier)
+    if C.objects.filter(claimant=claimant, created_at__gte=since_day).count() >= per_day:
         raise ClaimError("rate_limited", "Too many copyright notices today. Please try again tomorrow.")
     since_year = timezone.now() - timedelta(days=365)
     bad = C.objects.filter(claimant=claimant, bad_faith=True, created_at__gte=since_year).count()
@@ -229,12 +140,14 @@ def claimant_can_file(claimant):
 
 
 @transaction.atomic
-def submit_claim(claimant, data, *, source=C.Source.USER):
+def submit_claim(claimant, data, *, source=C.Source.USER, evidence_files=None):
     """File a formal copyright notice. Returns (claim, created).
 
     `data` keys: target_type, target_id, claimant_name, claimant_email, organisation,
     is_rights_owner, work_description, original_work_url, infringement_details,
     good_faith_statement, accuracy_statement, signature.
+    `evidence_files`: uploaded proof (see claimant.py). Verified e-mail is required; whether the
+    content is hidden at once depends on the claimant's tier and on evidence (claimant.may_auto_hold).
     """
     if not data.get("good_faith_statement") or not data.get("accuracy_statement"):
         raise ClaimError("incomplete", "Both statements (good faith and accuracy) must be accepted.")
@@ -242,7 +155,11 @@ def submit_claim(claimant, data, *, source=C.Source.USER):
     if len(signature) < 3:
         raise ClaimError("incomplete", "Please sign the notice with your full name.")
 
-    claimant_can_file(claimant)
+    if not claimant_rules.has_verified_email(claimant, data.get("claimant_email")):
+        raise ClaimError("email_unverified", "Please verify the e-mail address on the notice first.")
+    claimant_rules.validate_evidence(evidence_files)
+    tier = claimant_rules.tier_for(claimant)
+    claimant_can_file(claimant, tier=tier)
 
     target_type = data["target_type"]
     target_id = str(data["target_id"])
@@ -266,6 +183,7 @@ def submit_claim(claimant, data, *, source=C.Source.USER):
 
     high_reach = (owner.followers_count or 0) >= _cfg("COPYRIGHT_HIGH_REACH_FOLLOWERS", 10000)
     needs_senior = high_reach or bool(getattr(owner, "is_verified", False)) or active_strike_count(owner) >= 1
+    fast_track = claimant_rules.is_fast_track(tier)   # vetted publisher: front of the queue, NOT a lower bar for the decision
 
     claim = C.objects.create(
         claimant=claimant,
@@ -284,32 +202,43 @@ def submit_claim(claimant, data, *, source=C.Source.USER):
         accuracy_statement=True,
         signature=signature,
         source=source,
+        claimant_tier=tier,
         required_level=2 if needs_senior else 1,
-        priority=C.Priority.HIGH if needs_senior else C.Priority.NORMAL,
+        priority=C.Priority.HIGH if (needs_senior or fast_track) else C.Priority.NORMAL,
         duplicate_of=first_open,
     )
-    _log(claim, "claim_submitted", actor=claimant, label="claimant", note=f"{target_type}:{target_id}")
+    _log(claim, "claim_submitted", actor=claimant, label="claimant",
+         note=f"{target_type}:{target_id}" + (" [fast track]" if fast_track else ""))
 
-    # AUTOMATION: a complete notice hides the content right away (reversible).
+    if evidence_files:
+        claimant_rules.add_evidence(claim, evidence_files, claimant)
+    media.schedule_snapshot(claim.id)  # copy of the reported files, kept even if the post is deleted
+
+    # AUTOMATION: hide at once (reversible) - only for trusted claimants, or standard ones who attached proof.
     held = False
-    if _cfg("COPYRIGHT_AUTO_HOLD", True):
+    if claimant_rules.may_auto_hold(claimant, tier, claimant_rules.has_proof(claim)):
         _hold(claim, auto=True)
         held = True
-        _log(claim, "auto_hold", label="automation", note="complete notice -> content on hold")
+        _log(claim, "auto_hold", label="automation", note=f"complete notice ({tier}) -> content on hold")
+    else:
+        _log(claim, "not_held", label="automation",
+             note=f"tier={tier}, proof={claimant_rules.has_proof(claim)}: left visible until a reviewer decides")
 
     _notify(
         claimant, "Copyright notice received",
-        "We received your notice and will review it.", data={"claim_id": str(claim.id), "role": "claimant"},
+        ("We received your notice. As a verified publisher it is on the fast track - we aim to respond within "
+         f"{claimant_rules.sla_hours(tier)} hours." if fast_track else "We received your notice and will review it."),
+        data={"claim_id": str(claim.id), "role": "claimant"},
     )
     if owner is not None:
         _notify(
             owner, "Copyright complaint about your content",
-            ("We hid it while we review. " if held else "")
+            ("We hid it while we review. " if held else "It stays visible while we review it. ")
             + "A rights holder says it uses their work. You can file a counter-notice if this is a mistake.",
             data={"claim_id": str(claim.id), "role": "owner", "target_type": target_type, "target_id": target_id},
         )
     _notify_staff(
-        claim.required_level, "New copyright claim",
+        claim.required_level, "New copyright claim" + (" (fast track)" if fast_track else ""),
         f"{claim.target_type} claim from {claim.claimant_name}", data={"claim_id": str(claim.id), "role": "staff"},
     )
     return claim, True
@@ -392,14 +321,11 @@ def request_info(claim, actor, message):
 def _close_and_restore(claim, *, status, actor=None, label=None, note="", bad_faith=False,
                        revoke_strike_reason=None, revoked_by=None):
     """Close a claim, put the content back, drop its strike (if it had one)."""
-    td = T.objects.filter(claim=claim).first()
     CopyrightCounterNotice.objects.filter(claim=claim, status__in=("waiting", "court_action")).update(
         status=CopyrightCounterNotice.Status.RESTORED, resolved_at=timezone.now())
+    td = T.objects.filter(claim=claim).first()
     if td is not None and td.state != T.State.RESTORED:
-        _restore_content(td)
-        td.state = T.State.RESTORED
-        td.restored_at = timezone.now()
-        td.save(update_fields=["state", "restored_at"])
+        _set_takedown(claim, T.State.RESTORED)
     strike = CopyrightStrike.objects.filter(claim=claim, revoked_at=None).first()
     if strike is not None and revoke_strike_reason:
         strike.revoked_at = timezone.now()
@@ -438,11 +364,8 @@ def reject_claim(claim, actor, note, *, bad_faith=False):
 
 def _close_duplicate(dup, status, parent, actor):
     """A duplicate claim follows its parent's decision - no second strike."""
-    td = T.objects.filter(claim=dup).first()
-    if td is not None:
-        td.state = T.State.REMOVED if status == C.Status.UPHELD else T.State.RESTORED
-        td.restored_at = None if status == C.Status.UPHELD else timezone.now()
-        td.save(update_fields=["state", "restored_at"])
+    if T.objects.filter(claim=dup).exists():
+        _set_takedown(dup, T.State.REMOVED if status == C.Status.UPHELD else T.State.RESTORED)
     dup.status = status
     dup.decided_at = timezone.now()
     dup.decision_note = f"Decided together with claim {parent.id}."
@@ -463,10 +386,7 @@ def uphold_claim(claim, actor, note="", *, issue_strike=True):
         CopyrightCounterNotice.objects.filter(claim=claim).update(
             status=CopyrightCounterNotice.Status.REJECTED, resolved_at=timezone.now())
 
-    td = _hold(claim, auto=False)  # make sure it IS hidden, then mark as final
-    td.state = T.State.REMOVED
-    td.save(update_fields=["state"])
-    _hide_content(td, removed=True)
+    _set_takedown(claim, T.State.REMOVED, auto=False)  # final: hides it and quarantines the files
 
     claim.status = C.Status.UPHELD
     claim.reviewer = actor
@@ -544,7 +464,7 @@ def file_counter_notice(owner, claim, data):
     if not explanation:
         raise ClaimError("incomplete", "Explain why you believe this was a mistake.")
 
-    wait = _cfg("COPYRIGHT_COUNTER_WAIT_DAYS", 10)
+    wait = _cfg("COPYRIGHT_COUNTER_WAIT_DAYS", 21)
     counter = CopyrightCounterNotice.objects.create(
         claim=claim, user=owner, explanation=explanation[:2000],
         good_faith_statement=True, jurisdiction_consent=True, signature=signature[:120],
@@ -743,18 +663,21 @@ def expire_strikes(now=None):
 
 
 def escalate_stale_claims(now=None):
-    """Claims nobody touched for COPYRIGHT_SLA_HOURS go to the senior queue, marked urgent."""
+    """Claims nobody touched for COPYRIGHT_SLA_HOURS go to the senior queue, marked urgent.
+    Fast-track (verified publisher) claims use the shorter COPYRIGHT_PUBLISHER_SLA_HOURS."""
     now = now or timezone.now()
-    cutoff = now - timedelta(hours=_cfg("COPYRIGHT_SLA_HOURS", 48))
-    stale = C.objects.filter(status__in=(C.Status.SUBMITTED, C.Status.UNDER_REVIEW),
-                             escalated_at=None, created_at__lte=cutoff)
+    cutoff = now - timedelta(hours=claimant_rules.sla_hours("standard"))
+    fast_cutoff = now - timedelta(hours=claimant_rules.sla_hours("publisher"))
+    stale = C.objects.filter(status__in=(C.Status.SUBMITTED, C.Status.UNDER_REVIEW), escalated_at=None).filter(
+        Q(created_at__lte=cutoff) | Q(claimant_tier="publisher", created_at__lte=fast_cutoff))
     n = 0
     for claim in stale:
         claim.escalated_at = now
         claim.priority = C.Priority.URGENT
         claim.required_level = max(claim.required_level, 2)
         claim.save(update_fields=["escalated_at", "priority", "required_level", "updated_at"])
-        _log(claim, "auto_escalated", label="automation", note="SLA exceeded")
+        _log(claim, "auto_escalated", label="automation",
+             note="SLA exceeded" + (" (fast track)" if claim.claimant_tier == "publisher" else ""))
         n += 1
     if n:
         _notify_staff(perms.L2, "Copyright claims overdue", f"{n} claim(s) passed the review deadline.",
@@ -783,3 +706,131 @@ def expire_needs_info(now=None):
         except Exception:
             logger.exception("expire_needs_info failed (%s)", claim.pk)
     return n
+
+
+# --------------------------------------------------------------------------
+# evidence added after filing  /  automatic re-upload match
+# --------------------------------------------------------------------------
+@transaction.atomic
+def add_claim_evidence(claim, claimant, files, kind="ownership_proof"):
+    """Claimant attaches proof later. A 'standard' claimant whose notice was left visible gets the hold now."""
+    claim = C.objects.select_for_update().get(pk=claim.pk)
+    if claim.claimant_id != getattr(claimant, "id", None):
+        raise PermissionDenied("Not your claim.")
+    if claim.status not in C.OPEN_STATUSES:
+        raise ClaimError("bad_state", "This claim is closed.")
+    rows = claimant_rules.add_evidence(claim, files, claimant, kind=kind)
+    _log(claim, "evidence_added", actor=claimant, label="claimant", note=f"{len(rows)} file(s)")
+    if not T.objects.filter(claim=claim).exists() and claimant_rules.may_auto_hold(claimant, claim.claimant_tier, True):
+        _hold(claim, auto=True)
+        _log(claim, "auto_hold", label="automation", note="proof attached -> content on hold")
+        _notify(claim.content_owner, "Copyright complaint about your content",
+                "We hid it while we review. You can file a counter-notice if this is a mistake.",
+                data={"claim_id": str(claim.id), "role": "owner", "target_type": claim.target_type,
+                      "target_id": claim.target_id})
+    return rows
+
+
+@transaction.atomic
+def open_auto_claim(target_type, target_id, matched_sha256, *, match=None):
+    """New upload is a copy of content we removed earlier: hold it and send it to review.
+
+    matched_sha256 - exact same bytes (BlockedMediaHash); pass "" for a fuzzy match.
+    match          - fingerprint.Match (same picture / video / song / PDF text, re-encoded or edited)."""
+    from .models import BlockedMediaHash
+
+    if targets.is_held(target_type, target_id):
+        return None
+    obj, owner = _load_target(target_type, target_id)
+    if obj is None or owner is None:
+        return None
+    parent = None
+    if match is not None:
+        parent = C.objects.filter(pk=match.claim_id).first() if match.claim_id else None
+        what = f"This {match.kind} looks / sounds like content that was removed earlier ({match.detail})"
+    else:
+        src = BlockedMediaHash.objects.filter(sha256=matched_sha256, active=True).first() if matched_sha256 else None
+        parent = src.claim if src is not None else None
+        what = "This file is identical to content that was removed earlier"
+    claim = C.objects.create(
+        claimant=None, claimant_name="Automatic match", claimant_email=_cfg("COPYRIGHT_EMAIL", "") or "noreply@invalid.local",
+        is_rights_owner=False, target_type=target_type, target_id=str(target_id), content_owner=owner,
+        content_snapshot=_snapshot(target_type, obj),
+        work_description=(what + (f" (claim {parent.id})" if parent else " (legal order)") + "."),
+        infringement_details=(f"similarity {match.score:.0%} via {match.algo}; staff must compare both files "
+                              "before deciding" if match is not None else ""),
+        good_faith_statement=True, accuracy_statement=True, signature="system",
+        source=C.Source.AUTO, claimant_tier="auto", required_level=2, priority=C.Priority.HIGH,
+        status=C.Status.UNDER_REVIEW, duplicate_of=None,
+    )
+    media.schedule_snapshot(claim.id)
+    _hold(claim, auto=True)
+    _log(claim, "auto_match", label="automation",
+         note=(f"{match.algo} {match.score:.2f}: {match.detail}"[:480] if match is not None
+               else f"sha256 {matched_sha256[:16]}..."))
+    _notify(owner, "Your upload was held (copyright)",
+            "It matches content that was removed earlier. A reviewer will check it. "
+            "You can file a counter-notice if you have the right to post it.",
+            data={"claim_id": str(claim.id), "role": "owner", "target_type": target_type, "target_id": str(target_id)})
+    _notify_staff(2, "Re-upload of removed content", f"{target_type} {target_id} matches a removed file.",
+                  data={"claim_id": str(claim.id), "role": "staff"})
+    return claim
+
+
+# --------------------------------------------------------------------------
+# refuse an upload BEFORE it is saved: exact copy of a removed file
+# --------------------------------------------------------------------------
+REUPLOAD_CODE = "copyright_reupload_blocked"
+
+
+def _reupload_message():
+    contact = _cfg("COPYRIGHT_EMAIL", "")
+    return ("This file was removed earlier after a copyright complaint, so it can't be uploaded again."
+            + (f" If you own the rights to it, write to {contact}." if contact else ""))
+
+
+def precheck_upload(user, files=(), paths=()):
+    """(allowed, code, message) for files about to be saved. Exact SHA-256 match with a BLOCKED file only
+    (cheap, no false positives from similarity); similar-but-not-identical files are not refused here - they
+    are held after saving (signals.check_upload -> open_auto_claim) and a reviewer decides.
+
+    files - Django UploadedFile-like objects (read, then rewound);  paths - local file paths (chunked
+    uploads, already assembled). Fails OPEN: any error lets the upload through (the after-save check still runs).
+    Switch the refusal off with COPYRIGHT_REJECT_EXACT_REUPLOAD=False (then exact copies are only held)."""
+    import hashlib
+
+    from .models import BlockedMediaHash
+
+    try:
+        if not _cfg("COPYRIGHT_REJECT_EXACT_REUPLOAD", True):
+            return True, "", ""
+        if not BlockedMediaHash.objects.filter(active=True).exists():
+            return True, "", ""
+        digests = []
+        for f in files or ():
+            h = hashlib.sha256()
+            try:
+                f.seek(0)
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            finally:
+                try:
+                    f.seek(0)
+                except Exception:
+                    pass
+            digests.append((getattr(f, "name", ""), h.hexdigest()))
+        for path in paths or ():
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            digests.append((path, h.hexdigest()))
+        for name, digest in digests:
+            hit = BlockedMediaHash.objects.filter(sha256=digest, active=True).first()
+            if hit is not None:
+                _log(hit.claim, "reupload_blocked", label="automation", user=user,
+                     note=f"{str(name)[-120:]} sha256 {digest[:16]}...")
+                return False, REUPLOAD_CODE, _reupload_message()
+    except Exception:
+        logger.exception("copyright precheck_upload failed - letting the upload through")
+    return True, "", ""

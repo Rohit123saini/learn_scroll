@@ -19,7 +19,10 @@ from .models import (
     CommentMedia,
     Post,
     PostAnswer,
+    PostAnswerAttachment,
+    PostAnswerStep,
     PostComment,
+    PostDoubt,
     PostLike,
     PostMedia,
     PostSave,
@@ -31,6 +34,7 @@ from .models import (
     StorySticker,
     StoryPollVote,
     StoryQuestionAnswer,
+    StoryQuizAnswer,
     CloseFriend,
     Highlight,
     HighlightItem,
@@ -38,6 +42,10 @@ from .models import (
     MutedAccount,
     PostHide,
     FeedFeedback,
+    PostPoll,
+    PostPollOption,
+    PostPollVote,
+    PostPollQuestionLink,
 )
 
 
@@ -82,11 +90,36 @@ class PostLikeAdmin(admin.ModelAdmin):
 # TASK G6 — "Ask a doubt" answers.
 @admin.register(PostAnswer)
 class PostAnswerAdmin(admin.ModelAdmin):
+    inlines = []  # filled below (steps / attachments)
     list_display = ("id", "post", "user", "is_best_answer", "likes_count", "created_at")
     list_filter = ("is_best_answer",)
     search_fields = ("content", "user__username", "post__id")
     autocomplete_fields = ("user",)
     raw_id_fields = ("post",)
+
+
+class PostAnswerStepInline(admin.TabularInline):
+    model = PostAnswerStep
+    extra = 0
+
+
+class PostAnswerAttachmentInline(admin.TabularInline):
+    model = PostAnswerAttachment
+    extra = 0
+
+
+PostAnswerAdmin.inlines = [PostAnswerStepInline, PostAnswerAttachmentInline]
+
+
+# Doubt post upgrade: subject / urgent / solved / bounty of a doubt. Bounty fields are read-only: coins only move
+# through post/doubts.py (CoinLedger), never by editing a row here.
+@admin.register(PostDoubt)
+class PostDoubtAdmin(admin.ModelAdmin):
+    list_display = ("post", "subject", "class_level", "is_urgent", "bounty_coins", "bounty_status", "solved_at", "created_at")
+    list_filter = ("is_urgent", "bounty_status", "subject")
+    search_fields = ("subject", "chapter", "ocr_text", "post__id")
+    raw_id_fields = ("post", "bounty_paid_to")
+    readonly_fields = ("bounty_coins", "bounty_status", "bounty_paid_to", "solved_at", "teachers_notified_at")
 
 
 @admin.register(PostComment)
@@ -179,6 +212,13 @@ class StoryQuestionAnswerAdmin(admin.ModelAdmin):
     raw_id_fields = ("sticker", "user")
 
 
+@admin.register(StoryQuizAnswer)
+class StoryQuizAnswerAdmin(admin.ModelAdmin):
+    list_display = ("id", "sticker", "user", "option_index", "is_correct", "created_at")
+    search_fields = ("sticker__id", "user__username")
+    raw_id_fields = ("sticker", "user")
+
+
 @admin.register(StoryView)
 class StoryViewAdmin(admin.ModelAdmin):
     list_display = ("id", "story", "user", "viewed_at")
@@ -254,3 +294,162 @@ class FeedFeedbackAdmin(admin.ModelAdmin):
     list_filter = ("kind",)
     search_fields = ("user__username", "key")
     raw_id_fields = ("user",)
+
+
+# ---------------------------------------------------------------------------
+# P1 — resource files + hashtags
+# ---------------------------------------------------------------------------
+from .models import Hashtag, PostAttachment, PostAttachmentVersion, ResourcePaper  # noqa: E402
+
+
+@admin.register(PostAttachment)
+class PostAttachmentAdmin(admin.ModelAdmin):
+    list_display = ("original_name", "kind", "mime", "size", "pages", "version", "text_source", "post", "created_at")
+    list_filter = ("kind",)
+    search_fields = ("original_name", "post__title")
+    raw_id_fields = ("post",)
+
+
+@admin.register(Hashtag)
+class HashtagAdmin(admin.ModelAdmin):
+    list_display = ("name", "posts_count", "last_used_at")
+    search_fields = ("name",)
+    ordering = ("-posts_count",)
+
+
+@admin.register(PostAttachmentVersion)
+class PostAttachmentVersionAdmin(admin.ModelAdmin):
+    list_display = ("attachment", "version", "original_name", "size", "archived_at")
+    search_fields = ("original_name", "attachment__post__title")
+    raw_id_fields = ("attachment", "replaced_by")
+
+
+@admin.register(ResourcePaper)
+class ResourcePaperAdmin(admin.ModelAdmin):
+    list_display = ("post", "year", "doi", "venue")
+    list_filter = ("year",)
+    search_fields = ("authors_text", "doi", "venue", "post__title")
+    raw_id_fields = ("post",)
+
+
+# ---------------------------------------------------------------------------
+# Poll + Quiz. Vote rows of an ANONYMOUS poll exist only as the double-vote guard; the admin list hides the voter
+# for them too, so staff browsing votes never de-anonymises anyone. Votes are read-only (changing one would
+# desync the denormalised counters).
+# ---------------------------------------------------------------------------
+class PostPollOptionInline(admin.TabularInline):
+    model = PostPollOption
+    extra = 0
+    fields = ("display_order", "text", "image", "is_correct", "votes_count")
+    readonly_fields = ("votes_count",)
+
+
+@admin.register(PostPoll)
+class PostPollAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "post", "is_quiz", "is_anonymous", "allow_multiple", "results_visibility",
+        "total_votes_count", "expires_at", "created_at",
+    )
+    list_filter = ("is_quiz", "is_anonymous", "allow_multiple", "results_visibility")
+    search_fields = ("post__id", "post__title", "post__content", "post__user__username")
+    raw_id_fields = ("post",)
+    readonly_fields = ("total_votes_count", "created_at")
+    inlines = [PostPollOptionInline]
+    date_hierarchy = "created_at"
+
+
+@admin.register(PostPollVote)
+class PostPollVoteAdmin(admin.ModelAdmin):
+    list_display = ("id", "poll", "option", "voter", "is_correct", "created_at")
+    list_filter = ("is_correct", "poll__is_quiz", "poll__is_anonymous")
+    search_fields = ("poll__id", "poll__post__id")
+    raw_id_fields = ("poll", "option", "user")
+    list_select_related = ("poll", "option", "user")
+
+    def get_fields(self, request, obj=None):
+        if obj is not None and obj.poll.is_anonymous:
+            return ("poll", "option", "is_correct", "created_at")
+        return ("poll", "option", "user", "is_correct", "created_at")
+
+    def get_readonly_fields(self, request, obj=None):
+        return self.get_fields(request, obj)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    @admin.display(description="voter")
+    def voter(self, obj):
+        return "(anonymous)" if obj.poll.is_anonymous else obj.user.username
+
+
+@admin.register(PostPollQuestionLink)
+class PostPollQuestionLinkAdmin(admin.ModelAdmin):
+    list_display = ("id", "poll", "series_id", "question_id", "created_by", "created_at")
+    search_fields = ("series_id", "question_id", "created_by__username")
+    raw_id_fields = ("poll", "created_by")
+
+
+# ----------------------------------------------------------------------------------------------------------------- X7
+from django.contrib import messages  # noqa: E402
+
+from . import sounds as _sounds  # noqa: E402
+from .models import SoundReport, SoundTakedown  # noqa: E402
+
+
+@admin.register(SoundTakedown)
+class SoundTakedownAdmin(admin.ModelAdmin):
+    """Blocked reel sounds. Rows are made by the "Block" actions on SoundReport (they tell the reel owners and can send the
+    reels to review) or by the staff API; a row is never added by hand here, because then nobody would be told."""
+    list_display = ("sound_id", "title", "artist", "status", "reason", "owners_told", "reels_held", "created_by", "created_at")
+    list_filter = ("status", "reason")
+    search_fields = ("sound_id", "title", "artist", "note")
+    readonly_fields = ("owners_told", "reels_held", "created_by", "created_at", "restored_by", "restored_at")
+    actions = ["restore_selected"]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.action(description="Restore selected sounds (they can be used again)")
+    def restore_selected(self, request, queryset):
+        n = 0
+        for row in queryset.filter(status=SoundTakedown.Status.BLOCKED):
+            n += _sounds.restore_sound(row.sound_id, by=request.user)
+        self.message_user(request, f"{n} sound(s) restored. Reels that were sent to review stay in the review queue.")
+
+
+@admin.register(SoundReport)
+class SoundReportAdmin(admin.ModelAdmin):
+    list_display = ("sound_id", "reason", "status", "user", "updated_at")
+    list_filter = ("status", "reason")
+    search_fields = ("sound_id", "note", "user__username")
+    raw_id_fields = ("user",)
+    readonly_fields = ("created_at", "updated_at")
+    actions = ["block_selected", "block_and_review_selected", "dismiss_selected"]
+
+    def _block(self, request, queryset, hold):
+        done = 0
+        for sid in sorted(set(queryset.values_list("sound_id", flat=True))):
+            try:
+                _sounds.block_sound(sid, by=request.user, reason="copyright", hold_reels=hold)
+                done += 1
+            except _sounds.SoundError as exc:
+                self.message_user(request, f"{sid}: {exc}", level=messages.WARNING)
+        self.message_user(request, f"{done} sound(s) blocked; the owners of reels that use them were told.")
+
+    @admin.action(description="Block these sounds (tell reel owners)")
+    def block_selected(self, request, queryset):
+        self._block(request, queryset, False)
+
+    @admin.action(description="Block these sounds AND send their reels to the review queue")
+    def block_and_review_selected(self, request, queryset):
+        self._block(request, queryset, True)
+
+    @admin.action(description="Dismiss (false alarm)")
+    def dismiss_selected(self, request, queryset):
+        n = 0
+        for sid in sorted(set(queryset.values_list("sound_id", flat=True))):
+            n += _sounds.dismiss_reports(sid)
+        self.message_user(request, f"{n} report(s) dismissed.")

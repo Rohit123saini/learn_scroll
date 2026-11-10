@@ -1,0 +1,31 @@
+// P-I -- merge into android/app/build.gradle (Groovy). Kotlin DSL users: same keys, kts syntax.
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) { keystoreProperties.load(new FileInputStream(keystorePropertiesFile)) }
+
+android {
+    compileSdkVersion flutter.compileSdkVersion
+    defaultConfig {
+        applicationId "com.learnscroll.app"          // must match ANDROID_APP_PACKAGE on the server
+        minSdkVersion 24                               // livekit/webrtc + ffmpeg_kit need >= 24
+        targetSdkVersion 35                            // Play requires the current target API for new releases (check yearly)
+    }
+    signingConfigs {
+        release {
+            keyAlias keystoreProperties['keyAlias']
+            keyPassword keystoreProperties['keyPassword']
+            storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+            storePassword keystoreProperties['storePassword']
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release       // never the debug key
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+// Build the Play upload artifact (App Bundle) with symbols for Sentry/Crashlytics:
+//   flutter build appbundle --release --obfuscate --split-debug-info=build/symbols

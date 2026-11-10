@@ -242,6 +242,16 @@ def referral_percent():
     return max(Decimal("0"), min(pct, cap, Decimal("100")))
 
 
+def series_referral_percent(series: TestSeries):
+    """The cut THIS series pays: ONLY the creator's own %, clamped to the platform max. There is no platform default any
+    more (T-REF): referral enabled with 0% pays nothing, and the series is not shown in refer & earn."""
+    from decimal import Decimal
+
+    own = Decimal(str(getattr(series, "referral_commission_percent", 0) or 0))
+    cap = Decimal(str(getattr(settings, "TESTSERIES_REFERRAL_MAX_PERCENT", "50")))
+    return max(Decimal("0"), min(own, cap, Decimal("100")))
+
+
 def series_is_referable(series: TestSeries) -> bool:
     """Only individually-sold, paid series earn referral commission. Campus
     series are never paid; class series are covered by the class referral
@@ -251,7 +261,8 @@ def series_is_referable(series: TestSeries) -> bool:
         series.source == TestSeries.Source.INDIVIDUAL
         and bool(series.is_paid)
         and series.price_coins > 0
-        and referral_percent() > 0
+        and bool(series.referral_enabled)  # creator must allow commission
+        and series_referral_percent(series) > 0
     )
 
 
@@ -278,14 +289,21 @@ def referral_snapshot(*, buyer, series: TestSeries):
     if hook is None:
         return none
     try:
-        referrer_id = hook(buyer=buyer)
+        # T-REF: the attribution must come from THIS series' own URL, not from some other class / series link.
+        # The shared link carries the share_slug, the app records that as the source id - accept slug or UUID.
+        referrer_id = hook(
+            buyer=buyer,
+            source_type="testseries",
+            source_id=str(series.id),
+            source_aliases=[series.share_slug] if getattr(series, "share_slug", None) else [],
+        )
     except Exception:  # noqa: BLE001
         logger.exception("referral resolve_referrer hook failed")
         return none
     # The creator can't earn a "commission" on their own sale.
     if not referrer_id or referrer_id == series.creator_id or referrer_id == buyer.id:
         return none
-    pct = referral_percent()
+    pct = series_referral_percent(series)
     coins = int((Decimal(series.price_coins) * pct / 100).to_integral_value(rounding=ROUND_FLOOR))
     if coins <= 0:
         return none

@@ -1,0 +1,54 @@
+# H10 - add to prometheus.yml (scrape_configs:). The token = settings.FEED_OPS_SCRAPE_TOKEN (env FEED_OPS_SCRAPE_TOKEN).
+- job_name: learnscroll-feed-ops
+  metrics_path: /post/feed/ops/
+  params: { format: [prom] }
+  scheme: https
+  scrape_interval: 30s            # endpoint throttle is 30/min per client (scope feed_ops)
+  authorization:
+    type: Bearer
+    credentials_file: /etc/prometheus/secrets/feed_ops_token
+  static_configs:
+    - targets: ["api.example.com"]
+
+# X1 - calls. Same bearer token as the feed job works (settings.CALL_OPS_SCRAPE_TOKEN falls back to FEED_OPS_SCRAPE_TOKEN).
+- job_name: learnscroll-call-ops
+  metrics_path: /message/calls/ops/
+  params: { format: [prom] }
+  scheme: https
+  scrape_interval: 30s            # endpoint throttle is 30/min per client (scope call_ops)
+  authorization:
+    type: Bearer
+    credentials_file: /etc/prometheus/secrets/feed_ops_token     # or a separate call_ops_token
+  static_configs:
+    - targets: ["api.example.com"]
+
+# N10 - notifications. Same bearer token works (settings.NOTIFICATION_OPS_SCRAPE_TOKEN falls back to FEED_OPS_SCRAPE_TOKEN).
+- job_name: learnscroll-notification-ops
+  metrics_path: /core/notification-ops/
+  params: { format: [prom] }
+  scheme: https
+  scrape_interval: 60s            # endpoint throttle is 30/min per client (scope notification_ops)
+  authorization:
+    type: Bearer
+    credentials_file: /etc/prometheus/secrets/feed_ops_token     # or a separate notification_ops_token
+  static_configs:
+    - targets: ["api.example.com"]
+
+# X3 - product analytics + experiments (consent-gated aggregate counters, no user ids). Same bearer token works
+# (settings.PRODUCT_ANALYTICS_SCRAPE_TOKEN falls back to FEED_OPS_SCRAPE_TOKEN).
+- job_name: learnscroll-product-analytics
+  metrics_path: /core/analytics/product/
+  params: { format: [prom] }
+  scheme: https
+  scrape_interval: 60s            # endpoint throttle is scope product_analytics_ops (see settings.REST_FRAMEWORK)
+  authorization:
+    type: Bearer
+    credentials_file: /etc/prometheus/secrets/feed_ops_token     # or a separate product_analytics_token
+  static_configs:
+    - targets: ["api.example.com"]
+
+# PC2 - backups / restore drill. These metrics are NOT scraped from Django: deploy/backup/*.sh write them to node_exporter's
+# textfile collector (NODE_EXPORTER_TEXTFILE_DIR). Use your normal node_exporter job for the server, e.g.:
+#   - job_name: node
+#     static_configs: [ { targets: ["db-host:9100"] } ]
+# and load prometheus_backup_rules.yml (rule_files).

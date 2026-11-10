@@ -1,4 +1,4 @@
-# campus/management/commands/migrate_campus_assigmentss_to_unified.py
+# campus/management/commands/migrate_campus_assignments_to_unified.py
 """
 [Task 11] One-time historical backfill: every existing `campus.assigments`
 row (and its `campus.assigmentsSubmission` children) is copied into the
@@ -105,8 +105,8 @@ class Command(BaseCommand):
     # Migration
     # ------------------------------------------------------------------
     def _migrate(self, *, log_dir, dry_run):
-        from assigments.models import assigments as Unifiedassigments
-        from assigments.models import assigmentsSource, assigmentsSubmission as UnifiedassigmentsSubmission
+        from assignments.models import assigments as Unifiedassigments
+        from assignments.models import assigmentsSource, assigmentsSubmission as UnifiedassigmentsSubmission
 
         from campus.models import assigments as Legacyassigments
         from campus.models import StudentEnrollment
@@ -233,7 +233,7 @@ class Command(BaseCommand):
     # Rollback
     # ------------------------------------------------------------------
     def _rollback(self, log_file):
-        from assigments.models import assigments as Unifiedassigments
+        from assignments.models import assigments as Unifiedassigments
 
         path = Path(log_file)
         if not path.exists():

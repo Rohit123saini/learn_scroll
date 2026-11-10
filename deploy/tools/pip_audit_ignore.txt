@@ -1,0 +1,11 @@
+# X6 - pip-audit ignore list (deploy/tools/dependency_scan.py).
+#
+# Format (ek line = ek vulnerability):
+#     <VULN-ID>   <YYYY-MM-DD expiry>   <reason>
+# ID PYSEC-... / GHSA-... / CVE-... kuch bhi chalta hai (aliases bhi match hote hain).
+# Expiry ke baad wo entry apne aap "open" ho jaati hai aur CI phir fail karta hai - "temporary" kabhi "forever" na bane.
+# Sirf tab likho jab (a) abhi koi fixed version nahi hai ya upgrade ka risk bada hai, aur (b) vulnerable code path
+# humare use me reachable nahi. Reason me ye likhna zaroori hai. Bina date wali entry bhi chalti hai par report flag karti hai.
+#
+# Abhi koi ignore nahi - list khaali hai (scan clean maana jaata hai). Example (comment hai, active nahi):
+# GHSA-xxxx-xxxx-xxxx   2026-12-31   package X ka fix 3.2 me hai, hum 3.1 par; wo endpoint hum use nahi karte

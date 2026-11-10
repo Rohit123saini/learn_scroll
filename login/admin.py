@@ -35,9 +35,10 @@ debugging/support, just not hand-editable.
 """
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
-from django.db.models import Count
+from django.db.models import Count, Q
 
-from .models import OTPVerification, User
+from . import audit
+from .models import AuthAuditLog, AuthToken, OTPVerification, User
 
 
 class BlockedByManyFilter(admin.SimpleListFilter):
@@ -79,6 +80,10 @@ class UserAdmin(DjangoUserAdmin):
                     "profile_photo",
                     "is_private",
                     "is_verified",
+                    "verified_reason",  # P1: WHY the tick was given (shown on the profile)
+                    "cover_photo",
+                    "location",
+                    "username_changed_at",
                 )
             },
         ),
@@ -141,3 +146,64 @@ class UserAdmin(DjangoUserAdmin):
 
 
 admin.site.register(OTPVerification)
+
+@admin.register(AuthToken)
+class AuthTokenAdmin(admin.ModelAdmin):
+    """L1 gap 11 -- support view of live sessions. Deleting a row signs that device out
+    (the next request answers TOKEN_EXPIRED); nothing here is editable on purpose."""
+
+    list_display = ("user", "device_name", "platform", "ip_address", "created_at", "last_used_at")
+    list_filter = ("platform",)
+    search_fields = ("user__username", "user__email", "device_name", "ip_address", "device_id")
+    readonly_fields = (
+        "user", "jti", "device_id", "device_name", "platform", "ip_address",
+        "user_agent", "created_at", "last_used_at",
+    )
+    ordering = ("-last_used_at",)
+    list_select_related = ("user",)
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(AuthAuditLog)
+class AuthAuditLogAdmin(admin.ModelAdmin):
+    """L1 gap 19 -- read-only view of the login / OTP / reset / session audit trail.
+
+    Nothing here is editable or deletable on purpose (old rows are purged by
+    login.tasks.purge_auth_audit_logs). Useful filters: outcome = failure / blocked to see
+    attacks, event = reset_success to see who reset a password and from which device.
+    """
+
+    list_display = ("created_at", "event", "outcome", "user", "identifier_masked", "reason", "ip_address", "platform")
+    list_filter = ("outcome", "event", "platform", "created_at")
+    date_hierarchy = "created_at"
+    search_fields = ("user__username", "identifier_masked", "ip_address", "device_id", "reason")
+    search_help_text = (
+        "Username, masked identifier, IP, device id or reason - or paste a FULL email / phone "
+        "to find every row for it (matched by hash)."
+    )
+    ordering = ("-created_at", "-id")
+    list_select_related = ("user",)
+    list_per_page = 50
+    show_full_result_count = False  # COUNT(*) over a big, growing table on every page load
+    readonly_fields = tuple(f.name for f in AuthAuditLog._meta.fields)
+
+    def get_search_results(self, request, queryset, search_term):
+        results, may_have_duplicates = super().get_search_results(request, queryset, search_term)
+        term = (search_term or "").strip()
+        if term:
+            digest = audit.identifier_hash(term)
+            if digest:
+                # one query (no QuerySet OR-combine): text matches OR the keyed-hash match
+                results = queryset.filter(Q(pk__in=results.values("pk")) | Q(identifier_hash=digest))
+        return results, may_have_duplicates
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

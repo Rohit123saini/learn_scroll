@@ -3,6 +3,8 @@ import hashlib
 import logging
 from datetime import timedelta
 
+from django.conf import settings
+from django.core.cache import cache
 from django.db import models, transaction, IntegrityError
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -12,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import UserRateThrottle
 from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
+from aiquality.telemetry import ai_context, call_in_context, note_cache_hit  # P-F6: tag + log every model call
 from .ai_service import (
     generate_summary, generate_quiz, transcribe_audio, generate_reply_suggestions,
     generate_classroom_answer, generate_revision_deck, AI_ENABLED,
@@ -111,7 +114,7 @@ class VoiceTranscribeView(APIView):
             return Response({"error": "file_url required hai"}, status=400)
 
         try:
-            transcript = transcribe_audio(file_url, mime_type=mime_type)
+            transcript, _ctx = call_in_context("transcribe", "audio", request.user, transcribe_audio, file_url, mime_type=mime_type)
             return Response({"transcript": transcript}, status=200)
         except Exception as e:
             logger.exception(f"Voice transcription failed user={request.user.id} err={e}")
@@ -145,9 +148,21 @@ class SmartReplySuggestionsView(APIView):
 
     CONTEXT_MESSAGE_COUNT = 10
 
+    # T0.4 — smart reply best-effort hai: Gemini offline/slow/disabled ho to chat ko
+    # kabhi 500/lag nahi dena. Hamesha 200 + khaali suggestions (client chips hide kar deta hai).
+    BACKOFF_CACHE_KEY = "smart_reply:backoff"
+
+    @staticmethod
+    def _empty(reason):
+        return Response({"suggestions": [], "unavailable": True, "reason": reason}, status=200)
+
     def post(self, request):
+        # Feature flag / AI not configured => Gemini ko chhua tak nahi. (Validation se pehle,
+        # taaki band feature ke liye DB query bhi na ho.)
+        if not getattr(settings, "AI_SMART_REPLY_ENABLED", True):
+            return self._empty("disabled")
         if not AI_ENABLED:
-            return Response({"error": "AI service not configured on server"}, status=503)
+            return self._empty("not_configured")
 
         conversation_id = (request.data.get("conversation_id") or "").strip()
         if not conversation_id:
@@ -158,6 +173,11 @@ class SmartReplySuggestionsView(APIView):
         ).exists()
         if not is_member:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Circuit breaker: abhi-abhi Gemini fail/timeout hua tha (offline) => kuch der skip,
+        # taaki har naye message pe 4s ka intezaar na ho.
+        if cache.get(self.BACKOFF_CACHE_KEY):
+            return self._empty("backoff")
 
         # Sirf plain text messages context ke liye — media/system/poll
         # messages me koi "reply-able" text nahi hota is prompt ke liye.
@@ -192,13 +212,17 @@ class SmartReplySuggestionsView(APIView):
         context_text = "\n".join(context_lines)
 
         try:
-            suggestions = generate_reply_suggestions(context_text, conversation_id)
+            suggestions, _ctx = call_in_context("smart_reply", "suggestions", request.user, generate_reply_suggestions, context_text, conversation_id)
         except Exception as e:
-            logger.exception(
-                f"Smart reply generation failed user={request.user.id} "
-                f"conv={conversation_id} err={e}"
+            # WARNING, traceback ke bina (offline/DNS/timeout expected hai, bug nahi).
+            logger.warning(
+                "Smart reply unavailable user=%s conv=%s err=%s: %s",
+                request.user.id, conversation_id, type(e).__name__, e,
             )
-            return Response({"error": "Suggestions temporarily unavailable"}, status=500)
+            backoff = int(getattr(settings, "AI_SMART_REPLY_BACKOFF_SECONDS", 30))
+            if backoff > 0:
+                cache.set(self.BACKOFF_CACHE_KEY, 1, backoff)
+            return self._empty("unavailable")
 
         return Response({"suggestions": suggestions}, status=200)
 
@@ -329,7 +353,8 @@ class AskAIDoubtView(APIView):
         context_text = context_text[: self.MAX_CONTEXT_LEN]
 
         try:
-            answer = generate_doubt_answer(
+            answer, _ctx = call_in_context(
+                "doubt", "answer", request.user, generate_doubt_answer,
                 question=question,
                 context_text=context_text,
                 context_label=self.CONTEXT_LABELS[context_type],
@@ -344,7 +369,7 @@ class AskAIDoubtView(APIView):
             )
             return Response({"error": "AI temporarily unavailable, try again"}, status=500)
 
-        return Response({"answer": answer, "used_image": bool(image_bytes)}, status=200)
+        return Response({"answer": answer, "used_image": bool(image_bytes), "ai_meta": _ctx.meta()}, status=200)
 
 
 # ==========================================================================
@@ -413,7 +438,8 @@ class StudyBuddyView(APIView):
             return Response({"error": "Content too short — kuch text ya PDF do"}, status=400)
 
         try:
-            result = generate_study_buddy(
+            result, _ctx = call_in_context(
+                "study_buddy", mode, request.user, generate_study_buddy,
                 mode=mode, content=content, language=language, pdf_bytes=pdf_bytes,
             )
         except Exception as e:
@@ -423,7 +449,7 @@ class StudyBuddyView(APIView):
             )
             return Response({"error": "AI temporarily unavailable, try again"}, status=500)
 
-        return Response({"mode": mode, "language": language, **result}, status=200)
+        return Response({"mode": mode, "language": language, **result, "ai_meta": _ctx.meta()}, status=200)
 
 
 class AiStudyRoomView(APIView):
@@ -447,10 +473,10 @@ class AiStudyRoomView(APIView):
 
         try:
             if mode == "summary":
-                summary = generate_summary(content)
+                summary, _ctx = call_in_context("study_room", "summary", request.user, generate_summary, content)
                 return Response({"summary": summary}, status=200)
             else:
-                questions = generate_quiz(content)
+                questions, _ctx = call_in_context("study_room", "quiz", request.user, generate_quiz, content)
                 return Response({"questions": questions}, status=200)
 
         except Exception as e:
@@ -701,12 +727,12 @@ class ClassroomCopilotView(APIView):
         context_text = "\n\n---\n\n".join(context_sections)
 
         try:
-            answer = generate_classroom_answer(question, context_text, conversation_id)
+            answer, _ctx = call_in_context("copilot", "answer", request.user, generate_classroom_answer, question, context_text, conversation_id)
         except Exception as e:
             logger.exception(f"Classroom copilot failed user={request.user.id} conv={conversation_id} err={e}")
             return Response({"error": "Copilot temporarily unavailable"}, status=500)
 
-        return Response({"answer": answer}, status=200)
+        return Response({"answer": answer, "ai_meta": _ctx.meta()}, status=200)
 
 
 # ==========================================================================
@@ -719,6 +745,27 @@ class ClassroomCopilotView(APIView):
 # in `RevisionDeck` (unlike plain summary/quiz) so the student can revisit
 # it before an exam without regenerating or losing it.
 # ==========================================================================
+def _cached_deck_meta(user):
+    """P-F6: ai_meta for a deck that is NOT generated by this request (24h-duplicate / race winner / GET).
+    Decks are stored per conversation, so there is no per-deck prompt version: the version the server runs now is
+    reported (call_id = None, cached = True)."""
+    with ai_context("revision_deck", "deck", user) as ctx:
+        note_cache_hit()
+    return ctx.meta()
+
+
+def _deck_json(deck, meta):
+    """P-F6: one shape for every revision-deck response; `ref_id` + `ai_meta` are echoed back with a 👍 / 👎."""
+    return {
+        "id": str(deck.id),
+        "flashcards": deck.flashcards,
+        "quiz": deck.quiz,
+        "created_at": deck.created_at.isoformat(),
+        "ref_id": str(deck.id),
+        "ai_meta": meta,
+    }
+
+
 class RevisionDeckView(APIView):
     """
     POST /message/study-room/<conversation_id>/revision-deck/
@@ -857,12 +904,7 @@ class RevisionDeckView(APIView):
         if not deck:
             return Response({"flashcards": [], "quiz": [], "created_at": None})
 
-        return Response({
-            "id": str(deck.id),
-            "flashcards": deck.flashcards,
-            "quiz": deck.quiz,
-            "created_at": deck.created_at.isoformat(),
-        })
+        return Response(_deck_json(deck, _cached_deck_meta(request.user)))
 
     def delete(self, request, conversation_id):
         if not self._check_member(request, conversation_id):
@@ -960,15 +1002,10 @@ class RevisionDeckView(APIView):
             .first()
         )
         if existing:
-            return Response({
-                "id": str(existing.id),
-                "flashcards": existing.flashcards,
-                "quiz": existing.quiz,
-                "created_at": existing.created_at.isoformat(),
-            }, status=200)
+            return Response(_deck_json(existing, _cached_deck_meta(request.user)), status=200)
 
         try:
-            deck = generate_revision_deck(content)
+            deck, _ctx = call_in_context("revision_deck", "deck", request.user, generate_revision_deck, content)
         except Exception as e:
             logger.exception(f"Revision deck failed user={request.user.id} conv={conversation_id} err={e}")
             return Response({"error": "AI temporarily unavailable, try again"}, status=500)
@@ -1009,16 +1046,6 @@ class RevisionDeckView(APIView):
                 # re-query (e.g. deleted in between) — surface as a
                 # normal failure rather than a confusing 500.
                 return Response({"error": "AI temporarily unavailable, try again"}, status=500)
-            return Response({
-                "id": str(winner.id),
-                "flashcards": winner.flashcards,
-                "quiz": winner.quiz,
-                "created_at": winner.created_at.isoformat(),
-            }, status=200)
+            return Response(_deck_json(winner, _cached_deck_meta(request.user)), status=200)
 
-        return Response({
-            "id": str(saved.id),
-            "flashcards": saved.flashcards,
-            "quiz": saved.quiz,
-            "created_at": saved.created_at.isoformat(),
-        }, status=201)
+        return Response(_deck_json(saved, _ctx.meta()), status=201)

@@ -20,6 +20,7 @@
 # (`_require_admin`, `group.is_private`) bhi yahin move ho gaye hain taaki
 # ek hi jagah se "kaun kya kar sakta hai" control ho.
 
+import logging
 import secrets
 from typing import Iterable, Optional
 
@@ -35,11 +36,14 @@ from .models import (
     Conversation,
     ConversationParticipant,
     ConversationType,
+    DoubtAnswer,
+    DoubtQuestion,
     Group,
     GroupMember,
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +317,10 @@ def create_group(
         _blocked = blocked_user_ids(created_by)
         if _blocked:
             ids = {i for i in ids if i not in _blocked and str(i) not in {str(b) for b in _blocked}}
+        # S4: people who limited "who can add me to groups" are left out too (skipped silently, like a block).
+        from user_profile import privacy as privacy_rules
+
+        ids = privacy_rules.allowed_owner_ids(created_by, ids, 'group_add_from')
         valid_users = list(User.objects.filter(id__in=ids))
 
         memberships = [ConversationParticipant(conversation=conversation, user=created_by)]
@@ -332,7 +340,7 @@ def create_group(
 # ---------------------------------------------------------------------------
 # add_members() — extracted from GroupViewSet.add_members
 # ---------------------------------------------------------------------------
-def add_members_to_group(*, group: Group, actor, user_ids: Iterable) -> list:
+def add_members_to_group(*, group: Group, actor, user_ids: Iterable, pending_out=None, declined_out=None) -> list:
     """
     `actor` ke through `user_ids` ko `group` me add karta hai. Public
     group: koi bhi member add kar sakta hai. Private group: sirf
@@ -345,6 +353,14 @@ def add_members_to_group(*, group: Group, actor, user_ids: Iterable) -> list:
 
     Returns: newly-added `User` instances ki list (already-member users
     silently skip ho jaate hain, error nahi).
+
+    S8: approval wale public group (`Group.join_approval_required`) ya minor target (`MINOR_PUBLIC_GROUP_JOIN_APPROVAL`)
+    ko non-admin actor seedha add nahi kar sakta (`study_room_safety.can_add_directly`) — unke liye `GroupJoinRequest`
+    (PENDING) banti hai, admin/mod approve karta hai. Aise user ids `pending_out` (list) me append hote hain (agar
+    caller ne di ho); wo return list me NAHI aate. Admin/mod aur system caller (`actor=None`) ko ye rule nahi lagta.
+    S4: jisne "mujhe group me kaun add kare" limit kiya hai (`PrivacySettings.group_add_from`) use `actor` add nahi kar
+    sakta — aise user ids `declined_out` (list, agar caller ne di ho) me append hote hain, return list me NAHI aate.
+    System caller (`actor=None`) ko ye rule nahi lagta.
     Raises: PermissionError agar private group + non-admin actor.
     ValueError agar `user_ids` empty ho.
     """
@@ -367,7 +383,31 @@ def add_members_to_group(*, group: Group, actor, user_ids: Iterable) -> list:
         _blocked = {str(b) for b in blocked_user_ids(actor)}
         if _blocked:
             new_ids = [uid for uid in new_ids if str(uid) not in _blocked]
+        # S4 -- "who can add me to groups".
+        if new_ids:
+            from user_profile import privacy as privacy_rules
+
+            _ok = privacy_rules.allowed_owner_ids(actor, new_ids, 'group_add_from')
+            _refused = [uid for uid in new_ids if privacy_rules.as_user_id(uid) not in _ok]
+            if _refused:
+                if declined_out is not None:
+                    declined_out.extend(_refused)
+                new_ids = [uid for uid in new_ids if privacy_rules.as_user_id(uid) in _ok]
     users = list(User.objects.filter(id__in=new_ids))
+
+    # S8 — direct add allowed nahi => approval request.
+    if actor is not None and users:
+        from . import study_room_safety
+
+        direct = []
+        for user in users:
+            if study_room_safety.can_add_directly(group, actor, user):
+                direct.append(user)
+                continue
+            study_room_safety.create_or_reset_join_request(group, user)
+            if pending_out is not None:
+                pending_out.append(user.id)
+        users = direct
 
     with transaction.atomic():
         for user in users:
@@ -441,11 +481,251 @@ def update_group_member_role(*, group: Group, actor, user_id, data: dict) -> Gro
     return membership
 
 # ---------------------------------------------------------------------------
-# answer_doubt_question() — Task 16. Shared answer-path for BOTH classroom
-# doubts (`doubt.group` set) and context-pointer doubts (`doubt.
-# context_type`/`context_id` set, e.g. testseries — see `testseries/
-# bridge.py::answer_query_on_series()`), since `DoubtQuestion` itself now
-# supports both shapes (see models.py's Task 16 comment on the field).
+# DOUBT QUEUE — answers (T1.2 notification, T1.3 multi-answer / best /
+# teacher-verified).
+#
+# Same convention as the rest of this module: plain `ValueError` /
+# `PermissionError` (never DRF exceptions); `DoubtQuestionViewSet` converts
+# them at the HTTP boundary.
+# ---------------------------------------------------------------------------
+
+#: Ek doubt par total answers ka cap (spam / runaway thread guard).
+MAX_DOUBT_ANSWERS_PER_DOUBT = 50
+#: Ek (non-teacher) member ek doubt par kitne answers de sakta hai.
+MAX_DOUBT_ANSWERS_PER_USER = 3
+
+
+def _is_doubt_teacher(doubt, user) -> bool:
+    """admin/moderator of the doubt's group. Context-pointer (testseries)
+    doubts have no group -> nobody is a "group teacher" there."""
+    if doubt.group_id is None:
+        return False
+    return is_group_admin_or_mod(doubt.group, user.id)
+
+
+def refresh_doubt_answer_summary(doubt) -> None:
+    """Recompute `DoubtQuestion`'s denormalized answer summary from its
+    `DoubtAnswer` rows. Call inside the same transaction as any answer
+    add/delete/best/verify change.
+
+    Legacy mirror fields (`is_answered`/`answer_text`/`answered_by`/
+    `answered_at`) point at the *primary* answer = first row in
+    `DoubtAnswer.Meta.ordering` (best > teacher-verified > teacher answer >
+    oldest), so old clients and `testseries/bridge.py` keep working."""
+    answers = list(DoubtAnswer.objects.filter(doubt=doubt))
+    primary = answers[0] if answers else None
+
+    doubt.answers_count = len(answers)
+    doubt.has_best_answer = any(a.is_best for a in answers)
+    doubt.has_verified_answer = any(a.is_teacher_verified for a in answers)
+    doubt.is_answered = primary is not None
+    doubt.answer_text = primary.text if primary else ''
+    doubt.answered_by_id = primary.author_id if primary else None
+    doubt.answered_at = primary.created_at if primary else None
+    doubt.save(update_fields=[
+        'answers_count', 'has_best_answer', 'has_verified_answer',
+        'is_answered', 'answer_text', 'answered_by', 'answered_at', 'updated_at',
+    ])
+
+
+def _send_doubt_answered_push(notification) -> None:
+    try:
+        from .push_utils import send_doubt_answered_push
+        send_doubt_answered_push(notification)
+    except Exception:  # push is best-effort, never breaks the answer itself
+        logger.exception("doubt_answered push failed (notification=%s)", getattr(notification, 'id', None))
+
+
+def notify_doubt_answered(answer):
+    """T1.2 — bell row + push to the doubt's asker when `answer` is posted.
+
+    * No self-notify (asker is never the answer author for group doubts, but
+      the legacy `answer_doubt_question` path can't rule it out).
+    * The notification never carries anything that identifies an anonymous
+      asker to anyone else — it only goes to the asker themself.
+    * Bell row is written inline (same transaction as the answer, so a
+      rolled-back answer leaves no orphan notification); the push goes out
+      `on_commit` so FCM is never hit for a rolled-back transaction.
+    * Respects restrict / block / mute (`create_notification(actor=...)`) and
+      NotificationPreference (`send_push_for_notification`) — a skipped row is
+      simply `None` and nothing is pushed.
+
+    Returns the `Notification` row or `None`."""
+    from core.models import Notification
+    from core.services import create_notification
+
+    doubt = answer.doubt
+    recipient_id = doubt.author_id
+    if recipient_id is None or answer.author_id == recipient_id:
+        return None
+
+    group_name = ''
+    if doubt.group_id is not None:
+        group_name = (getattr(doubt.group, 'name', '') or '').strip()
+    base = 'Teacher ne aapke doubt ka answer diya' if answer.is_teacher_answer else 'Aapke doubt par naya answer aaya'
+    title = f"{base} · {group_name}" if group_name else base
+    snippet = (answer.text or '').strip()
+    if len(snippet) > 140:
+        snippet = snippet[:137].rstrip() + '...'
+
+    data = {
+        'doubt_id': str(doubt.id),
+        'answer_id': str(answer.id),
+        'by_teacher': bool(answer.is_teacher_answer),
+    }
+    if doubt.group_id is not None:
+        data['group_id'] = str(doubt.group_id)
+    if doubt.conversation_id is not None:
+        data['conversation_id'] = str(doubt.conversation_id)
+
+    row = create_notification(
+        recipient=recipient_id,
+        notif_type=Notification.NotifType.DOUBT_ANSWERED,
+        title=title[:150],
+        message=snippet,
+        data=data,
+        actor=answer.author,
+    )
+    if row is not None:
+        transaction.on_commit(lambda: _send_doubt_answered_push(row))
+    return row
+
+
+def add_doubt_answer(*, doubt, author, text: str):
+    """T1.3 — any (non-banned) group member posts an answer to a classroom
+    doubt. Group-membership itself is enforced by the caller
+    (`DoubtQuestionViewSet.get_group`).
+
+    Rules:
+      * not on your own doubt (an answer would unmask an anonymous asker);
+      * admin/moderator answers are flagged `is_teacher_answer` and
+        auto-verified;
+      * caps: `MAX_DOUBT_ANSWERS_PER_DOUBT` per doubt,
+        `MAX_DOUBT_ANSWERS_PER_USER` per non-teacher member per doubt.
+
+    Raises `ValueError` (validation) — returns the new `DoubtAnswer`."""
+    text = (text or '').strip()
+    if not text:
+        raise ValueError('Answer khali nahi ho sakta.')
+    if len(text) > 4000:
+        raise ValueError('Answer 4000 characters se zyada nahi ho sakta.')
+    if doubt.group_id is None:
+        raise ValueError('Is doubt ka answer sirf testseries teacher de sakta hai.')
+    if doubt.author_id == author.id:
+        raise ValueError('Apne doubt ka answer khud nahi de sakte.')
+
+    is_teacher = _is_doubt_teacher(doubt, author)
+    now = timezone.now()
+
+    with transaction.atomic():
+        # Row lock serialises concurrent answers on the same doubt so the
+        # caps below can't be raced past (no-op on SQLite).
+        locked = DoubtQuestion.objects.select_for_update().get(pk=doubt.pk)
+        existing = DoubtAnswer.objects.filter(doubt=locked)
+        if existing.count() >= MAX_DOUBT_ANSWERS_PER_DOUBT:
+            raise ValueError('Is doubt par answers ki limit pahunch chuki hai.')
+        if not is_teacher and existing.filter(author=author).count() >= MAX_DOUBT_ANSWERS_PER_USER:
+            raise ValueError(f'Aap ek doubt par maximum {MAX_DOUBT_ANSWERS_PER_USER} answers de sakte ho.')
+
+        answer = DoubtAnswer.objects.create(
+            doubt=locked,
+            author=author,
+            text=text,
+            is_teacher_answer=is_teacher,
+            is_teacher_verified=is_teacher,
+            verified_by=author if is_teacher else None,
+            verified_at=now if is_teacher else None,
+        )
+        refresh_doubt_answer_summary(locked)
+
+    doubt.refresh_from_db()
+    answer.doubt = doubt
+    notify_doubt_answered(answer)
+    return answer
+
+
+def set_best_answer(*, answer, actor, best: bool = True):
+    """T1.3 — mark (or un-mark) `answer` as the doubt's Best Answer. Allowed:
+    the doubt's asker, or a group admin/moderator. Marking replaces any
+    previous best (one best per doubt — also a DB partial-unique constraint).
+
+    Raises `PermissionError` / `ValueError`; returns the refreshed answer."""
+    doubt = answer.doubt
+    if not (doubt.author_id == actor.id or _is_doubt_teacher(doubt, actor)):
+        raise PermissionError('Sirf doubt poochne wala ya teacher best answer chun sakta hai.')
+
+    with transaction.atomic():
+        locked = DoubtQuestion.objects.select_for_update().get(pk=doubt.pk)
+        if best:
+            DoubtAnswer.objects.filter(doubt=locked, is_best=True).exclude(pk=answer.pk).update(
+                is_best=False, best_marked_by=None,
+            )
+            DoubtAnswer.objects.filter(pk=answer.pk).update(is_best=True, best_marked_by=actor)
+        else:
+            DoubtAnswer.objects.filter(pk=answer.pk, is_best=True).update(
+                is_best=False, best_marked_by=None,
+            )
+        refresh_doubt_answer_summary(locked)
+
+    answer.refresh_from_db()
+    doubt.refresh_from_db()
+    answer.doubt = doubt
+    return answer
+
+
+def set_answer_verified(*, answer, actor, verified: bool = True):
+    """T1.3 — teacher (group admin/moderator) marks an answer "Verified by
+    teacher" (or removes it). A teacher's *own* answer is always verified, so
+    un-verifying it is rejected.
+
+    Raises `PermissionError` / `ValueError`; returns the refreshed answer."""
+    doubt = answer.doubt
+    if not _is_doubt_teacher(doubt, actor):
+        raise PermissionError('Sirf group admin/moderator (teacher) answer verify kar sakte hain.')
+    if not verified and answer.is_teacher_answer:
+        raise ValueError('Teacher ka apna answer hamesha verified rehta hai.')
+
+    with transaction.atomic():
+        locked = DoubtQuestion.objects.select_for_update().get(pk=doubt.pk)
+        if verified:
+            DoubtAnswer.objects.filter(pk=answer.pk).update(
+                is_teacher_verified=True, verified_by=actor, verified_at=timezone.now(),
+            )
+        else:
+            DoubtAnswer.objects.filter(pk=answer.pk).update(
+                is_teacher_verified=False, verified_by=None, verified_at=None,
+            )
+        refresh_doubt_answer_summary(locked)
+
+    answer.refresh_from_db()
+    doubt.refresh_from_db()
+    answer.doubt = doubt
+    return answer
+
+
+def delete_doubt_answer(*, answer, actor):
+    """T1.3 — answer ka author apna answer, ya teacher koi bhi answer hata
+    sakta hai. Returns the (refreshed) parent doubt."""
+    doubt = answer.doubt
+    if not (answer.author_id == actor.id or _is_doubt_teacher(doubt, actor)):
+        raise PermissionError('Aap ye answer delete nahi kar sakte.')
+
+    with transaction.atomic():
+        locked = DoubtQuestion.objects.select_for_update().get(pk=doubt.pk)
+        answer.delete()
+        refresh_doubt_answer_summary(locked)
+
+    doubt.refresh_from_db()
+    return doubt
+
+
+# ---------------------------------------------------------------------------
+# answer_doubt_question() — Task 16. Single-shot "teacher answers" path kept
+# for `testseries/bridge.py::answer_query_on_series()` (context-pointer
+# doubts, `doubt.group` is None) — one authoritative answer, no thread.
+# Classroom doubts now go through `add_doubt_answer()` above (multi-answer);
+# this function still works for them too (e.g. old callers) and records the
+# answer as a teacher-verified, best `DoubtAnswer` so both models agree.
 # ---------------------------------------------------------------------------
 def answer_doubt_question(*, doubt, actor, answer_text: str, answered_by=None):
     """
@@ -478,25 +758,23 @@ def answer_doubt_question(*, doubt, actor, answer_text: str, answered_by=None):
     if resolved_answered_by is None:
         raise ValueError("'answered_by' (ya 'actor') required hai.")
 
-    doubt.is_answered = True
-    doubt.answer_text = answer_text
-    doubt.answered_by = resolved_answered_by
-    doubt.answered_at = timezone.now()
-    doubt.save(update_fields=['is_answered', 'answer_text', 'answered_by', 'answered_at', 'updated_at'])
+    now = timezone.now()
+    with transaction.atomic():
+        answer = DoubtAnswer.objects.create(
+            doubt=doubt,
+            author=resolved_answered_by,
+            text=answer_text,
+            is_teacher_answer=True,
+            is_best=True,
+            best_marked_by=resolved_answered_by,
+            is_teacher_verified=True,
+            verified_by=resolved_answered_by,
+            verified_at=now,
+        )
+        refresh_doubt_answer_summary(doubt)
 
-    # Task 16 acceptance checklist: student gets TESTSERIES_QUERY_ANSWERED
-    # when their testseries query is answered. Classroom (group) doubts
-    # don't get a notify here — deliberately: no acceptance requirement
-    # for that path in this task, and it'd need its own NotifType member
-    # (same "flag the gap, don't guess" convention `testseries/models.py`
-    # already uses for its own unconfirmed NotifType members).
     if doubt.context_type == 'testseries_attempt':
-        # ⚠️ GAP, same shape as testseries/models.py's own flagged gaps:
-        # `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`
-        # is NOT confirmed to exist yet. Until `core` adds it, this raises
-        # `AttributeError` at this point — i.e. the answer itself (fields
-        # above) is saved and real either way, only this notify step needs
-        # that enum member added first.
+        # testseries path: its own notif type (unchanged behaviour).
         from core.models import Notification
         from core.services import create_notification
 
@@ -507,6 +785,9 @@ def answer_doubt_question(*, doubt, actor, answer_text: str, answered_by=None):
             message=answer_text[:200],
             data={'doubt_id': str(doubt.id), 'context_id': str(doubt.context_id)},
         )
+    else:
+        # T1.2 — classroom doubt: DOUBT_ANSWERED bell row + push.
+        notify_doubt_answered(answer)
 
     return doubt
 
@@ -541,7 +822,7 @@ def create_bell_rows_for_push(*, recipient_ids: Iterable, notif_type: str, title
             # notif_type, title, message, data) — positional. Switched to
             # keyword args to match the one call site in this same file
             # that's confirmed working (answer_doubt_question() below)
-            # and the [VERIFIED] signature assigments/bridge.py already
+            # and the [VERIFIED] signature assignments/bridge.py already
             # checked directly against core/services.py — every other
             # confirmed call site in this codebase always calls this
             # function with keywords, never positionally. If the real

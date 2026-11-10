@@ -35,16 +35,16 @@ class CleanLinksTests(APITestCase):
             with self.assertRaises(ValidationError, msg=bad):
                 clean_profile_links([{"title": "x", "url": bad}])
 
-    def test_rejects_fourth_link_and_bad_shapes(self):
+    def test_rejects_sixth_link_and_bad_shapes(self):
         with self.assertRaises(ValidationError):
-            clean_profile_links([OK_LINK] * 4)
+            clean_profile_links([OK_LINK] * 6)
         for bad in ["str", {"title": "a", "url": "https://a.com"}, [1], [{"title": "", "url": "https://a.com"}],
                     [{"title": "a"}], [{"url": "https://a.com"}], [{"title": 1, "url": "https://a.com"}]]:
             with self.assertRaises(ValidationError, msg=str(bad)):
                 clean_profile_links(bad)
 
-    def test_three_links_ok_and_empty_ok(self):
-        self.assertEqual(len(clean_profile_links([OK_LINK] * 3)), 3)
+    def test_five_links_ok_and_empty_ok(self):
+        self.assertEqual(len(clean_profile_links([OK_LINK] * 5)), 5)  # P1: max is 5 now
         self.assertEqual(clean_profile_links([]), [])
 
 
@@ -82,8 +82,8 @@ class ProfileUpdateApiTests(APITestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.links, [])
 
-    def test_fourth_link_is_400(self):
-        r = self._patch({"links": [OK_LINK] * 4})
+    def test_sixth_link_is_400(self):
+        r = self._patch({"links": [OK_LINK] * 6})
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("links", r.json()["errors"])
 

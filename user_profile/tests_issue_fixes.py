@@ -195,6 +195,7 @@ class ProfilePhotoValidationTests(APITestCase):
         self.assertEqual(r.status_code, 200, r.data)
 
 
+@override_settings(COIN_CASHOUT_ENABLED=True)  # P-G1: these tests exercise the cash-out path itself
 class WithdrawalPayoutValidationTests(APITestCase):
     def setUp(self):
         self.alice = mk("alice")

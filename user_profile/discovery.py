@@ -50,15 +50,22 @@ def suggested_users_queryset(viewer, *, exclude_user_ids=()):
         .exclude(id__in=RestrictUser.objects.filter(user=viewer).values("restricted_id"))
     )
     # Minor-safety: don't recommend under-18 accounts to adult viewers.
-    # (Unknown-DOB users are left alone — nothing is assumed about them.)
-    if viewer.is_verified_adult:
-        from login.age import minor_cutoff_date
+    # P-F16: the old test was `viewer.is_verified_adult`, so a viewer with NO date of birth (every pre-DOB account) was still
+    # offered minors. Now every viewer who is not a minor themself gets the rule (see common/minor_policy.py).
+    from common import minor_policy
 
-        candidates = candidates.exclude(date_of_birth__gt=minor_cutoff_date())
+    candidates = minor_policy.exclude_minors_for_stranger(
+        candidates, viewer, feature=minor_policy.SUGGESTIONS
+    )
 
     extra = [i for i in exclude_user_ids if i is not None]
     if extra:
         candidates = candidates.exclude(id__in=extra)
+
+    # S4: people who chose "hide me from search" are not suggested either (unless an accepted follow links you).
+    from . import privacy as _privacy
+
+    candidates = _privacy.exclude_hidden_from_search(candidates, viewer)
 
     try:
         from post.models import UserInterest

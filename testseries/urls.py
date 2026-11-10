@@ -6,7 +6,7 @@ from .views import (
     QuestionViewSet, TestAttemptViewSet, TestSeriesReviewViewSet, TestSeriesViewSet,
 )
 from .views_advanced import (
-    CertificateVerifyView, LiveKitWebhookView, MyCertificatesView, PublicSeriesView,
+    CertificateVerifyView, LiveKitWebhookView, MyCertificatesView, PublicSeriesView, UserCertificatesView,
 )
 
 router = DefaultRouter()
@@ -41,6 +41,7 @@ urlpatterns = [
         name="testseries-certificate-verify",
     ),
     path("testseries/certificates/mine/", MyCertificatesView.as_view(), name="testseries-certificate-mine"),
+    path("testseries/certificates/of/<str:username>/", UserCertificatesView.as_view(), name="testseries-certificate-of-user"),  # P2
     path("testseries/livekit-webhook/", LiveKitWebhookView.as_view(), name="testseries-livekit-webhook"),
     path("", include(router.urls)),
     path("testseries/<uuid:series_pk>/questions/", question_list, name="testseries-question-list"),

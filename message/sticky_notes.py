@@ -279,11 +279,14 @@ class RoomAccess:
     reason: str = ''
 
 
-def check_room_access(conversation_id, user):
+def check_room_access(conversation_id, user, write=True):
     """
     Study-room notes padhne/likhne ka haq: conversation ka ACTIVE member +
-    (group me) `study_room_permission` — bilkul `StudyRoomJoinView` jaisa
-    rule, taaki jo join nahi kar sakta wo notes bhi na dekh sake.
+    (group me) `study_room_permission`.
+
+    S4 — `write=False` (sirf padhna: notes GET, whiteboard GET) me `study_room_permission=admins_only` ab
+    block nahi karta: wo members room me VIEWER role se aate hain (dekh sakte hain, likh nahi sakte —
+    `study_room_roles`). Likhne wale paths (`write=True`, default) pehle jaisa hi rule lagate hain.
     """
     is_member = ConversationParticipant.objects.filter(
         conversation_id=conversation_id, user_id=user.id, left_at__isnull=True
@@ -293,7 +296,7 @@ def check_room_access(conversation_id, user):
     conversation = Conversation.objects.filter(id=conversation_id).first()
     if conversation is None:
         return RoomAccess(reason='not_member')
-    if conversation.type == ConversationType.GROUP:
+    if write and conversation.type == ConversationType.GROUP:
         group = getattr(conversation, 'group_detail', None)
         if group:
             ok, _ = check_group_permission(group, user.id, 'study_room_permission')

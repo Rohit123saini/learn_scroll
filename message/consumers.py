@@ -30,7 +30,13 @@ from .constants import MAX_PINNED_PER_CONVERSATION
 from .throttles import WSMessageRateLimiter, WSStudyRoomNoteRateLimiter
 from . import sticky_notes  # NAYA — collaborative study-room sticky notes
 from . import message_requests  # 🔥 NAYA (M1-BE) — message requests rules
-from .cache_utils import set_presence_cache
+from .cache_utils import (
+    persist_last_seen_throttled,
+    presence_connect,
+    presence_disconnect,
+    presence_touch,
+    invalidate_presence_cache,
+)
 # 🔥 NAYE — advanced features (link preview / auto voice-transcription)
 from .tasks import generate_link_preview_task, transcribe_voice_message_task
 
@@ -105,8 +111,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
         except Exception:
             logger.exception("ChatConsumer.connect: chat_open counter incr failed")
 
-        # presence: online mark karo (multi-device safe counter)
-        await self.set_presence(online=True)
+        # presence: online mark karo (multi-device safe counter).
+        # T0.1 — ab sirf cache/Redis counter (DB write nahi), phir bhi best-effort:
+        # presence fail hone se chat connect kabhi crash nahi hona chahiye.
+        try:
+            await asyncio.wait_for(self.set_presence(online=True), timeout=3)
+        except Exception:
+            logger.exception("ChatConsumer.connect: set_presence failed user=%s", self.user.id)
+        self._presence_touched_at = time.monotonic()
         await self.channel_layer.group_send(
             self.room_group_name,
             {'type': 'presence_update', 'user_id': str(self.user.id), 'is_online': True},
@@ -134,7 +146,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # 🔥 NAYA (M1-BE) — pending/declined request me ye skip: delivered
         # tick bhi sender ko signal hai ki receiver ne chat khola.
         if await self._signals_allowed(force=True):
-            await self.mark_undelivered_as_delivered(self.conversation_id, self.user.id)
+            # M1 — ye ek DB write hai; SQLite "database is locked" (ya koi bhi DB
+            # hiccup) pe poora WS connect crash nahi hona chahiye. Delivered-tick
+            # best-effort hai, agle connect/read pe phir ho jaata hai.
+            try:
+                await self.mark_undelivered_as_delivered(self.conversation_id, self.user.id)
+            except Exception:
+                logger.warning(
+                    "ChatConsumer.connect: mark_undelivered failed user=%s", self.user.id, exc_info=True
+                )
 
         # 🔥 NAYA — missed-event replay ("sync"). Pehle offline/background
         # rehte hue jo bhi WS events (naye messages) miss ho jaate the,
@@ -231,8 +251,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 except Exception:
                     logger.exception("ChatConsumer.disconnect: presence partner-broadcast failed")
 
+            # T0.1 — last connection band hua to hi DB me `last_seen` likho, aur wo bhi
+            # per-user 60s me max ek baar (cache me value turant fresh hai). Best-effort.
+            if still_online is False and last_seen_at is not None:
+                try:
+                    await asyncio.wait_for(self.persist_last_seen(last_seen_at), timeout=3)
+                except Exception:
+                    logger.warning(
+                        "ChatConsumer.disconnect: last_seen DB persist skipped user=%s", self.user.id
+                    )
+
     # ---------------- RECEIVE (client -> server) ----------------
     async def receive(self, text_data=None, bytes_data=None):
+        # T0.1 — online-counter TTL refresh (lamba idle chat bhi "online" rahe). 5 min throttle.
+        if time.monotonic() - getattr(self, '_presence_touched_at', 0) > 300:
+            self._presence_touched_at = time.monotonic()
+            try:
+                await self.touch_presence()
+            except Exception:
+                logger.debug("ChatConsumer.receive: presence touch failed", exc_info=True)
+
         try:
             data = json.loads(text_data)
         except (TypeError, ValueError):
@@ -438,7 +476,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not await self._signals_allowed():
             return
 
+        # DB bookkeeping (MessageStatus / unread_count / core.Notification)
+        # HAMESHA hoti hai — privacy toggle sirf blue-tick VISIBILITY gate
+        # karta hai, "maine padha ya nahi" nahi.
         await self.mark_message_read(message_id, self.user.id)
+
+        # Mutual WhatsApp-style rule (REST `read-status` jaisa): reader ne
+        # `show_read_receipts=False` kar rakha hai to read_event kisi ko
+        # broadcast nahi hota. Viewer-side check `read_event` me hai.
+        if await self._receipts_off(self.user.id):
+            return
+
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -537,6 +585,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not action:
             return await self.send_error("missing_field", "action required hai")
 
+        # 🔥 S4 — role gate: removed / waiting => koi event nahi; viewer sirf dekhe; share_policy=host_only me
+        # participant ka whiteboard / notes / presentation band; end_session / clear_board sirf host / co-host.
+        allowed, deny_code = await self._study_room_gate(action)
+        if not allowed:
+            return await self._send_study_room_event('denied', {'action': action, 'code': deny_code})
+
         # 🔥 NAYA — sticky notes ab generic passthrough nahi: har op DB me
         # persist hota hai (per-field last-write-wins), sender ko `note_ack`
         # milta hai aur baaki sab ko authoritative `note_upsert`/`note_removed`.
@@ -556,6 +610,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
             except Exception:
                 logger.exception("clear_notes_for_page failed conv=%s", self.conversation_id)
 
+    _SR_ROLE_CACHE_SECONDS = 3.0
+
+    async def _study_room_gate(self, action):
+        """(allowed, code). Role + share_policy 3s socket pe cache (draw_point bahut frequent hai);
+        role / settings / removal event aate hi cache clear (`study_room_broadcast`)."""
+        from . import study_room_roles
+        cached = getattr(self, '_sr_role_cache', None)
+        now = time.monotonic()
+        if cached is None or now - cached[0] > self._SR_ROLE_CACHE_SECONDS:
+            try:
+                role, policy = await database_sync_to_async(study_room_roles.socket_role_info)(
+                    self.conversation_id, self.user.id)
+            except Exception:
+                logger.exception("study room role lookup failed conv=%s", self.conversation_id)
+                return True, ''   # fail-open: DB hiccup se poora room freeze nahi
+            cached = (now, role, policy)
+            self._sr_role_cache = cached
+        _, role, policy = cached
+        return study_room_roles.ws_action_allowed(
+            action, role, policy, is_note_action=action in sticky_notes.NOTE_ACTIONS)
+
     async def _broadcast_study_room(self, action, payload):
         """Room ke baaki sockets ko relay (sender ka apna channel exclude — see study_room_broadcast)."""
         await self.channel_layer.group_send(
@@ -563,6 +638,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             {
                 'type': 'study_room_broadcast',
                 'sender_channel_name': self.channel_name,
+                # 🔥 S8 — receiver side block filter + minor name masking ke liye (client ke bheje userId pe bharosa nahi).
+                'sender_user_id': str(self.user.id),
                 'action': action,
                 'data': payload,
             },
@@ -647,8 +724,36 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return False
         return has_restricted(actor_id, self.user.id)
 
+    # `UserPresence.show_read_receipts=False` wale user ke liye: row na mile
+    # ya lookup fail ho to False (fail-open — default setting ON hai).
+    @database_sync_to_async
+    def _receipts_off(self, user_id):
+        try:
+            return UserPresence.objects.filter(
+                user_id=user_id, show_read_receipts=False,
+            ).exists()
+        except Exception:
+            logger.exception("ChatConsumer._receipts_off failed user=%s", user_id)
+            return False
+
+    async def _viewer_receipts_off(self):
+        # read_event har reader ke liye har socket pe aata hai (group chats),
+        # isliye viewer ka toggle instance pe `_SIGNALS_CACHE_SECONDS` tak cache.
+        now = time.monotonic()
+        cached = getattr(self, '_viewer_receipts_cache', None)
+        if cached is not None and now - cached[0] < self._SIGNALS_CACHE_SECONDS:
+            return cached[1]
+        off = await self._receipts_off(self.user.id)
+        self._viewer_receipts_cache = (now, off)
+        return off
+
     async def read_event(self, event):
         if await self._actor_restricted_me(event.get('user_id')):
+            return
+        # Mutual rule ka dusra half: dekhne waale (is socket ke user) ne khud
+        # receipts off kar rakhe hain to use bhi dusron ke blue-tick events
+        # nahi jaate. Apna khud ka read event (multi-device echo) allowed.
+        if str(event.get('user_id')) != str(self.user.id) and await self._viewer_receipts_off():
             return
         await self.send(text_data=json.dumps({**event, 'type': 'read'}))
 
@@ -711,6 +816,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def presence_update(self, event):
         if await self._actor_restricted_me(event.get('user_id')):
             return
+        # S4 -- the person chose who may see their online status / last seen.
+        if await _presence_hidden_by_privacy(event.get('user_id'), self.user.id):
+            return
         await self.send(text_data=json.dumps({**event, 'type': 'presence'}))
 
     # Block / unblock happened between the two people of this 1-1 chat
@@ -731,11 +839,132 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def study_room_broadcast(self, event):
         if event.get('sender_channel_name') == self.channel_name:
             return
+        action = event.get('action')
+        # S4 — REST host-controls ke targeted / manager-only events.
+        if action in ('role_changed', 'room_settings_changed', 'removed_from_room'):
+            self._sr_role_cache = None
+        # S8 — block / unblock ke baad is socket ka block cache turant refresh (REST `block/` ye event dono ko bhejta hai).
+        if action == 'room_block_changed':
+            self._sr_block_cache = None
+        targets = event.get('target_user_ids')
+        if targets and str(self.user.id) not in targets:
+            # role_changed / settings sab ko chahiye (UI badge); targeted sirf target ko.
+            if action not in ('role_changed', 'room_settings_changed', 'hand_raised'):
+                return
+        if event.get('manager_only'):
+            from . import study_room_roles
+            try:
+                role, _p = await database_sync_to_async(study_room_roles.socket_role_info)(
+                    self.conversation_id, self.user.id)
+            except Exception:
+                return
+            if not study_room_roles.is_manager(role):
+                return
+
+        data = event.get('data')
+        # 🔥 S8 — (1) blocked pair ke events hide, (2) public group me minor ka naam / photo adult strangers se masked.
+        # Dono best-effort (fail-open) — DB hiccup se poora room freeze nahi hona chahiye.
+        data = await self._study_room_apply_safety(event, action, data)
+        if data is None:
+            return
         await self.send(text_data=json.dumps({
             'type': 'study_room_event',
-            'action': event['action'],
-            'data': event['data'],
+            'action': action,
+            'data': data,
         }))
+
+    # ---------------- S8 — room safety filters (receiver side) ----------------
+    _SR_BLOCK_CACHE_SECONDS = 10.0
+    _SR_MASK_CACHE_SECONDS = 30.0
+    # Moderation / system events blocked user se aaye tab bhi pahunchne chahiye (room end, board clear, host actions).
+    _SR_BLOCK_EXEMPT_ACTIONS = frozenset({
+        'end_session', 'clear_board', 'room_settings_changed', 'role_changed', 'removed_from_room',
+        'muted_by_host', 'waiting_room_request', 'waiting_room_decision', 'denied', 'room_rules_changed',
+        'room_block_changed',
+    })
+    # Naam / photo wale user-generated events: {action: (id key, name key, avatar key)}
+    _SR_IDENTITY_KEYS = {
+        'user_joined': ('userId', 'displayName', 'avatarUrl'),
+        'update_window': ('userId', 'displayName', 'avatarUrl'),
+        'quick_chat': ('senderId', 'senderName', None),
+        'sticker': ('senderId', 'senderName', None),
+        'hand_raised': ('userId', 'displayName', 'avatarUrl'),
+    }
+
+    async def _sr_blocked_ids(self):
+        """Dono direction ke blocked user ids (str set) — socket pe 10s cache, `room_block_changed` pe clear."""
+        from . import study_room_safety
+        cached = getattr(self, '_sr_block_cache', None)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] <= self._SR_BLOCK_CACHE_SECONDS:
+            return cached[1]
+        try:
+            ids = await database_sync_to_async(study_room_safety.block_pair_ids)(self.user.id)
+        except Exception:
+            logger.exception("study room block lookup failed conv=%s", self.conversation_id)
+            return cached[1] if cached else frozenset()
+        ids = frozenset(str(i) for i in ids)
+        self._sr_block_cache = (now, ids)
+        return ids
+
+    async def _sr_masked_identity(self, target_id):
+        """`target_id` ka naam / photo is viewer se chhupana hai? {'display_name', 'avatar_url'} ya None (30s cache)."""
+        from . import study_room_safety
+        cache = getattr(self, '_sr_mask_cache', None)
+        if cache is None:
+            cache = self._sr_mask_cache = {}
+        now = time.monotonic()
+        key = str(target_id)
+        hit = cache.get(key)
+        if hit is not None and now - hit[0] <= self._SR_MASK_CACHE_SECONDS:
+            return hit[1]
+        try:
+            identity = await database_sync_to_async(study_room_safety.masked_identity_for)(
+                self.user, self.conversation_id, target_id)
+        except Exception:
+            logger.exception("study room mask lookup failed conv=%s", self.conversation_id)
+            return None
+        if len(cache) > 200:
+            cache.clear()
+        cache[key] = (now, identity)
+        return identity
+
+    async def _study_room_apply_safety(self, event, action, data):
+        """Returns payload (shayad naam masked) ya None => ye event is socket ko mat bhejo."""
+        sender_id = event.get('sender_user_id')
+        sender_id = str(sender_id) if sender_id else None
+        id_key, name_key, avatar_key = self._SR_IDENTITY_KEYS.get(action, (None, None, None))
+        payload = data if isinstance(data, dict) else None
+
+        # Kis user ka event hai: relay me server-stamped sender; REST `hand_raised` me payload ka userId.
+        actor_id = sender_id
+        if actor_id is None and action == 'hand_raised' and payload is not None:
+            actor_id = str(payload.get('userId') or '') or None
+        # `update_window` kisi aur ki window bhi drag kar sakta hai => us window ka owner bhi dekho.
+        subject_id = None
+        if action == 'update_window' and payload is not None and payload.get('userId'):
+            subject_id = str(payload.get('userId'))
+
+        if action not in self._SR_BLOCK_EXEMPT_ACTIONS and (actor_id or subject_id):
+            blocked = await self._sr_blocked_ids()
+            if blocked and ((actor_id and actor_id in blocked) or (subject_id and subject_id in blocked)):
+                return None
+
+        if id_key is None or payload is None:
+            return data
+        owner_id = subject_id if action == 'update_window' else (sender_id or str(payload.get(id_key) or '') or None)
+        if not owner_id or owner_id == str(self.user.id):
+            return data
+        identity = await self._sr_masked_identity(owner_id)
+        if identity is None:
+            return data
+        payload = dict(payload)   # in-memory channel layer me dict shared hota hai — original mutate mat karo
+        if sender_id and action != 'update_window':
+            payload[id_key] = sender_id   # client ke bheje id pe bharosa nahi (spoof se mask / block bypass)
+        payload[name_key] = identity['display_name']
+        if avatar_key:
+            payload[avatar_key] = None
+        return payload
 
     # 🔥 NAYA — Doubt Queue realtime updates. `DoubtQuestionViewSet` (views.py,
     # `_broadcast` helper) REST se hi create/upvote/answer/reveal karke seedha
@@ -912,9 +1141,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def mark_undelivered_as_delivered(self, conversation_id, user_id):
-        MessageStatus.objects.filter(
-            message__conversation_id=conversation_id, user_id=user_id, is_delivered=False
-        ).update(is_delivered=True, delivered_at=timezone.now())
+        from common.db_retry import retry_on_db_lock  # T0.1 — transient lock pe 1 retry
+
+        retry_on_db_lock(
+            lambda: MessageStatus.objects.filter(
+                message__conversation_id=conversation_id, user_id=user_id, is_delivered=False
+            ).update(is_delivered=True, delivered_at=timezone.now())
+        )
 
     # ---------------- MISSED-EVENT SYNC (reconnect) ----------------
     async def send_missed_events_sync(self, conversation_id, user_id):
@@ -1094,6 +1327,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 conversation_id=self.conversation_id, user_id=user_id, unread_count__gt=0,
             ).update(unread_count=models_f_decrement())
 
+        # Chats badge / bell `core.Notification` (source=message) se aata hai —
+        # REST `read_all` / `mark_read` ye already sync karte the, WS path
+        # nahi karta tha, isliye WS se read hone par bhi badge unread dikhta
+        # tha. Is message ke CHAT_MESSAGE/MENTION rows (data.message_id) read
+        # mark karo, phir fresh badge count inbox socket pe publish karo.
+        # Best-effort: yahan ki koi bhi galti read-receipt ko na roke.
+        try:
+            from core.models import Notification
+            from core.services import publish_unread_badge
+
+            Notification.objects.filter(
+                recipient_id=user_id,
+                is_read=False,
+                notif_type__in=[
+                    Notification.NotifType.CHAT_MESSAGE,
+                    Notification.NotifType.MENTION,
+                ],
+                data__message_id=str(message_id),
+            ).update(is_read=True, read_at=timezone.now())
+            publish_unread_badge(user_id)
+        except Exception:
+            logger.exception('WS read: failed to sync core.Notification for message %s', message_id)
+
     @database_sync_to_async
     def delete_message(self, message_id, user_id, for_everyone):
         try:
@@ -1181,60 +1437,38 @@ class ChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def set_presence(self, online):
         """
-        Multi-device support: active_connections counter use karte hain.
-        Returns: (is_online, last_seen_at) — final state (is_online=true
-        agar abhi bhi koi connection open hai; last_seen_at sirf jab
-        offline hue tab set/refresh hota hai, warna row me pehle se jo
-        bhi tha wahi wapas aata hai).
+        T0.1 — presence ab DB-write-free hai (cache/Redis counter).
 
-        🔥 FIX — race condition: pehle ye read-modify-write
-        (`get_or_create` + `.save()`) bina kisi row-lock ke ho raha tha.
-        Same user ke do connect/disconnect events (multi-device, ya ek
-        flaky network par rapid disconnect->reconnect) agar (almost) same
-        time par do alag worker/thread pe process ho jaate, to:
-          1. `active_connections` counter galat ho sakta tha (lost update
-             — dono ne purana counter value padh ke apna +1/-1 kiya, ek
-             ka update dusre ne overwrite kar diya).
-          2. Isse bhi zyada important: jo write DB pe BAAD me commit hota
-             (chahe wo actually pehle wali request thi ya baad wali),
-             wahi cache me bhi jaata — matlab ek fast disconnect->reconnect
-             me "online" wala fresher write kabhi-kabhi "offline" wale
-             purane write se clobber ho sakta tha, aur tab tak stuck rehta
-             jab tak agla event ya `PRESENCE_TTL` (cache_utils.py, 15s)
-             khatam na ho jaaye. Yahi wo "turant offline->online hone par
-             slow feel" wala asli bug tha — sirf TTL number badhaane/
-             ghataane se ye fix nahi hota, chahiye tha ki dono events ek
-             hi (sahi) order me apply ho.
+        Pehle: har connect/disconnect `UserPresence` row pe `select_for_update` +
+        `save()`. Daphne ke kai threads ek saath (presence + heartbeat + events +
+        device-token) likhte the to SQLite ek-writer limit se "database is locked"
+        aata tha — connect() crash, 500s, 8.5s POSTs.
 
-        `select_for_update()` se row-lock leke andar update karte hain —
-        isse dusra concurrent connect/disconnect (chahe kisi bhi
-        worker/process pe ho, ye DB-level lock hai, in-memory nahi) tab
-        tak wait karega jab tak pehla transaction commit na ho jaaye,
-        phir apna update us (ab-committed) latest value ke upar sahi
-        order me apply karega. Cache write jaan-bujhkar `.atomic()` block
-        ke BAHAR hai — row lock sirf DB update jitni der hi hold ho,
-        Redis round-trip jitni der nahi.
+        Ab: `cache_utils.presence_connect/presence_disconnect` multi-device
+        connection counter ko atomic `cache.incr/decr` se chalate hain (online <=>
+        counter > 0). DB me `last_seen_at` sirf last disconnect par, aur wo bhi
+        `persist_last_seen` (60s throttle) se — alag step, taaki DB slow ho to
+        presence/broadcast na ruke.
+
+        Returns: (is_online, last_seen_at) — pehle jaisa hi contract.
         """
-        with transaction.atomic():
-            presence, _ = UserPresence.objects.select_for_update().get_or_create(user_id=self.user.id)
-            if online:
-                presence.active_connections += 1
-                presence.is_online = True
-            else:
-                presence.active_connections = max(0, presence.active_connections - 1)
-                presence.is_online = presence.active_connections > 0
-                if not presence.is_online:
-                    presence.last_seen_at = timezone.now()
-            presence.save(update_fields=['active_connections', 'is_online', 'last_seen_at'])
+        if online:
+            is_online, last_seen_at = presence_connect(self.user.id)
+        else:
+            is_online, last_seen_at = presence_disconnect(self.user.id)
+        # `UserPresenceView` ka 15s snapshot purana ho gaya — hata do (reader ab
+        # counter + last_seen cache se seedha padhta hai).
+        invalidate_presence_cache(self.user.id)
+        return is_online, last_seen_at
 
-        # 🔥 FIX — cache_utils.py's own docstring says this presence cache
-        # is meant to be kept warm from exactly this spot ("`ChatConsumer`'s
-        # presence update"), but it was never actually called here — every
-        # `UserPresenceView` read was hitting the DB directly regardless of
-        # the cache existing. Refresh the cache on every connect/disconnect
-        # so reads can be served from it.
-        set_presence_cache(self.user.id, presence.is_online, presence.last_seen_at)
-        return presence.is_online, presence.last_seen_at
+    @database_sync_to_async
+    def persist_last_seen(self, last_seen_at):
+        """Throttled (60s/user) DB `last_seen_at` write; kabhi raise nahi karta."""
+        return persist_last_seen_throttled(self.user.id, last_seen_at)
+
+    @database_sync_to_async
+    def touch_presence(self):
+        presence_touch(self.user.id)
 
     @database_sync_to_async
     def get_restricted_ids(self, user_id):
@@ -1312,6 +1546,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.channel_layer.group_send(f'user_{partner_id}', payload)
 
 
+@database_sync_to_async
+def _presence_hidden_by_privacy(actor_user_id, viewer_id):
+    """S4: True when `actor` limited "who can see my online status" and `viewer` is outside that circle. The event's
+    owner is always allowed to get their own multi-device echo. Settings are cached per user (user_profile/privacy.py).
+    A lookup that fails shows the presence (the old behaviour) rather than dropping chat events."""
+    try:
+        from user_profile import privacy as privacy_rules
+
+        actor_id = privacy_rules.as_user_id(actor_user_id)
+        if actor_id is None or actor_id == viewer_id:
+            return False
+        return not privacy_rules.can_see_online_status(actor_id, viewer_id)
+    except Exception:
+        logger.exception('presence privacy check failed actor=%s viewer=%s', actor_user_id, viewer_id)
+        return False
+
+
 def models_f_increment():
     from django.db.models import F
     return F('unread_count') + 1
@@ -1355,23 +1606,29 @@ class InboxConsumer(AsyncWebsocketConsumer):
 
         self.group_name = f'user_{self.user.id}'
         await self.channel_layer.group_add(self.group_name, self.channel_name)
+        # Shared, payload-free "live stories changed" signal group (post.story_live).
+        self.live_group_name = 'live_stories'
+        await self.channel_layer.group_add(self.live_group_name, self.channel_name)
         await self.accept()
 
     async def disconnect(self, close_code):
         if not hasattr(self, 'group_name'):
             return
-        try:
-            await asyncio.wait_for(
-                self.channel_layer.group_discard(self.group_name, self.channel_name),
-                timeout=3,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "InboxConsumer.disconnect: group_discard timed out user=%s",
-                getattr(self, 'user', None) and self.user.id,
-            )
-        except Exception:
-            logger.exception("InboxConsumer.disconnect: group_discard failed")
+        for _group in (self.group_name, getattr(self, 'live_group_name', None)):
+            if not _group:
+                continue
+            try:
+                await asyncio.wait_for(
+                    self.channel_layer.group_discard(_group, self.channel_name),
+                    timeout=3,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "InboxConsumer.disconnect: group_discard timed out user=%s group=%s",
+                    getattr(self, 'user', None) and self.user.id, _group,
+                )
+            except Exception:
+                logger.exception("InboxConsumer.disconnect: group_discard failed")
 
     async def receive(self, text_data=None, bytes_data=None):
         # Read-only channel hai — client se koi event process nahi karna.
@@ -1419,6 +1676,12 @@ class InboxConsumer(AsyncWebsocketConsumer):
     async def story_reaction(self, event):
         await self.send(text_data=json.dumps(event))
 
+    # Live story ring signal (post.story_live.publish_live_stories_changed): a class went LIVE /
+    # ended. NO payload on purpose - the client refetches GET /post/stories/live/, which applies
+    # per-viewer visibility. Server -> Client: {"type": "live_stories_changed"}
+    async def live_stories_changed(self, event):
+        await self.send(text_data=json.dumps({"type": "live_stories_changed"}))
+
     # N10-BE — real-time bell badge. Published by
     # core.services.publish_unread_badge() (via transaction.on_commit)
     # whenever a Notification row is created, read or deleted for this
@@ -1460,6 +1723,9 @@ class InboxConsumer(AsyncWebsocketConsumer):
     async def presence_update(self, event):
         if await self._actor_restricted_me(event.get('user_id')):
             return
+        # S4 -- the person chose who may see their online status / last seen.
+        if await _presence_hidden_by_privacy(event.get('user_id'), self.user.id):
+            return
         await self.send(text_data=json.dumps({**event, 'type': 'presence'}))
 
 
@@ -1470,16 +1736,27 @@ class CallConsumer(AsyncWebsocketConsumer):
     """
     /ws/call/<call_id>/?token=<jwt>
 
-    Ye pure signaling relay hai (SDP offer/answer, ICE candidates) — actual
-    audio/video Agora/LiveKit jaisi SFU service khud handle karti hai, isliye
-    yaha heavy media payload nahi bhejte, sirf signaling JSON.
+    🔥 C14 — Ye socket ab SIRF call EVENTS ke liye hai (user_joined / user_left /
+    mute / video_off + server-side ring/cancel/ended events jo REST / webhook /
+    sweeper `call_{id}` group me bhejte hain). SDP/ICE relay HATA diya gaya:
+    media negotiation 100% LiveKit (token via REST) se hoti hai, isliye socket pe
+    offer/answer/candidate relay dead path + attack surface tha.
 
     Client -> Server:
-        {"type": "signal", "payload": {...sdp/ice...}}
         {"type": "mute", "is_muted": true}
         {"type": "video_off", "is_video_off": true}
         {"type": "leave"}
+        (purana {"type": "signal"} => error `signal_not_supported`, relay nahi hota)
+
+    Connect rule (C14): sirf wo user jiski is call me `CallParticipant` row hai
+    (caller / invited callee / REST `join` se bana participant). Group ka
+    koi bhi member bina invite/join ke socket connect nahi kar sakta.
     """
+
+    # Ek connection par events ki limit (mute/video_off spam / junk flood roko).
+    RATE_LIMIT_MAX = 20          # itne messages ...
+    RATE_LIMIT_WINDOW = 10.0     # ... itne seconds me
+    MAX_FRAME_BYTES = 2048       # control events chhote hote hain; bada frame = junk
 
     async def connect(self):
         self.user = self.scope.get('user')
@@ -1500,10 +1777,17 @@ class CallConsumer(AsyncWebsocketConsumer):
             return
 
         self.room_group_name = f'call_{self.call_id}'
+        self._rate_window_start = 0.0
+        self._rate_count = 0
         await self.channel_layer.group_add(self.room_group_name, self.channel_name)
         await self.accept()
 
-        await self.mark_participant_joined(self.call_id, self.user.id)
+        is_in_call = await self.mark_participant_joined(self.call_id, self.user.id)
+        if not is_in_call:
+            # C14 — RINGING (abhi accept nahi kiya) / left participant sirf events
+            # SUN sakta hai (ring/cancel/ended). Wo "user_joined" broadcast nahi
+            # karta aur peer-joined synthetic event bhi nahi pata.
+            return
         # 🔥 FIX: sender_channel_name bhejte hain taaki 'user_joined' event
         # khud joining wale user ko echo hoke wapas na aaye. Isse client
         # (Flutter) side pe reliably pata chal sakta hai ki "DOOSRA banda
@@ -1571,43 +1855,50 @@ class CallConsumer(AsyncWebsocketConsumer):
             except Exception:
                 logger.exception("CallConsumer.disconnect: participant-left handling failed")
 
+    def _rate_limited(self):
+        now = time.monotonic()
+        if now - self._rate_window_start > self.RATE_LIMIT_WINDOW:
+            self._rate_window_start = now
+            self._rate_count = 0
+        self._rate_count += 1
+        return self._rate_count > self.RATE_LIMIT_MAX
+
     async def receive(self, text_data=None, bytes_data=None):
+        # C14 — binary frame / bada frame / flood: relay ya parse ki zaroorat hi nahi.
+        if bytes_data is not None or not text_data or len(text_data) > self.MAX_FRAME_BYTES:
+            return await self.send(text_data=json.dumps({'type': 'error', 'code': 'invalid_frame'}))
+        if self._rate_limited():
+            return await self.close(code=4008)
+
         try:
             data = json.loads(text_data)
         except (TypeError, ValueError):
+            return await self.send(text_data=json.dumps({'type': 'error', 'code': 'invalid_json'}))
+        if not isinstance(data, dict):
             return await self.send(text_data=json.dumps({'type': 'error', 'code': 'invalid_json'}))
 
         event_type = data.get('type')
 
         if event_type == 'signal':
-            # raw SDP/ICE payload — sirf relay karo, DB me kuch nahi
-            # 🔥 FIX: 'sender_channel_name' bhejte hain taaki group_send
-            # sender ko uska khud ka offer/answer/ICE wapas na bheje.
-            # Pehle ye missing tha, isliye caller apna hi offer/ICE candidate
-            # wapas receive karke setRemoteDescription/addCandidate kar raha
-            # tha — jisse WebRTC negotiation silently corrupt ho jaata tha
-            # (call "connect" toh ho jaati thi, lekin audio/video kabhi
-            # flow nahi karta tha).
-            await self.channel_layer.group_send(
-                self.room_group_name,
-                {
-                    'type': 'call_signal',
-                    'sender_channel_name': self.channel_name,
-                    'data': {
-                        'event': 'signal',
-                        'from_user': str(self.user.id),
-                        'payload': data.get('payload'),
-                    },
-                },
-            )
+            # 🔥 C14 — SDP/ICE relay hata diya (media = LiveKit). Kuch relay / store nahi hota.
+            await self.send(text_data=json.dumps({'type': 'error', 'code': 'signal_not_supported'}))
         elif event_type in ('mute', 'video_off'):
-            await self.update_participant_flag(self.call_id, self.user.id, event_type, data)
+            field = 'is_muted' if event_type == 'mute' else 'is_video_off'
+            value = data.get(field, True)
+            if not isinstance(value, bool):
+                return await self.send(text_data=json.dumps({'type': 'error', 'code': 'invalid_value'}))
+            # Sirf call me maujood (ONGOING) participant ka state badalta / broadcast hota hai.
+            updated = await self.update_participant_flag(self.call_id, self.user.id, event_type, value)
+            if not updated:
+                return await self.send(text_data=json.dumps({'type': 'error', 'code': 'not_in_call'}))
+            # Explicit payload: pehle `**data` spread hota tha => client `event` / `user_id`
+            # override (spoof) kar sakta tha aur koi bhi extra key sabko jaati thi.
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
                     'type': 'call_signal',
                     'sender_channel_name': self.channel_name,
-                    'data': {'event': event_type, 'user_id': str(self.user.id), **data},
+                    'data': {'event': event_type, 'user_id': str(self.user.id), field: value},
                 },
             )
         elif event_type == 'leave':
@@ -1624,16 +1915,23 @@ class CallConsumer(AsyncWebsocketConsumer):
     # ---------------- DB ACCESS ----------------
     @database_sync_to_async
     def get_active_call(self, call_id):
-        return CallSession.objects.filter(id=call_id).exclude(status=CallStatus.ENDED).first()
+        # 🔥 C1 — sweeper se MISSED/REJECTED hui calls pe bhi socket connect na ho
+        return CallSession.objects.filter(id=call_id).exclude(
+            status__in=[CallStatus.ENDED, CallStatus.MISSED, CallStatus.REJECTED, CallStatus.BUSY,
+                        CallStatus.CANCELLED]
+        ).first()
 
     @database_sync_to_async
     def is_call_participant(self, call_id, user_id, call):
-        if str(call.caller_id) == str(user_id):
-            return True
-        if call.is_group_call and call.group_id:
-            from .models import GroupMember
-            return GroupMember.objects.filter(group_id=call.group_id, user_id=user_id, is_banned=False).exists()
-        return CallParticipant.objects.filter(call_id=call_id, user_id=user_id).exists()
+        # 🔥 C14 — pehle: group call me har non-banned GroupMember connect kar sakta tha
+        # (aur C6 se pehle `mark_participant_joined` unhe participant bhi bana deta tha).
+        # Ab sirf wo jiski is call me `CallParticipant` row hai (caller / invited / REST join).
+        # REJECTED / MISSED / BUSY rows ko socket nahi (unhe events ki zaroorat nahi);
+        # ENDED allowed hai taaki network blip ke baad reconnect ho sake.
+        return CallParticipant.objects.filter(
+            call_id=call_id, user_id=user_id,
+            status__in=[CallStatus.RINGING, CallStatus.ONGOING, CallStatus.ENDED],
+        ).exists()
 
     @database_sync_to_async
     def get_other_ongoing_participant(self, call_id, user_id):
@@ -1644,36 +1942,104 @@ class CallConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def mark_participant_joined(self, call_id, user_id):
-        participant, _ = CallParticipant.objects.get_or_create(
+        # 🔥 C6 — socket connect se participant ban/ONGOING NAHI hota. Pehle:
+        #  * get_or_create => koi bhi group member bina invite/accept ke participant ban jaata tha
+        #  * RINGING/REJECTED/MISSED participant ka socket khulte hi ONGOING ho jaata tha
+        # Ab sirf pehle se ONGOING (ya blip se ENDED hue) participant ka reconnect
+        # re-affirm hota hai; join sirf REST `accept` se (state machine).
+        # C16 — recording chal rahi ho to minor ka socket reconnect use ENDED -> ONGOING nahi karega
+        # (recording me minor nahi; REST accept/join bhi wahi 409 deta hai). Socket khula rehta hai, bas "in call" nahi.
+        if CallSession.objects.filter(id=call_id, is_recording=True).exists():
+            from django.contrib.auth import get_user_model
+            from . import call_recording_consent as _consent
+            _u = get_user_model().objects.filter(pk=user_id).only('id', 'date_of_birth').first()
+            if _u is not None and _consent.is_minor_user(_u):
+                return False
+        # 🔥 C14 leftover — ENDED participant ka socket reconnect pehle KABHI bhi use wapas ONGOING kar deta tha (REST
+        # "leave" ke ghanton baad bhi). Ab sirf taaza blip: ENDED + `left_at` pichhle CALL_WS_REJOIN_WINDOW_SECONDS
+        # (default 60s) me. Purana ENDED participant wapas judna chahe to REST accept/join se (token ke saath) hi.
+        from datetime import timedelta as _td
+        from django.conf import settings as _settings
+        _window = max(int(getattr(_settings, 'CALL_WS_REJOIN_WINDOW_SECONDS', 60)), 0)
+        _cutoff = timezone.now() - _td(seconds=_window)
+        rejoined = CallParticipant.objects.filter(
             call_id=call_id, user_id=user_id,
-            defaults={'status': CallStatus.ONGOING},
-        )
-        participant.status = CallStatus.ONGOING
-        participant.left_at = None
-        participant.save(update_fields=['status', 'left_at'])
+            call__status__in=[CallStatus.INITIATED, CallStatus.RINGING, CallStatus.ONGOING],
+        ).filter(
+            Q(status=CallStatus.ONGOING) | Q(status=CallStatus.ENDED, left_at__gte=_cutoff)
+        ).update(status=CallStatus.ONGOING, left_at=None)
         CallSession.objects.filter(id=call_id, status=CallStatus.INITIATED).update(
             status=CallStatus.ONGOING, connected_at=timezone.now()
         )
+        # C14 — True sirf jab ye user ab call me (ONGOING) hai; RINGING => False.
+        return bool(rejoined)
 
     @database_sync_to_async
     def mark_participant_left(self, call_id, user_id):
-        CallParticipant.objects.filter(call_id=call_id, user_id=user_id).update(
-            left_at=timezone.now(), status=CallStatus.ENDED
+        # 🔥 C1 FIX — pehle `still_active` me `left_at IS NULL` wale SAB rows
+        # gine jaate the, jisme RINGING (kabhi na uthane wale) bhi aate the,
+        # isliye socket se call kabhi `ended` nahi hoti thi. Ab sirf ONGOING
+        # (asli me call me maujood) participants gine jaate hain.
+        now = timezone.now()
+        # C6 — sirf ONGOING leg ENDED hoti hai; RINGING participant ka socket band
+        # hone se uska MISSED/missed-call history nahi bigadna chahiye, REJECTED/MISSED
+        # row overwrite nahi honi chahiye.
+        CallParticipant.objects.filter(
+            call_id=call_id, user_id=user_id, status=CallStatus.ONGOING, left_at__isnull=True,
+        ).update(left_at=now, status=CallStatus.ENDED)
+        call = CallSession.objects.filter(id=call_id).first()
+        if call is None or call.status in (
+            CallStatus.ENDED, CallStatus.MISSED, CallStatus.REJECTED, CallStatus.BUSY,
+            CallStatus.CANCELLED,
+        ):
+            return call is not None
+
+        # Abhi tak kisi ne uthayi hi nahi (ringing) — caller ka socket blip
+        # (network switch) call khatam NAHI karna chahiye. Ye call
+        # `sweep_stale_calls` (ring timeout) ya explicit `end` action se
+        # band hogi.
+        if not call.connected_at:
+            return False
+
+        still_active = CallParticipant.objects.filter(
+            call_id=call_id, status=CallStatus.ONGOING, left_at__isnull=True
+        ).exists()
+        if still_active:
+            return False
+
+        ringing_ids = list(
+            CallParticipant.objects.filter(call_id=call_id, status=CallStatus.RINGING)
+            .values_list('user_id', flat=True)
         )
-        still_active = CallParticipant.objects.filter(call_id=call_id, left_at__isnull=True).exists()
-        if not still_active:
-            call = CallSession.objects.filter(id=call_id).first()
-            if call and call.status != CallStatus.ENDED:
-                ended_at = timezone.now()
-                duration = int((ended_at - (call.connected_at or call.started_at)).total_seconds())
-                CallSession.objects.filter(id=call_id).update(
-                    status=CallStatus.ENDED, ended_at=ended_at, duration_seconds=max(duration, 0)
+        CallParticipant.objects.filter(call_id=call_id, status=CallStatus.RINGING).update(
+            status=CallStatus.MISSED, left_at=now
+        )
+        duration = int((now - call.connected_at).total_seconds())
+        CallSession.objects.filter(id=call_id).update(
+            status=CallStatus.ENDED, ended_at=now, duration_seconds=max(duration, 0),
+            is_recording=False,
+        )
+        if ringing_ids:
+            try:
+                from .push_utils import send_call_cancelled_push
+                send_call_cancelled_push(
+                    recipient_ids=ringing_ids, call_id=call_id,
+                    conversation_id=call.conversation_id,
                 )
-            return True
-        return False
+            except Exception:
+                logger.warning("mark_participant_left: cancel push failed call=%s", call_id, exc_info=True)
+            # C12 — bache RINGING (ab MISSED) ko "Missed call" push + bell row.
+            try:
+                from .tasks import enqueue_missed_call
+                enqueue_missed_call(call_id, ringing_ids)
+            except Exception:
+                logger.warning("mark_participant_left: missed-call enqueue failed call=%s", call_id, exc_info=True)
+        return True
 
     @database_sync_to_async
-    def update_participant_flag(self, call_id, user_id, event_type, data):
+    def update_participant_flag(self, call_id, user_id, event_type, value):
+        # C14 — sirf ONGOING participant (RINGING / left user ka flag nahi badalta).
         field = 'is_muted' if event_type == 'mute' else 'is_video_off'
-        value = bool(data.get(field, True))
-        CallParticipant.objects.filter(call_id=call_id, user_id=user_id).update(**{field: value})
+        return CallParticipant.objects.filter(
+            call_id=call_id, user_id=user_id, status=CallStatus.ONGOING, left_at__isnull=True,
+        ).update(**{field: bool(value)}) > 0

@@ -1,0 +1,34 @@
+# LiveKit + Egress + Caddy on ONE host (host networking is required for the UDP port ranges).
+#   cd deploy/livekit && docker compose up -d
+# Certificates for TURN/TLS: obtain with certbot for <TURN_DOMAIN> and mount at ./certs (fullchain.pem, privkey.pem).
+services:
+  livekit:
+    image: livekit/livekit-server:latest      # pin a version tag in production
+    command: --config /etc/livekit.yaml
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+      - ./certs:/certs:ro
+
+  egress:
+    image: livekit/egress:latest              # pin a version tag in production
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      EGRESS_CONFIG_FILE: /etc/egress.yaml
+    volumes:
+      - ./egress.yaml:/etc/egress.yaml:ro
+
+  caddy:
+    image: caddy:2
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+volumes:
+  caddy_data:

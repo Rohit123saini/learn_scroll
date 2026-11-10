@@ -190,11 +190,10 @@ class MuteAPITests(FeedbackBase):
         self.assertFalse(d.data["removed"])
 
     def test_validation(self):
-        import uuid
         self.assertEqual(self.client.post(self.url, {}, format="json").status_code, 400)
         self.assertEqual(self.client.post(self.url, {"user_id": "nope"}, format="json").status_code, 400)
         self.assertEqual(self.client.post(self.url, {"user_id": str(self.me.id)}, format="json").status_code, 400)
-        self.assertEqual(self.client.post(self.url, {"user_id": str(uuid.uuid4())}, format="json").status_code, 404)
+        self.assertEqual(self.client.post(self.url, {"user_id": str(self.me.id + 10_000_000)}, format="json").status_code, 404)  # user ids are integers, not UUIDs
 
     def test_mute_keeps_follow_relationship(self):
         self.client.post(self.url, {"user_id": str(self.friend.id)}, format="json")

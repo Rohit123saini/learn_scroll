@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 
 from . import services
-from .models import BugReport, FeatureRequest, FeatureVote, SupportMessage, SupportTicket
+from .models import BugReport, FaqFeedback, FeatureRequest, FeatureVote, SupportMessage, SupportTicket
 
 
 class SupportMessageInline(admin.TabularInline):
@@ -52,7 +52,7 @@ class BugReportAdmin(admin.ModelAdmin):
     search_fields = ("title", "description", "user__username")
     raw_id_fields = ("user",)
     list_editable = ("status",)
-    readonly_fields = ("user", "created_at")
+    readonly_fields = ("user", "created_at", "diagnostics")
 
 
 @admin.register(FeatureRequest)
@@ -69,3 +69,17 @@ class FeatureRequestAdmin(admin.ModelAdmin):
 class FeatureVoteAdmin(admin.ModelAdmin):
     list_display = ("request", "user", "created_at")
     raw_id_fields = ("request", "user")
+
+
+@admin.register(FaqFeedback)
+class FaqFeedbackAdmin(admin.ModelAdmin):
+    """Read-only: which FAQ answers do not help people (filter helpful=No, sort by faq_id) -> rewrite those."""
+
+    list_display = ("faq_id", "helpful", "lang", "user", "updated_at")
+    list_filter = ("helpful", "lang")
+    search_fields = ("faq_id", "user__username")
+    raw_id_fields = ("user",)
+    readonly_fields = ("user", "faq_id", "helpful", "lang", "created_at", "updated_at")
+
+    def has_add_permission(self, request):
+        return False

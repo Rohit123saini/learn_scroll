@@ -1,0 +1,3 @@
+; "username" "scram-sha-256$..."  -- copy the verifier from Postgres:  SELECT rolname, rolpassword FROM pg_authid WHERE rolname='learnscroll';
+; Never commit the real file. chmod 600, owner pgbouncer.
+"learnscroll" "SCRAM-SHA-256$4096:SALT$STORED_KEY:SERVER_KEY"

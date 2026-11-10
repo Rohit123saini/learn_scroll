@@ -161,6 +161,10 @@ class CallStatus(models.TextChoices):
     MISSED = 'missed', 'Missed'
     REJECTED = 'rejected', 'Rejected'
     BUSY = 'busy', 'Busy'
+    # C6 — caller ne uthne se pehle khud cut kar di. Call ka status `cancelled` hai,
+    # par callee ka participant row `missed` hota hai (isliye callee ki missed-call list
+    # me aati hai, WhatsApp jaisa) aur use ring-cancel push bhi jaata hai.
+    CANCELLED = 'cancelled', 'Cancelled'
 
 
 # ================= 1. CHATS - Conversation List =================
@@ -382,6 +386,18 @@ class Group(BaseModel):
     # hi milte hain, ismein koi badlaav nahi.
     topic_tag = models.CharField(max_length=100, blank=True, null=True, db_index=True)
 
+    # 🔥 S8 — Discovery -> room safety. Public group (`/groups/discover/`) me pehle koi bhi seedha member ban
+    # kar study room me aa jata tha. Ab admin/mod ye settings badal sakte hain (GroupSerializer PATCH):
+    #   join_approval_required — True => discover / invite-link se join karne wale ka `GroupJoinRequest`
+    #                            (PENDING) banta hai, admin/mod approve karta hai (private group jaisa flow).
+    #                            Naye members seedha `add_members` se bhi sirf admin/mod add kar sakta hai.
+    #   room_rules             — group ke apne study-room rules (free text). Blank => app ke default rules.
+    #   room_rules_version     — rules text badalne par +1 (serializer/view me); members ko naya version dobara
+    #                            accept karna padta hai (`GroupRulesAcceptance`).
+    join_approval_required = models.BooleanField(default=False)
+    room_rules = models.TextField(blank=True, default='')
+    room_rules_version = models.PositiveIntegerField(default=1)
+
     def __str__(self):
         return self.name
 
@@ -434,6 +450,23 @@ class GroupJoinRequest(BaseModel):
             models.Index(fields=['group', 'status']),
             models.Index(fields=['user', 'status']),
         ]
+
+
+# 🔥 S8 — "room rules" screen ka accept record. Public group ke study room me aane se pehle user ko group ke
+# rules (default ya admin ke likhe) accept karne padte hain; `version` = `Group.room_rules_version` jis par
+# accept kiya. Rules badalne par version badhta hai => purane accept ki value ghat jaati hai (naya accept chahiye).
+class GroupRulesAcceptance(BaseModel):
+    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='rules_acceptances')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='group_rules_acceptances')
+    version = models.PositiveIntegerField(default=1)
+    accepted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta(BaseModel.Meta):
+        unique_together = ('group', 'user')
+        indexes = [models.Index(fields=['group', 'version'], name='msg_gra_group_version_idx')]
+
+    def __str__(self):
+        return f"{self.user_id} accepted rules v{self.version} of {self.group_id}"
 
 
 # ================= 3. MESSAGE - Sabse Important =================
@@ -837,6 +870,40 @@ class CallParticipant(BaseModel):
         unique_together = ('call', 'user')
 
 
+# ================= 7b. CALL RECORDING CONSENT LOG (C16) =================
+class CallRecordingConsent(BaseModel):
+    """
+    C16 — call recording ka consent / notice log (append-only audit trail).
+
+    Ek row = ek event: host ne recording start/stop ki, kisi participant ko "Recording on" notice
+    dikhaya gaya / usne acknowledge kiya, ya minor ki wajah se start/join block hua.
+    `egress_id` se ek hi call ki alag-alag recordings alag rehti hain (CallSession.recording_egress_id).
+    User delete hone par row rehti hai (SET_NULL) — ye audit log hai. Logic: `call_recording_consent.py`.
+    """
+
+    class Event(models.TextChoices):
+        STARTED = 'started', 'Recording started'
+        STOPPED = 'stopped', 'Recording stopped'
+        NOTICE_SHOWN = 'notice_shown', 'Notice shown'
+        ACKNOWLEDGED = 'acknowledged', 'Notice acknowledged'
+        BLOCKED_MINOR_START = 'blocked_minor_start', 'Start blocked (minor in call)'
+        BLOCKED_MINOR_JOIN = 'blocked_minor_join', 'Join blocked (minor, recording on)'
+
+    call = models.ForeignKey(CallSession, on_delete=models.CASCADE, related_name='recording_consents')
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL,
+                             related_name='call_recording_consents')
+    event = models.CharField(max_length=32, choices=Event.choices, db_index=True)
+    egress_id = models.CharField(max_length=100, blank=True, default='')
+    notice_version = models.CharField(max_length=20, blank=True, default='')
+    meta = models.JSONField(default=dict, blank=True)
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['call', 'egress_id', 'event'], name='msg_crc_call_egress_evt_idx'),
+            models.Index(fields=['call', 'user', 'event'], name='msg_crc_call_user_evt_idx'),
+        ]
+
+
 # ================= 8. PRESENCE - Online/Offline (NEW) =================
 class UserPresence(BaseModel):
     """
@@ -896,9 +963,35 @@ class DeviceToken(BaseModel):
         choices=[('android', 'Android'), ('ios', 'iOS'), ('web', 'Web')],
         default='android',
     )
+    # C5 — iOS PushKit (VoIP) token. FCM data-only push killed iOS app ko
+    # reliably nahi jagata; incoming call sirf PushKit/VoIP push se aati hai
+    # (CallKit ke saath). Ye `token` (FCM) se ALAG hai aur sirf iOS rows me bhara
+    # hota hai. Blank => is device par VoIP push nahi, FCM fallback chalega.
+    voip_token = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+
+    # N3 — push reliability + token hygiene. Ye sab INFORMATIONAL / housekeeping hai (client-supplied, length-capped,
+    # kisi permission ka faisla inse nahi hota):
+    #   device_id    per-install id (X-Device-Id). Same (user, device_id) par FCM token rotate ho to purani row hat jaati hai
+    #                (pehle har rotation ek stale row chhod deta tha -> user ke 10+ dead tokens).
+    #   session_jti  jis login session (login.AuthToken.jti) ne ye token register kiya. Wo session mare (logout / logout-all /
+    #                device sign-out / password change / sliding expiry) to ye row apne aap hat jaati hai (message/push_reliability.py).
+    #   last_seen_at app-open/re-register par refresh; stale cleanup isi se (Celery `message.cleanup_stale_device_tokens`).
+    #   failure_count / last_failure_*  lagataar transient FCM failures; success par 0.
+    device_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    device_name = models.CharField(max_length=120, blank=True, default='')
+    app_version = models.CharField(max_length=32, blank=True, default='')
+    os_version = models.CharField(max_length=32, blank=True, default='')
+    session_jti = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    last_seen_at = models.DateTimeField(default=timezone.now, db_index=True)
+    failure_count = models.PositiveSmallIntegerField(default=0)
+    last_failure_at = models.DateTimeField(null=True, blank=True)
+    last_failure_code = models.CharField(max_length=40, blank=True, default='')
 
     class Meta:
-        indexes = [models.Index(fields=['user'])]
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['user', 'last_seen_at'], name='msg_devtok_user_seen_idx'),
+        ]
 
 
 # ======================================================================
@@ -920,9 +1013,46 @@ class StudyRoomState(BaseModel):
     updated_by = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
     )
+    # S3 — optimistic-concurrency version. Har successful PUT / clear / restore +1. Client `base_version`
+    # (ya `If-Match`) bhejta hai; mismatch => 409 (last-write-wins band).
+    version = models.PositiveIntegerField(default=0)
 
     class Meta:
         indexes = [models.Index(fields=['conversation'])]
+
+
+# ======================================================================
+# STUDY ROOM — WHITEBOARD SNAPSHOT HISTORY (S3)
+# ------------------------------------------------------------
+# Board overwrite / clear ke baad wapas laane ke liye. `reason`: periodic (autosave PUT se pehle, ~5 min me ek),
+# delete (clear ke waqt — undo window tak restorable), restore (restore se pehle current ka backup).
+# `notes` = sticky notes ka wire-format list; periodic me NULL (restore tab notes ko chhedta nahi).
+# ======================================================================
+class StudyRoomStateSnapshot(BaseModel):
+    class Reason(models.TextChoices):
+        PERIODIC = 'periodic', 'Before overwrite'
+        DELETE = 'delete', 'Before clear'
+        RESTORE = 'restore', 'Before restore'
+
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='study_room_state_snapshots'
+    )
+    version = models.PositiveIntegerField(default=0)
+    state = models.JSONField(default=dict, blank=True)
+    notes = models.JSONField(null=True, blank=True, default=None)
+    reason = models.CharField(max_length=16, choices=Reason.choices, db_index=True)
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+    size_bytes = models.PositiveIntegerField(default=0)
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['conversation', '-created_at'], name='msg_srss_conv_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"StateSnapshot {self.id} (conv={self.conversation_id}, {self.reason}, v{self.version})"
 
 
 # ======================================================================
@@ -1174,6 +1304,19 @@ class StudyRoomAttendance(BaseModel):
     session_id = models.CharField(max_length=150, blank=True, default='')
     attended_date = models.DateField(default=timezone.localdate, db_index=True)
 
+    # S5 — presence (LiveKit webhook se). Join par sirf row banti thi; ab usi din ka asli time bhi yahin jama hota hai.
+    # `total_seconds`   : is din room me guzara hua time (saare intervals ka jod, midnight pe split hokar).
+    # `join_count`      : us din kitni baar (reconnect milakar) room me aaya — sirf info.
+    # `first_joined_at` / `last_left_at` : us din ka pehla join / aakhri leave (webhook se).
+    # `presence_tracked`: True => ye row S5 ke baad bani, streak ke liye `total_seconds >= N minute` zaroori.
+    #                     False => purani (pehle ki) row ya STUDY_ROOM_PRESENCE_ENABLED=False — sirf join kaafi
+    #                     (backward compatible: kisi ki purani streak nahi tootti).
+    total_seconds = models.PositiveIntegerField(default=0)
+    join_count = models.PositiveSmallIntegerField(default=0)
+    first_joined_at = models.DateTimeField(null=True, blank=True)
+    last_left_at = models.DateTimeField(null=True, blank=True)
+    presence_tracked = models.BooleanField(default=False)
+
     class Meta(BaseModel.Meta):
         indexes = [
             # Streak calculation ka main query: "is user ne is conversation
@@ -1194,9 +1337,200 @@ class StudyRoomAttendance(BaseModel):
         return f"{self.user_id} attended {self.conversation_id} on {self.attended_date}"
 
 
+# ======================================================================
+# STUDY ROOM — PRESENCE INTERVALS (S5)
+# ------------------------------------------------------------
+# LiveKit webhook (C2 endpoint) ke `participant_joined` / `participant_left` / `room_finished` se bani hui
+# ek-ek "kitni der room me raha" row. Ek row = ek continuous LiveKit connection.
+#   * `joined_at` = LiveKit ka `participant.joined_at` (hamara apna now() nahi) — isliye duplicate / out-of-order
+#     webhook delivery me bhi (room_name, user, joined_at) unique key se row ek hi rehti hai (idempotent).
+#   * `left_at IS NULL` => abhi room me hai (ya leave webhook kho gaya — sweeper band karta hai).
+#   * Band hote hi `duration_seconds` `StudyRoomAttendance.total_seconds` me (din ke hisaab se split karke) jud jata hai
+#     aur wahi se streak + study-time leaderboard feed hote hain.
+# ======================================================================
+class StudyRoomPresence(BaseModel):
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='study_room_presences',
+    )
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='study_room_presences',
+    )
+    room_name = models.CharField(max_length=150)
+    joined_at = models.DateTimeField()
+    left_at = models.DateTimeField(null=True, blank=True)
+    # Attendance me actually jama hua time (max-duration cap lagne ke baad); left_at - joined_at se kam ho sakta hai.
+    duration_seconds = models.PositiveIntegerField(default=0)
+    # left / aborted / room_finished / swept / capped
+    end_reason = models.CharField(max_length=24, blank=True, default='')
+    # S5 leftover — idle time. Client active hone par `study-room/<id>/activity/` ping bhejta hai (touch / mic / camera /
+    # screen share). `activity_tracked=False` (purana client / koi ping nahi) => poora connected time gina jata hai
+    # (backward compatible). True => credit = active_seconds (+ aakhri ping ke baad thoda grace), idle hissa nahi.
+    activity_tracked = models.BooleanField(default=False)
+    active_seconds = models.PositiveIntegerField(default=0)
+    last_active_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta(BaseModel.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=['room_name', 'user', 'joined_at'],
+                name='unique_study_room_presence_interval',
+            ),
+        ]
+        indexes = [
+            # room_finished: us room ke saare open rows.
+            models.Index(fields=['room_name', 'left_at'], name='msg_srpres_room_open_idx'),
+            # sweeper: sabse purane open rows.
+            models.Index(fields=['left_at', 'joined_at'], name='msg_srpres_open_age_idx'),
+            # "abhi room me hai" (live minutes) lookup.
+            models.Index(fields=['conversation', 'user', 'joined_at'], name='msg_srpres_conv_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} in {self.room_name} ({'open' if self.left_at is None else self.duration_seconds})"
+
+
+# ======================================================================
+# STUDY ROOM — CURRENT SESSION (S2)
+# ------------------------------------------------------------
+# Pehle "current session" sirf cache me tha (7 din) — Redis flush / LocMem multi-worker me log alag
+# rooms me bikhar jaate the (whiteboard / sticky notes bhi). Ab har study-room session ek row hai.
+# Conversation pe ek hi ACTIVE row (`ended_at IS NULL`) — partial unique constraint. `room_name` hi
+# LiveKit room hai (`study_<conv>[_<12 hex>]`) aur attendance ka `session_id` bhi.
+# ======================================================================
+class StudyRoomSession(BaseModel):
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='study_room_sessions',
+    )
+    room_name = models.CharField(max_length=150, unique=True)
+    started_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
+    started_at = models.DateTimeField(default=timezone.now, db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    # S4 — host controls (session-level). `LiveKit` room metadata me bhi sync hote hain.
+    class SharePolicy(models.TextChoices):
+        EVERYONE = 'everyone', 'Everyone'
+        HOST_ONLY = 'host_only', 'Host / co-hosts only'
+
+    is_locked = models.BooleanField(default=False)
+    waiting_room_enabled = models.BooleanField(default=False)
+    max_participants = models.PositiveSmallIntegerField(null=True, blank=True)   # NULL = settings default
+    share_policy = models.CharField(max_length=16, choices=SharePolicy.choices, default=SharePolicy.EVERYONE)
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['conversation', '-started_at'], name='msg_srs_conv_started_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['conversation'],
+                condition=models.Q(ended_at__isnull=True, is_deleted=False),
+                name='unique_active_study_room_session_per_conv',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.room_name} ({'active' if self.ended_at is None else 'ended'})"
+
+
+# ======================================================================
+# STUDY ROOM — PARTICIPANTS / ROLES / MODERATION (S4)
+# ------------------------------------------------------------
+# Har session me user ki ek row: role override (host/co-host ne badla ho to), waiting-room status,
+# raise-hand, remove/deny. Default role `study_room_roles.default_role()` se nikalta hai
+# (session starter = host, group admin/mod = co-host, `study_room_permission=admins_only` me baaki = viewer).
+# ======================================================================
+class StudyRoomParticipant(BaseModel):
+    class Role(models.TextChoices):
+        HOST = 'host', 'Host'
+        CO_HOST = 'co_host', 'Co-host'
+        PARTICIPANT = 'participant', 'Participant'
+        VIEWER = 'viewer', 'Viewer'
+
+    class Status(models.TextChoices):
+        WAITING = 'waiting', 'Waiting room'
+        ADMITTED = 'admitted', 'Admitted'
+        DENIED = 'denied', 'Denied'
+        REMOVED = 'removed', 'Removed'
+
+    session = models.ForeignKey(StudyRoomSession, on_delete=models.CASCADE, related_name='participants')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='study_room_participations')
+    role_override = models.CharField(max_length=16, choices=Role.choices, null=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ADMITTED, db_index=True)
+    hand_raised = models.BooleanField(default=False)
+    hand_raised_at = models.DateTimeField(null=True, blank=True)
+    joined_at = models.DateTimeField(null=True, blank=True)   # last token issue (kabhi join hua ya nahi)
+    # S2 leftover — C13 token-refresh chain ka start (join pe set; refresh isi se hard cap nikalta hai). Pehle cache me tha.
+    chain_started_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+
+    class Meta(BaseModel.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=['session', 'user'], name='unique_study_room_participant_per_session'),
+        ]
+        indexes = [
+            models.Index(fields=['session', 'status'], name='msg_srp_session_status_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} in {self.session_id} ({self.status}, {self.role_override or 'default'})"
+
+
+class StudyRoomReport(BaseModel):
+    class Reason(models.TextChoices):
+        HARASSMENT = 'harassment', 'Harassment / bullying'
+        INAPPROPRIATE = 'inappropriate', 'Inappropriate content'
+        SPAM = 'spam', 'Spam / disruption'
+        UNSAFE_MINOR = 'unsafe_minor', 'Child safety concern'
+        OTHER = 'other', 'Other'
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        REVIEWED = 'reviewed', 'Reviewed'
+        DISMISSED = 'dismissed', 'Dismissed'
+
+    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='study_room_reports')
+    session = models.ForeignKey(
+        StudyRoomSession, null=True, blank=True, on_delete=models.SET_NULL, related_name='reports',
+    )
+    reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='study_room_reports_made')
+    reported_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='study_room_reports_received')
+    reason = models.CharField(max_length=24, choices=Reason.choices, db_index=True)
+    details = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN, db_index=True)
+    # S4 leftover — staff review (API `message/staff/study-room-reports/`; Django admin se bhi). Audit trail.
+    reviewed_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='study_room_reports_reviewed',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_note = models.CharField(max_length=300, blank=True, default='')
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['status', '-created_at'], name='msg_srr_status_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"Report {self.reporter_id} -> {self.reported_user_id} ({self.reason}, {self.status})"
+
+
 # ============================================================================
 # DOUBT QUEUE — persistent, upvotable per-classroom(group) question board
 # ============================================================================
+def doubt_image_upload_path(instance, filename):
+    """`doubts/<yyyy>/<mm>/<uuid>.<ext>` — original filename kabhi storage
+    me nahi jaata (PII / path-trick dono se bachav). `ext` sirf teen safe
+    values me se; `doubt_utils.sanitize_doubt_image` already re-encode karke
+    inhi me se ek extension wala naam de deta hai, ye uska fallback hai."""
+    import os
+    ext = os.path.splitext(filename or '')[1].lower().lstrip('.')
+    if ext not in ('jpg', 'jpeg', 'png', 'webp'):
+        ext = 'jpg'
+    today = timezone.now()
+    return f"doubts/{today.year}/{today.month:02d}/{uuid.uuid4().hex}.{ext}"
+
+
 class DoubtQuestion(BaseModel):
     """
     Ek student ka doubt/question, ek group (classroom) ke andar. Chat ke
@@ -1244,7 +1578,19 @@ class DoubtQuestion(BaseModel):
     author = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='doubts_asked',
     )
-    text = models.TextField(max_length=2000)
+    # T1.1 — `blank=True`: ek photo-only doubt (text khaali, image set)
+    # valid hai. "text ya image me se kam-az-kam ek" rule serializer
+    # (`DoubtCreateSerializer.validate`) enforce karta hai.
+    text = models.TextField(max_length=2000, blank=True, default='')
+
+    # T1.1 — optional photo attachment (handwritten sawaal / textbook page /
+    # screenshot). Upload `doubt_utils.sanitize_doubt_image` se guzarta hai
+    # (magic-bytes check, <=2048px downscale, EXIF/GPS strip) isliye yahan
+    # sirf already-clean file aati hai. Sirf classroom doubts ke liye
+    # use hota hai; context-pointer (testseries) doubts me null rehta hai.
+    image = models.ImageField(
+        upload_to=doubt_image_upload_path, max_length=255, null=True, blank=True,
+    )
 
     # Display-level anonymity (see docstring above) — `is_anonymous=True`
     # par bhi `author` column me asli user hi save hota hai.
@@ -1269,6 +1615,62 @@ class DoubtQuestion(BaseModel):
     )
     answered_at = models.DateTimeField(null=True, blank=True)
 
+    # TASK T2.6 — optional PUBLIC Q&A page (`/doubts/<public_slug>/`, see
+    # common/seo_pages.py). Default is private: a classroom doubt is class
+    # content, so it only goes public when a teacher (group admin/moderator)
+    # explicitly publishes an ANSWERED, NON-anonymous doubt
+    # (`DoubtQuestionViewSet.public`). The slug is minted once and kept, so
+    # a link already shared stays stable across unpublish -> re-publish.
+    is_public = models.BooleanField(default=False, db_index=True)
+    public_slug = models.CharField(max_length=24, unique=True, null=True, blank=True)
+    public_published_at = models.DateTimeField(null=True, blank=True)
+
+    def ensure_public_slug(self) -> str:
+        if self.public_slug:
+            return self.public_slug
+        for _ in range(8):
+            slug = secrets.token_urlsafe(7).replace('_', 'x').replace('-', 'y')
+            if not DoubtQuestion.objects.filter(public_slug=slug).exists():
+                self.public_slug = slug
+                return slug
+        raise RuntimeError('Could not mint a unique doubt slug.')  # pragma: no cover
+
+    def make_public(self) -> str:
+        """Publish this doubt as a public Q&A page. Raises ValueError (the
+        convention services.py uses; the view turns it into a 400) when it
+        isn't eligible. Idempotent — re-publishing keeps the same link."""
+        if self.group_id is None:
+            raise ValueError('Only classroom doubts can be published.')
+        if not self.is_answered or not (self.answer_text or '').strip():
+            raise ValueError('Answer the doubt first — only answered doubts can be published.')
+        if self.is_anonymous:
+            raise ValueError('Anonymous doubts cannot be published.')
+        if not (self.text or '').strip():
+            # T1.1 — photo-only doubts have no question text for the public page.
+            raise ValueError('Photo-only doubts cannot be published — the doubt needs question text.')
+        self.ensure_public_slug()
+        self.is_public = True
+        self.public_published_at = self.public_published_at or timezone.now()
+        self.save(update_fields=['public_slug', 'is_public', 'public_published_at', 'updated_at'])
+        return self.public_slug
+
+    def make_private(self) -> None:
+        if self.is_public:
+            self.is_public = False
+            self.save(update_fields=['is_public', 'updated_at'])
+
+    # T1.3 — multi-answer support. `is_answered`/`answer_text`/`answered_by`/
+    # `answered_at` ab *summary mirror* hain: `services.refresh_doubt_answer_
+    # summary()` har answer add/delete/best/verify ke baad inhe "primary"
+    # `DoubtAnswer` (best > teacher-verified > teacher > oldest) se dobara
+    # likhta hai — isliye purane clients + testseries bridge bina change
+    # ke chalte rahe. Neeche 3 denormalized fields list view ko
+    # `DoubtAnswer` table touch kiye bina badge/count dikhane dete hain
+    # (T1.4 — list query optimisation).
+    answers_count = models.PositiveIntegerField(default=0)
+    has_best_answer = models.BooleanField(default=False)
+    has_verified_answer = models.BooleanField(default=False)
+
     class Meta(BaseModel.Meta):
         # Sabse-upvoted pehle, phir naya-pehle — "Doubts" tab default view
         # exactly isi order me list karta hai taaki teacher ko common doubt
@@ -1276,10 +1678,20 @@ class DoubtQuestion(BaseModel):
         ordering = ['-upvotes_count', '-created_at']
         indexes = [
             models.Index(fields=['group', 'is_answered', '-upvotes_count']),
+            # T1.4 — default (status-filter-less) list ka exact ORDER BY:
+            # `WHERE group_id=? ORDER BY upvotes_count DESC, created_at DESC`
+            # ab poori tarah index se serve hota hai (filesort nahi).
+            models.Index(fields=['group', '-upvotes_count', '-created_at'], name='doubt_group_votes_idx'),
             # Task 16 — testseries-side lookup: "does this attempt already
             # have a query on it" / reverse-resolve a doubt back to its
             # attempt, without a group.
             models.Index(fields=['context_type', 'context_id']),
+            # T1.5 — "similar doubt" suggestion (`DoubtQuestionViewSet.similar`,
+            # message/doubt_similarity.py). pg_trgm's `%` / `%>` operators can
+            # use a trigram GIN index; without it every keystroke-suggestion
+            # would seq-scan the doubts table. Extension is already enabled
+            # by 0001_initial (TrigramExtension); 0003 re-asserts it (idempotent).
+            GinIndex(fields=['text'], name='doubt_text_trgm_gin', opclasses=['gin_trgm_ops']),
         ]
         # Task 16 — every doubt is EITHER a classroom doubt (`group` set)
         # OR a context-pointer doubt (`context_type`+`context_id` set),
@@ -1314,6 +1726,65 @@ class DoubtUpvote(BaseModel):
 
     class Meta(BaseModel.Meta):
         unique_together = ('doubt', 'user')
+
+
+class DoubtAnswer(BaseModel):
+    """
+    T1.3 — ek doubt ke ek-se-zyada answers (teacher ke bhi, classmates ke
+    bhi). Pehle `DoubtQuestion` me sirf ek `answer_text` tha jo sirf
+    admin/moderator de sakta tha; ab:
+
+      * koi bhi group member answer de sakta hai (apne doubt ko chhodkar —
+        warna anonymous asker ki pehchaan answer ke author se khul jaati).
+      * `is_best` — doubt ka asker (ya teacher) EK answer ko "Best answer"
+        mark karta hai. Ek doubt par ek hi best (partial unique constraint
+        neeche, DB-level guarantee).
+      * `is_teacher_verified` — admin/moderator (teacher) kisi bhi answer ko
+        "Verified by teacher" mark kar sakta hai. Teacher ka khud ka answer
+        automatically verified hota hai (`is_teacher_answer=True`).
+
+    `is_teacher_answer` create-time par freeze hota hai (us waqt author
+    admin/mod tha ya nahi) — baad me role badalne se purane answers ka badge
+    nahi badalta.
+    """
+    doubt = models.ForeignKey(DoubtQuestion, on_delete=models.CASCADE, related_name='answers')
+    # SET_NULL: user delete ho jaaye to bhi answer text classroom ke liye
+    # bacha rahe ("Deleted user" ke naam se dikhega).
+    author = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='doubt_answers',
+    )
+    text = models.TextField(max_length=4000)
+
+    is_teacher_answer = models.BooleanField(default=False)
+
+    is_best = models.BooleanField(default=False)
+    best_marked_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
+
+    is_teacher_verified = models.BooleanField(default=False)
+    verified_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='doubt_answers_verified',
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta(BaseModel.Meta):
+        # Best sabse upar, phir teacher-verified, phir teacher ke, phir
+        # purane-pehle (jo pehle aaya uska jawab pehle dikhe).
+        ordering = ['-is_best', '-is_teacher_verified', '-is_teacher_answer', 'created_at']
+        indexes = [
+            models.Index(fields=['doubt', 'is_best'], name='doubtanswer_doubt_best_idx'),
+            models.Index(fields=['doubt', 'author'], name='doubtanswer_doubt_author_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['doubt'], condition=models.Q(is_best=True),
+                name='doubtanswer_one_best_per_doubt',
+            ),
+        ]
+
+    def __str__(self):
+        return f"answer {self.id} on doubt {self.doubt_id}"
 
 
 # ======================================================================

@@ -56,6 +56,8 @@ def backdate(row, days):
     FeedFeedback.objects.filter(pk=row.pk).update(updated_at=timezone.now() - timedelta(days=days))
 
 
+# Pool-order tests: the random exploration slot would inject posts and make orderings flaky.
+@override_settings(FEED_EXPLORE={"enabled": False})
 class Base(TestCase):
     def setUp(self):
         cache.clear()
@@ -270,8 +272,10 @@ class LoaderTests(Base):
 # --------------------------------------------------------------------------
 class ServiceTests(Base):
     def test_taps_accumulate_and_cap(self):
+        # time decay makes each stored weight a hair under the integer (1.9999999998), so compare approximately
         weights = [record_feed_feedback(self.me, "category", "tech").weight for _ in range(5)]
-        self.assertEqual(weights, [1.0, 2.0, 3.0, 3.0, 3.0])
+        for got, want in zip(weights, [1.0, 2.0, 3.0, 3.0, 3.0]):
+            self.assertAlmostEqual(got, want, places=4)
         self.assertEqual(FeedFeedback.objects.count(), 1)
 
     def test_tap_after_decay_starts_from_what_is_left(self):
@@ -346,6 +350,7 @@ class RankingTests(Base):
         self.fb("category", "tech")
         self.assertEqual(self.contents(self.pools()["recommended"]), ["news-old", "tech-new"])
 
+    @override_settings(FEED_FEEDBACK={"half_life_days": 0})  # no decay: +15 interest and -15 penalty must cancel EXACTLY
     def test_category_penalty_cancels_the_interest_bonus(self):
         # tech is an explicit interest (+15) and was tapped once (-15): back to the neutral order.
         UserInterest.objects.create(user=self.me, category="tech")
@@ -440,12 +445,22 @@ class RankingTests(Base):
 # --------------------------------------------------------------------------
 # API
 # --------------------------------------------------------------------------
+# These tests are about show-fewer / why-explanations, not discovery. The exploration slot is random and
+# flags accounts younger than `new_creator_days` as "new_creator" (an extra reason + a ranking boost), so pin
+# it off and make every test account an established one -> deterministic orders and reason lists.
+@override_settings(FEED_EXPLORE={"enabled": False})
 class ApiBase(APITestCase):
+    def _age_accounts(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        User.objects.all().update(date_joined=timezone.now() - timedelta(days=90))
+
     def setUp(self):
         cache.clear()
         self.me = User.objects.create_user(username="me", password="x")
         self.friend = User.objects.create_user(username="friend", password="x")
         self.stranger = User.objects.create_user(username="stranger", password="x")
+        self._age_accounts()
         Follow.objects.create(follower=self.me, following=self.friend, status=Follow.Status.ACCEPTED)
         self.client.force_authenticate(self.me)
 
@@ -616,12 +631,16 @@ class FeedbackManageTests(ApiBase):
         self.assertEqual(self.feed_order(), before)
 
 
+# Feed diversity (author_gap) deliberately spreads one author's posts apart, which would mask the
+# pure show-fewer ranking effect these tests assert -> pin it off here.
+@override_settings(FEED_DIVERSITY={"enabled": False})
 class FeedEffectTests(ApiBase):
     def setUp(self):
         super().setUp()
         self.x = User.objects.create_user(username="xavier", password="x")
         self.y = User.objects.create_user(username="yara", password="x")
         self.z = User.objects.create_user(username="zed", password="x")
+        self._age_accounts()
 
     def test_show_fewer_ranks_that_author_last_in_the_next_session(self):
         make_post(self.x, "x1")
@@ -767,6 +786,6 @@ class WhyAPITests(ApiBase):
     def test_payload_shape(self):
         p = make_post(self.stranger, "p", days_old=10)
         data = self.why(p).data["data"]
-        self.assertEqual(set(data), {"post_id", "feed_source", "reasons", "dampened"})
+        self.assertEqual(set(data), {"post_id", "feed_source", "reasons", "dampened", "stages", "experiment"})
         self.assertEqual(data["post_id"], str(p.id))
         self.assertEqual(set(data["reasons"][0]), {"code", "text", "meta"})

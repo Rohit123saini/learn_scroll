@@ -29,6 +29,7 @@ sirf neeche wale 2 import lines badalne padenge, baaki sab already
 `views.py` se verified hai.
 """
 from django.urls import path, include
+from .livekit_webhook import LiveKitCallWebhookView  # 🔥 C2
 from rest_framework.routers import DefaultRouter
 
 from .views import (
@@ -39,7 +40,12 @@ from .views import (
     CallInitiateView,
     # 🔥 GAP FIX — TASK 21: fully implemented in views.py but was never
     # imported/routed here (CHAT_APP_DOCUMENTATION.md §9.4 item 26).
+    CallRecordingNoticeAckView,  # C16
+    CallRecordingNoticeView,  # C16
     CallRecordingView,
+    CallTokenRefreshView,  # 🔥 C13
+    CallTelemetryView,  # X1
+    CallOpsAPIView,  # X1
     ConversationViewSet,
     DeviceTokenView,
     # 🔥 NAYA — Doubt Queue ("persistent, upvotable question board per
@@ -57,9 +63,28 @@ from .views import (
     ReadReceiptSettingsView,
     StudyRoomJoinView,
     StudyRoomStateView,
+    StudyRoomStateHistoryView,   # S3
+    StudyRoomStateRestoreView,   # S3
     StudyRoomNotesView,  # NAYA — sticky notes
     # 🔥 NAYA — Feature 6: attendance/consistency streak
+    StudyRoomOpsAPIView,   # X1
     StudyRoomStreakView,
+    StudyRoomTelemetryView,   # X1
+    StudyRoomActivityView,    # S5 idle time
+    StudyRoomTokenRefreshView,  # 🔥 C13
+    StudyRoomAdmitView,          # S4
+    StudyRoomHandView,
+    StudyRoomMuteView,
+    StudyRoomRemoveView,
+    StudyRoomBlockView,   # S8
+    StudyRoomReportView,
+    StudyRoomReportActionView,    # S4 staff review
+    StudyRoomReportQueueView,     # S4 staff review
+    StudyRoomReportSummaryView,   # S4 staff review
+    StudyRoomRoleView,
+    StudyRoomRulesView,   # S8
+    StudyRoomRoomInfoView,
+    StudyRoomSettingsView,
     UserPresenceView,
 )
 # 🔥 FIX — `VoiceTranscribeView` (views_ai.py) is fully implemented, has
@@ -82,6 +107,10 @@ from .upload_view import MessageUploadAPIView
 # 🔥 NAYA — Parent/Guardian Mode (Feature 8): student-side code
 # management + parent-side (no-login) verify/dashboard.
 from .views_parent import (
+    ParentWeeklyProgressView,  # TASK T2.5
+    ParentWeeklyProgressCardView,  # TASK T2.5
+    ParentDashboardWeeklyView,  # TASK T2.5
+    ParentDashboardWeeklyCardView,  # TASK T2.5
     ParentAccessCodeView,
     # 🔧 NAYA — renew an expiring/expired code without re-sharing it
     ParentAccessCodeRenewView,
@@ -141,9 +170,20 @@ urlpatterns = [
     path('presence/read-receipts/', ReadReceiptSettingsView.as_view(), name='read-receipt-settings'),
 
     # --- Calls ---
+    # 🔥 C2 — LiveKit server-to-server webhook (signature-verified, no user auth)
+    path('livekit/webhook/', LiveKitCallWebhookView.as_view(), name='livekit-call-webhook'),
     path('calls/initiate/', CallInitiateView.as_view(), name='call-initiate'),
     path('calls/<uuid:call_id>/action/', CallActionView.as_view(), name='call-action'),
     path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(), name='call-recording'),
+    # 🔥 C16 — recording consent: "Recording on" notice + acknowledge (consent log)
+    path('calls/<uuid:call_id>/recording-notice/', CallRecordingNoticeView.as_view(), name='call-recording-notice'),
+    path('calls/<uuid:call_id>/recording-notice/ack/', CallRecordingNoticeAckView.as_view(),
+         name='call-recording-notice-ack'),
+    # 🔥 C13 — LiveKit token expiry se pehle silent refresh (+ max-duration metadata)
+    path('calls/<uuid:call_id>/refresh-token/', CallTokenRefreshView.as_view(), name='call-refresh-token'),
+    # 🔥 X1 — call observability: client telemetry (connect ok/fail, reconnects) + Prometheus/staff numbers
+    path('calls/<uuid:call_id>/telemetry/', CallTelemetryView.as_view(), name='call-telemetry'),
+    path('calls/ops/', CallOpsAPIView.as_view(), name='call-ops'),
 
     # --- People + Groups search (NAYA, 6.1) — message search screen ---
     path('search/directory/', ChatDirectorySearchView.as_view(), name='chat-directory-search'),
@@ -167,11 +207,32 @@ urlpatterns = [
 
     # --- Study Room ---
     path('study-room/<uuid:conversation_id>/join/', StudyRoomJoinView.as_view(), name='study-room-join'),
+    path('study-room/<uuid:conversation_id>/refresh-token/', StudyRoomTokenRefreshView.as_view(), name='study-room-refresh-token'),
+    path('study-room/<uuid:conversation_id>/room/', StudyRoomRoomInfoView.as_view(), name='study-room-room'),   # S4
+    path('study-room/<uuid:conversation_id>/settings/', StudyRoomSettingsView.as_view(), name='study-room-settings'),   # S4
+    path('study-room/<uuid:conversation_id>/mute/', StudyRoomMuteView.as_view(), name='study-room-mute'),   # S4
+    path('study-room/<uuid:conversation_id>/remove/', StudyRoomRemoveView.as_view(), name='study-room-remove'),   # S4
+    path('study-room/<uuid:conversation_id>/admit/', StudyRoomAdmitView.as_view(), name='study-room-admit'),   # S4
+    path('study-room/<uuid:conversation_id>/role/', StudyRoomRoleView.as_view(), name='study-room-role'),   # S4
+    path('study-room/<uuid:conversation_id>/hand/', StudyRoomHandView.as_view(), name='study-room-hand'),   # S4
+    path('study-room/<uuid:conversation_id>/report/', StudyRoomReportView.as_view(), name='study-room-report'),   # S4
+    path('study-room/<uuid:conversation_id>/rules/', StudyRoomRulesView.as_view(), name='study-room-rules'),   # S8
+    path('study-room/<uuid:conversation_id>/block/', StudyRoomBlockView.as_view(), name='study-room-block'),   # S8
     path('study-room/<uuid:conversation_id>/state/', StudyRoomStateView.as_view(), name='study-room-state'),
+    path('study-room/<uuid:conversation_id>/state/history/', StudyRoomStateHistoryView.as_view(), name='study-room-state-history'),
+    path('study-room/<uuid:conversation_id>/state/restore/', StudyRoomStateRestoreView.as_view(), name='study-room-state-restore'),
     path('study-room/<uuid:conversation_id>/notes/', StudyRoomNotesView.as_view(), name='study-room-notes'),
 
     # --- Attendance / consistency streak (NAYA, Feature 6) ---
     path('study-room/<uuid:conversation_id>/streak/', StudyRoomStreakView.as_view(), name='study-room-streak'),
+    # 🔥 X1 — study room observability: client telemetry (connect ok/fail, reconnects) + Prometheus/staff numbers
+    path('study-room/<uuid:conversation_id>/telemetry/', StudyRoomTelemetryView.as_view(), name='study-room-telemetry'),
+    path('study-room/<uuid:conversation_id>/activity/', StudyRoomActivityView.as_view(), name='study-room-activity'),
+    path('study-room/ops/', StudyRoomOpsAPIView.as_view(), name='study-room-ops'),
+    # S4 leftover — staff review of study-room reports (is_staff only)
+    path('staff/study-room-reports/', StudyRoomReportQueueView.as_view(), name='staff-study-room-reports'),
+    path('staff/study-room-reports/summary/', StudyRoomReportSummaryView.as_view(), name='staff-study-room-reports-summary'),
+    path('staff/study-room-reports/<uuid:report_id>/action/', StudyRoomReportActionView.as_view(), name='staff-study-room-report-action'),
 
     # --- Revision Deck: flashcards + quiz from class materials (NAYA, Feature 5) ---
     path('study-room/<uuid:conversation_id>/revision-deck/', RevisionDeckView.as_view(), name='study-room-revision-deck'),
@@ -246,11 +307,48 @@ urlpatterns = [
         DoubtQuestionViewSet.as_view({'get': 'list', 'post': 'create'}),
         name='group-doubts',
     ),
+    # T1.5 — similar-doubt suggestions (must stay a literal segment; the
+    # <uuid:pk> routes below never match the word "similar").
+    path(
+        'groups/<uuid:group_id>/doubts/similar/',
+        DoubtQuestionViewSet.as_view({'get': 'similar'}),
+        name='group-doubt-similar',
+    ),
+    # T1.3 — detail (doubt + full answer thread)
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/',
+        DoubtQuestionViewSet.as_view({'get': 'retrieve'}),
+        name='group-doubt-detail',
+    ),
     path(
         'groups/<uuid:group_id>/doubts/<uuid:pk>/upvote/',
         DoubtQuestionViewSet.as_view({'post': 'upvote', 'delete': 'upvote'}),
         name='group-doubt-upvote',
     ),
+    # T1.3 — multi-answer thread: list / post an answer (any member)
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/answers/',
+        DoubtQuestionViewSet.as_view({'get': 'list_answers', 'post': 'create_answer'}),
+        name='group-doubt-answers',
+    ),
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/answers/<uuid:answer_id>/',
+        DoubtQuestionViewSet.as_view({'delete': 'delete_answer'}),
+        name='group-doubt-answer-detail',
+    ),
+    # T1.3 — Best answer (asker or teacher): POST mark / DELETE un-mark
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/answers/<uuid:answer_id>/best/',
+        DoubtQuestionViewSet.as_view({'post': 'best', 'delete': 'best'}),
+        name='group-doubt-answer-best',
+    ),
+    # T1.3 — "Verified by teacher" (admin/mod only): POST mark / DELETE remove
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/answers/<uuid:answer_id>/verify/',
+        DoubtQuestionViewSet.as_view({'post': 'verify', 'delete': 'verify'}),
+        name='group-doubt-answer-verify',
+    ),
+    # LEGACY alias of POST .../answers/ (old clients; returns 200).
     path(
         'groups/<uuid:group_id>/doubts/<uuid:pk>/answer/',
         DoubtQuestionViewSet.as_view({'post': 'answer'}),
@@ -260,6 +358,12 @@ urlpatterns = [
         'groups/<uuid:group_id>/doubts/<uuid:pk>/reveal/',
         DoubtQuestionViewSet.as_view({'post': 'reveal'}),
         name='group-doubt-reveal',
+    ),
+    # TASK T2.6 — publish / unpublish a doubt as a public Q&A page (admin/mod).
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/public/',
+        DoubtQuestionViewSet.as_view({'post': 'public', 'delete': 'public'}),
+        name='group-doubt-public',
     ),
 
     # --- Parent/Guardian Mode (NAYA, Feature 8) ---
@@ -306,6 +410,11 @@ urlpatterns = [
     # the returned `parent_token` in an `X-Parent-Token` header.
     path('parent/verify/', ParentVerifyCodeView.as_view(), name='parent-verify'),
     path('parent/dashboard/', ParentDashboardView.as_view(), name='parent-dashboard'),
+    # TASK T2.5 — weekly progress card + WhatsApp share (student + parent side).
+    path('parent/weekly-progress/', ParentWeeklyProgressView.as_view(), name='parent-weekly-progress'),
+    path('parent/weekly-progress/card/', ParentWeeklyProgressCardView.as_view(), name='parent-weekly-progress-card'),
+    path('parent/dashboard/weekly/', ParentDashboardWeeklyView.as_view(), name='parent-dashboard-weekly'),
+    path('parent/dashboard/weekly/card/', ParentDashboardWeeklyCardView.as_view(), name='parent-dashboard-weekly-card'),
 
     # --- Focus Mode / Smart DND (🔧 GAP FIX — Feature 12) ---
     # Single path, method-differentiated: POST=start, GET=status, DELETE=cancel.
@@ -363,10 +472,18 @@ urlpatterns = [
 #   PATCH/DELETE /groups/<id>/members/<user_id>/
 #   GET        /groups/<id>/media/
 #
-#   GET/POST   /groups/<id>/doubts/?status=answered|unanswered           (NAYA)
+#   GET/POST   /groups/<id>/doubts/?status=answered|unanswered|needs_review|verified&mine=1
+#                                      (POST: JSON or multipart w/ `image`)  (NAYA, T1.1)
+#   GET        /groups/<id>/doubts/similar/?q=<text>[&limit=5]           (T1.5)
+#   GET        /groups/<id>/doubts/<doubt_id>/                           (NAYA, T1.3 — thread)
 #   POST/DELETE /groups/<id>/doubts/<doubt_id>/upvote/                   (NAYA)
-#   POST       /groups/<id>/doubts/<doubt_id>/answer/                    (NAYA, admin/mod)
+#   GET/POST   /groups/<id>/doubts/<doubt_id>/answers/                   (NAYA, T1.3 — any member)
+#   DELETE     /groups/<id>/doubts/<doubt_id>/answers/<answer_id>/       (NAYA, author or admin/mod)
+#   POST/DELETE /groups/<id>/doubts/<doubt_id>/answers/<answer_id>/best/    (NAYA, asker or admin/mod)
+#   POST/DELETE /groups/<id>/doubts/<doubt_id>/answers/<answer_id>/verify/  (NAYA, admin/mod)
+#   POST       /groups/<id>/doubts/<doubt_id>/answer/                    (LEGACY alias of answers/)
 #   POST       /groups/<id>/doubts/<doubt_id>/reveal/                    (NAYA, admin/mod)
+#   POST/DELETE /groups/<id>/doubts/<doubt_id>/public/                   (T2.6, admin/mod — public Q&A page)
 #
 #   GET/POST/DELETE /blocked-users/, /blocked-users/<lookup>/
 #
@@ -388,4 +505,7 @@ urlpatterns = [
 #   DELETE     /parent/codes/<id>/tokens/<token_id>/ (NAYA, per-device revoke)
 #   POST       /parent/verify/            (NAYA, no login — parent side; 410 if code expired)
 #   GET        /parent/dashboard/         (NAYA, X-Parent-Token header)
-# ==============================================================================
+#   GET        /parent/weekly-progress/[card/]        (T2.5, student login — JSON / PNG)
+#   GET        /parent/dashboard/weekly/[card/]       (T2.5, X-Parent-Token — JSON / PNG)
+# ==============================================================================
+

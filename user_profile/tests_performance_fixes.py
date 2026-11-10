@@ -190,6 +190,7 @@ class BlockAndDeleteFanOutTests(APITestCase):
 
 
 # --------------------------------------------------------------------- 19
+@override_settings(COIN_CASHOUT_ENABLED=True)  # P-G1: these tests exercise the cash-out path itself
 class WalletLockGuardTests(APITestCase):
     def _lock_error(self, code="55P03"):
         class FakePgError(Exception):

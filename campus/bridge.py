@@ -31,7 +31,7 @@ blocked are now resolved):
     lazy import, no `except ImportError` degrade.
     ⚠️ CORRECTION (this pass) — a prior revision of this file removed
     the `except ImportError` wrapper but left the `from core.
-    classroom_chat_bridge import ...` / `from assigments.bridge import
+    classroom_chat_bridge import ...` / `from assignments.bridge import
     ...` / `from testseries.bridge import ...` lines as LOCAL imports
     inside each function body, contradicting this very docstring's
     "import at module level" claim. Functionally the difference matters:
@@ -96,9 +96,14 @@ is the honest failure mode, not a silently-neutered feature.
 """
 import logging
 
-from assigments.bridge import create_context_assigments, get_submissions_for_context
-from assigments.models import assigmentsSource
+from assignments.bridge import create_context_assigments, get_submissions_for_context
+from assignments.models import assigmentsSource
+from core.classroom_chat_bridge import RecordingBackendError  # noqa: F401  (re-exported for campus.recordings)
 from core.classroom_chat_bridge import create_section_group as _create_section_group
+from core.classroom_chat_bridge import get_section_group_id as _get_section_group_id
+from core.classroom_chat_bridge import handle_campus_egress_ended as _handle_campus_egress_ended  # noqa: F401
+from core.classroom_chat_bridge import start_campus_recording as _start_campus_recording
+from core.classroom_chat_bridge import stop_campus_recording as _stop_campus_recording
 from core.classroom_chat_bridge import provision_video_room as _provision_video_room
 from core.classroom_chat_bridge import resolve_parent_from_token as _resolve_parent_from_token
 from core.async_utils import dispatch_after_commit, in_celery_worker
@@ -141,6 +146,8 @@ class NotifTypes:
     # NOTICE_POSTED already exists on core.models.NotifType per the
     # design doc — reused as-is, not redefined here.
     NOTICE_POSTED = "notice_posted"
+    # COMMUNICATION — emergency broadcast. Must match core.models.NotifType verbatim (core migration 0020).
+    CAMPUS_EMERGENCY = "campus_emergency"
 
     # F-3 (Task 14) — ADDED. `tasks.check_attendance_streak_rewards()`
     # and `check_assigments_ontime_streak_rewards()` already referenced
@@ -161,6 +168,58 @@ class NotifTypes:
     CAMPUS_CLASS_STARTING = "campus_class_starting"
     CAMPUS_DOUBT_POSTED = "campus_doubt_posted"
     CAMPUS_DOUBT_REPLIED = "campus_doubt_replied"
+
+    # Push: a student was marked absent -> their linked parents only.
+    CAMPUS_STUDENT_ABSENT = "campus_student_absent"
+
+    # P-F14 — weekly parent report (campus/tasks.py::send_parent_weekly_summaries). Must match
+    # core.models.NotifType.CAMPUS_PARENT_WEEKLY verbatim (core migration 0043).
+    CAMPUS_PARENT_WEEKLY = "campus_parent_weekly"
+
+    # Homework Diary — a diary line was posted for the student's section /
+    # the "due tomorrow" reminder. Must match core.models.NotifType verbatim
+    # (core migration 0013).
+    HOMEWORK_DIARY_POSTED = "homework_diary_posted"
+    HOMEWORK_DIARY_DUE = "homework_diary_due"
+
+    # Substitute teacher — must match core.models.NotifType verbatim (core
+    # migration 0014). To the substitute / to the section's students+parents /
+    # to the substitute when the cover is cancelled.
+    CAMPUS_SUBSTITUTE_ASSIGNED = "campus_substitute_assigned"
+    CAMPUS_CLASS_SUBSTITUTED = "campus_class_substituted"
+    CAMPUS_SUBSTITUTE_CANCELLED = "campus_substitute_cancelled"
+
+    # Staff leave — must match core.models.NotifType verbatim. To the campus
+    # admins/principals when staff apply / to the applicant when it is decided
+    # or cancelled.
+    CAMPUS_LEAVE_REQUESTED = "campus_leave_requested"
+    CAMPUS_LEAVE_DECIDED = "campus_leave_decided"
+
+    # Admission — must match core.models.NotifType verbatim (core migration 0022).
+    CAMPUS_ADMISSION = "campus_admission"
+
+    # Parent-teacher meetings + teacher<->parent chat — must match
+    # core.models.NotifType verbatim (core migration 0015).
+    CAMPUS_PTM_SCHEDULED = "campus_ptm_scheduled"
+    CAMPUS_PTM_BOOKED = "campus_ptm_booked"
+    CAMPUS_PTM_CANCELLED = "campus_ptm_cancelled"
+    CAMPUS_PTM_REMINDER = "campus_ptm_reminder"
+    CAMPUS_PARENT_MESSAGE = "campus_parent_message"
+
+    # Class resources (content share) — a teacher posted a PDF / video /
+    # document / link for the student's section. Must match
+    # core.models.NotifType verbatim (core migration 0017).
+    CAMPUS_RESOURCE_POSTED = "campus_resource_posted"
+
+    # Recorded classes + class notes — must match core.models.NotifType verbatim
+    # (core migration 0018). A live-class recording is ready to watch / a teacher
+    # posted a note for the student's section.
+    CAMPUS_RECORDING_READY = "campus_recording_ready"
+    CAMPUS_NOTE_POSTED = "campus_note_posted"
+    # C3 — online fee payment received (must match core NotifType verbatim).
+    CAMPUS_FEE_PAID = "campus_fee_paid"
+    # SAFETY — data-deletion request updates (must match core.models.NotifType verbatim, core migration 0021).
+    CAMPUS_SAFETY = "campus_safety"
 
 
 def create_section_group(section, actor):
@@ -184,7 +243,7 @@ def create_section_group(section, actor):
     return _create_section_group(section, actor)
 
 
-def notify(*, users, notif_type, title, body='', data=None):
+def notify(*, users, notif_type, title, body='', data=None, push=False):
     """
     Single entry point for `campus` to push a `core.Notification`.
     `users` is an iterable of user instances/ids. `notif_type` should be
@@ -200,20 +259,65 @@ def notify(*, users, notif_type, title, body='', data=None):
     they're created directly (no extra hop). A failed bell row can never
     fail the campus action that triggered it. Returns `[]` — callers never
     use the created rows.
+
+    T2.9: `push=True` also sends a push for every row created (used by the
+    time-critical "class starts in N min" reminder). The push honours each
+    recipient's NotificationPreference — push toggle, muted types, quiet
+    hours / DND — so nobody is buzzed while they have asked not to be.
+    Default False: every other campus notification stays bell-row only.
     """
     recipient_ids = [getattr(user, "pk", user) for user in users]
     if not recipient_ids:
         return []
     try:
         if in_celery_worker():
-            failed = create_notification_rows(recipient_ids, notif_type, title, body, data)
+            failed = create_notification_rows(recipient_ids, notif_type, title, body, data, push=push)
             if failed:
                 logger.error("campus.bridge.notify: %d notification(s) failed (type=%s).", len(failed), notif_type)
         else:
-            dispatch_after_commit(create_notifications, recipient_ids, notif_type, title, body, data)
+            dispatch_after_commit(create_notifications, recipient_ids, notif_type, title, body, data, push)
     except Exception:
         logger.exception("campus.bridge.notify failed (type=%s).", notif_type)
     return []
+
+
+def push_to_parent_devices(*, student, title, body, data=None):
+    """
+    Push to the LOGINLESS parent devices (message app's Parent Mode:
+    `ParentAccessCode` -> approved `ParentToken` carrying an `fcm_token`) of
+    one student. Those parents have no `User`/`DeviceToken` row, so
+    `notify(..., push=True)` can never reach them; this is the other half.
+
+    Only APPROVED, unexpired tokens on an active, unexpired code are used
+    (same rule `tuitionclass.attendance.linked_parent_tokens` applies).
+    Never raises — a push problem must not fail the campus action. Returns
+    the number of pushes attempted.
+    """
+    sent = 0
+    try:
+        from django.utils import timezone
+
+        from message.models import ParentToken
+        from message.push_utils import send_parent_push
+
+        now = timezone.now()
+        tokens = ParentToken.objects.filter(
+            status=ParentToken.Status.APPROVED,
+            parent_access_code__student=student,
+            parent_access_code__is_active=True,
+        ).select_related("parent_access_code")
+        for t in tokens:
+            code = t.parent_access_code
+            if not t.fcm_token or (code.expires_at and code.expires_at <= now) or t.is_expired:
+                continue
+            try:
+                send_parent_push(fcm_token=t.fcm_token, title=title, body=body, data=data)
+                sent += 1
+            except Exception:
+                logger.exception("campus.bridge.push_to_parent_devices: send failed (student=%s).", getattr(student, "pk", student))
+    except Exception:
+        logger.exception("campus.bridge.push_to_parent_devices failed (student=%s).", getattr(student, "pk", student))
+    return sent
 
 
 def provision_video_room(live_session, actor):
@@ -234,6 +338,22 @@ def provision_video_room(live_session, actor):
     separately, at actual join time, not here at scheduling time.
     """
     return _provision_video_room(live_session, actor=actor)
+
+
+def start_room_recording(room_name):
+    """LiveKit egress start for a campus live room -> egress id. Raises
+    `RecordingBackendError` (`.code`: not_configured / start_failed)."""
+    return _start_campus_recording(room_name)
+
+
+def stop_room_recording(egress_id):
+    """LiveKit egress stop. Raises `RecordingBackendError` (`.code`: stop_failed)."""
+    return _stop_campus_recording(egress_id)
+
+
+def get_section_group_id(section):
+    """Id of the section's chat group (message.Group) or None — see core bridge."""
+    return _get_section_group_id(section)
 
 
 def _get_or_create_shadow_parent_user(parent_access_code):

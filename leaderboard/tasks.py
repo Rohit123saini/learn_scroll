@@ -26,6 +26,7 @@ no after-commit race to guard against here.
 import logging
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 
 from . import services
@@ -79,6 +80,23 @@ def recompute_engagement_board(period_type: str, period_key: str) -> int:
     return _write_board(LeaderboardEntry.ScopeType.ENGAGEMENT, None, period_type, period_key, scores)
 
 
+def recompute_study_time_board(scope_id, period_type: str, period_key: str) -> int:
+    """S5 — study-room time board (scope_id = Conversation.id, ya None = app-wide)."""
+    scores = services.compute_study_time_scores(scope_id, period_type, period_key)
+    return _write_board(LeaderboardEntry.ScopeType.STUDY_TIME, scope_id, period_type, period_key, scores)
+
+
+def _active_study_conversation_ids(period_type: str, period_key: str):
+    """Jin conversations me is period me kisi ne study-room minutes jode — sirf unka board banta hai."""
+    from message.models import StudyRoomAttendance
+
+    qs = StudyRoomAttendance.objects.filter(total_seconds__gt=0)
+    if period_type == LeaderboardEntry.PeriodType.WEEKLY:
+        start, end = services.week_bounds(period_key)
+        qs = qs.filter(attended_date__gte=start.date(), attended_date__lt=end.date())
+    return set(qs.values_list("conversation_id", flat=True).distinct())
+
+
 def _active_test_series_ids():
     from testseries.models import TestAttempt, TestSeries
 
@@ -129,12 +147,26 @@ def _recompute_period(period_type: str) -> dict:
         logger.exception("leaderboard: failed recomputing engagement board (%s)", period_type)
         engagement_done = False
 
+    study_done = 0
+    try:
+        for conversation_id in _active_study_conversation_ids(period_type, period_key):
+            try:
+                recompute_study_time_board(conversation_id, period_type, period_key)
+                study_done += 1
+            except Exception:
+                logger.exception("leaderboard: failed recomputing study_time board %s (%s)", conversation_id, period_type)
+        if getattr(settings, "STUDY_TIME_GLOBAL_BOARD_ENABLED", False):
+            recompute_study_time_board(None, period_type, period_key)
+    except Exception:
+        logger.exception("leaderboard: failed listing study_time boards (%s)", period_type)
+
     return {
         "period_type": period_type,
         "period_key": period_key,
         "test_series_boards": series_done,
         "campus_section_boards": sections_done,
         "engagement_board": engagement_done,
+        "study_time_boards": study_done,
     }
 
 

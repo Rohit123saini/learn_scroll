@@ -55,4 +55,14 @@ class BlockDailyThrottle(_WritesOnlyUserThrottle):
 
 
 class ReportBurstThrottle(_WritesOnlyUserThrottle):
+    """Report burst limit. Child-safety reports are never throttled (a child may be at risk)."""
+
     scope = "profile_report_burst"
+
+    def allow_request(self, request, view):
+        try:
+            if request.data.get("reason") == "child_safety":
+                return True
+        except Exception:
+            pass
+        return super().allow_request(request, view)

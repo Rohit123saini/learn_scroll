@@ -1,0 +1,13 @@
+[Unit]
+Description=LearnScroll system health check (DB, cache, broker, worker, disk, backups)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=learnscroll
+Group=learnscroll
+WorkingDirectory=/srv/learnscroll/backend
+EnvironmentFile=/srv/learnscroll/.env
+ExecStart=/srv/learnscroll/venv/bin/python manage.py check_system_health --alert
+

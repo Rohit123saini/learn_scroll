@@ -1,0 +1,10 @@
+[Unit]
+Description=Timer: LearnScroll weekly restore drill
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

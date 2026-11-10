@@ -3,7 +3,7 @@
 `tuitionclass`'s ONLY door into the unified `assigments` app (Task 12) —
 mirrors `campus/bridge.py`'s Task 11 `create_assigments()` /
 `get_assigments_submissions()` pair field-for-field. Same golden rule as
-that file and as `assigments/models.py`'s own docstring: `assigments`
+that file and as `assignments/models.py`'s own docstring: `assigments`
 never imports `tuitionclass.*`, and `tuitionclass` never imports
 `assigments.models.assigments`/`assigmentsSubmission` directly anywhere
 outside this module.
@@ -28,13 +28,13 @@ real `PassPurchase` model (fields: `class_pass__classroom`, `status`,
 `is_active`, `expires_at`, `student`). `SessionParticipant` was
 considered and rejected as the roster source: it's per-`ClassSession`
 attendance, but an `assigments` here is classroom-scoped (there is no
-per-session `context_type` on the unified model — `assigments/models.py`
+per-session `context_type` on the unified model — `assignments/models.py`
 enumerates exactly `"section" | "classroom" | ""`), so a session-level
 roster would be the wrong grain.
 
 PAID/UNPAID: this file never asks, and structurally cannot — the unified
 `assigments.models.assigments` has no `is_paid`/`price` field at all
-(assigments/models.py §4, "structurally impossible", same as
+(assignments/models.py §4, "structurally impossible", same as
 `campus.CampusLiveSession`). This satisfies this task's "paid/unpaid
 kabhi nahi poocha jaata" checklist item by construction, not by a check
 added here.
@@ -54,8 +54,8 @@ needs a one-line fix (`roster` dict below gains `"roll_number": ""`,
 `"enrollment_no": ""`) — flagging here rather than padding in blind
 placeholder values that would misrepresent what tuitionclass actually has.
 
-NEEDED TO CLOSE THIS ASSUMPTION: `assigments/bridge.py` itself (not
-provided this pass — only `assigments/models.py` and `campus/bridge.py`
+NEEDED TO CLOSE THIS ASSUMPTION: `assignments/bridge.py` itself (not
+provided this pass — only `assignments/models.py` and `campus/bridge.py`
 were).
 
 --------------------------------------------------------------------
@@ -65,7 +65,7 @@ create_testseries()`'s pattern (per that function's own description in
 `campus_app_design.md` — the real `campus/bridge.py` source wasn't part
 of this pass either, so this is written against that description, same
 "flag the source, don't guess past it" posture the rest of this file
-already uses for `assigments/bridge.py`) — with the two adaptations
+already uses for `assignments/bridge.py`) — with the two adaptations
 `tuitionclass` already established for `create_assigments()` above:
   - Roster source is `PassPurchase`, not `StudentEnrollment` — same
     query `create_assigments()` above uses, for the same reason (no
@@ -101,7 +101,8 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-def create_assigments(*, classroom, posted_by, title, description="", attachment=None, due_date=None):
+def create_assigments(*, classroom, posted_by, title, description="", attachment=None, due_date=None,
+                      kind=None, tags=None, difficulty="", submission_types=None, rubric=None):
     """[Task 12] Creates a tuitionclass assigments via the unified
     `assigments` app instead of the now-deprecated `tuitionclass.assigments`
     model. Delegates row creation + roster bulk-pre-create to
@@ -126,8 +127,8 @@ def create_assigments(*, classroom, posted_by, title, description="", attachment
 
     Returns the created `assigments.models.assigments` instance.
     """
-    from assigments.bridge import create_context_assigments
-    from assigments.models import assigmentsSource
+    from assignments.bridge import create_context_assigments
+    from assignments.models import assigmentsSource
 
     from .models import PassPurchase
 
@@ -154,6 +155,11 @@ def create_assigments(*, classroom, posted_by, title, description="", attachment
         attachment=attachment,
         due_date=due_date,
         roster=roster,
+        kind=kind,
+        tags=tags,
+        difficulty=difficulty,
+        submission_types=submission_types,
+        rubric=rubric,
     )
 
 
@@ -173,7 +179,7 @@ def get_assigments_submissions(classroom):
     classroom manager) vs. `student=user` (everyone else), which the
     thin proxy must replicate on top of this.
     """
-    from assigments.bridge import get_submissions_for_context
+    from assignments.bridge import get_submissions_for_context
 
     return get_submissions_for_context(context_type="classroom", context_id=classroom.id)
 
@@ -421,17 +427,27 @@ def referral_code_for_user(*, user):
     return _code(user.id)
 
 
-def referral_resolve_referrer(*, buyer):
-    """Id of the user who should earn commission on `buyer`'s purchase right
-    now, or None. Requires an ACTIVE (unexpired) attribution and a clean
-    attribution-time fraud check (self / circular / inactive referrer)."""
+def referral_resolve_referrer(*, buyer, source_type=None, source_id=None, source_aliases=()):
+    """Id of the user who should earn commission on `buyer`'s purchase right now, or None. Requires an ACTIVE
+    (unexpired) attribution and a clean attribution-time fraud check (self / circular / inactive referrer).
+
+    T-REF: when `source_type` / `source_id` are given (every payout path gives them) the attribution must have been
+    created by the link of THAT class / test series. A student who opened A's link for class X earns A nothing on
+    test series Y.
+
+    `source_aliases`: other ids the SAME item's link may carry. A test-series link is /test-series/<share_slug>/, so
+    the app records the slug, while the purchase knows the series UUID - either one counts as "this series"."""
     from user_profile.fraud import check_referral_abuse
 
     from .models import ReferralAttribution
 
-    attribution = ReferralAttribution.active_for(buyer)
+    attribution = ReferralAttribution.active_for(buyer, commissionable_only=True)
     if attribution is None:
         return None
+    if source_type is not None:
+        accepted = {str(source_id or "")} | {str(a) for a in (source_aliases or ()) if a}
+        if attribution.source_type != source_type or str(attribution.source_id) not in accepted:
+            return None
     ok, _reason = check_referral_abuse(attribution.referrer, buyer, coins=0)
     return attribution.referrer_id if ok else None
 
@@ -510,6 +526,27 @@ def referral_pay_testseries_commission(
     return coins
 
 
+def editable_classroom_roles(user):
+    """{classroom_pk: "teacher" | "co_teacher" | "moderator"} for every classroom `user` may edit class content
+    (tests, questions) in. One source of truth: the test-series resolver below and the "classes I can edit" list
+    endpoint both read this, so the two can never disagree. TAs, students and pass holders are never editors."""
+    if not getattr(user, "is_authenticated", False):
+        return {}
+
+    from .models import Classroom, ClassroomStaff
+
+    roles = {}
+    for row in ClassroomStaff.objects.filter(
+        user=user, role__in=(ClassroomStaff.Role.CO_TEACHER, ClassroomStaff.Role.MODERATOR),
+        classroom__is_deleted=False,
+    ).values_list("classroom_id", "role"):
+        roles[row[0]] = row[1]
+    # The owner role wins over a staff row on the same classroom.
+    for pk in Classroom.objects.filter(teacher=user, is_deleted=False).values_list("id", flat=True):
+        roles[pk] = "teacher"
+    return roles
+
+
 def user_editable_testseries_context_ids(*, user, context_type):
     """[T2 — question management] Which tuition classrooms may `user` EDIT the
     questions of a class test series for (besides the series' own creator)?
@@ -524,12 +561,5 @@ def user_editable_testseries_context_ids(*, user, context_type):
     if context_type != "classroom" or not getattr(user, "is_authenticated", False):
         return set()
 
-    from .models import Classroom, ClassroomStaff
-
-    pks = set(Classroom.objects.filter(teacher=user).values_list("id", flat=True))
-    pks |= set(
-        ClassroomStaff.objects.filter(
-            user=user, role__in=(ClassroomStaff.Role.CO_TEACHER, ClassroomStaff.Role.MODERATOR),
-        ).values_list("classroom_id", flat=True)
-    )
+    pks = set(editable_classroom_roles(user))
     return {pk if isinstance(pk, uuid.UUID) else uuid.UUID(int=int(pk)) for pk in pks}

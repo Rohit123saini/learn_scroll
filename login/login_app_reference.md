@@ -1,5 +1,65 @@
 # `login` App — Complete Self-Contained Reference
 
+> **v10 — L1 / A2 part 1 (audit gaps 1, 3, 5, 6).** Code is the source of truth
+> for anything older in this file: `AuthToken` sliding sessions, DOB / minor
+> safety, `set-dob`, `delete-account` and the tests in `tests*.py` are not
+> described in the older sections below.
+>
+> **What changed**
+> - **Gap 1 — sessions end on password reset/change.** `ResetPasswordView` ends
+>   *every* session of the account; `ChangePasswordAPIView` ends every session
+>   *except* the one making the change (response has `other_sessions_logged_out`).
+>   Helper: `token_issuance.revoke_user_sessions(user, keep_jti=None)`.
+>   `/login/auth/token/refresh/` is now `token_views.SessionTokenRefreshView`,
+>   which refuses a refresh token whose `AuthToken` row is gone/expired (401), so
+>   a stolen refresh token can't keep minting access tokens. Tokens that pre-date
+>   sliding sessions (no `session_jti`) can't be revoked; they age out (1d/30d).
+> - **Gap 3 — server-side OTP resend control** (`otp_service.py`), per target:
+>   30 s cooldown, 3 codes/hour, plus 20 codes/hour per IP. A new code is never
+>   equal to the previous one; re-issuing clears `is_verified`; a failed
+>   email/SMS delivery is refunded (no cooldown, no hourly count). Applies to
+>   `send-otp` AND `forgot-password` (before the account lookup, so limits don't
+>   leak which accounts exist). Because a fresh code resets the 5-wrong-tries
+>   counter, guessing is now bounded to ~15 tries/target/hour.
+>   `429` body: `{"status": false, "message", "code": "otp_cooldown" |
+>   "otp_hourly_limit" | "otp_ip_limit", "retry_after": <seconds>}` + `Retry-After`.
+>   Success bodies of `send-otp` / `forgot-password` gain `resend_after` (seconds).
+>   A target that is neither a valid email nor a valid phone -> `400`
+>   `code: "invalid_identifier"`.
+> - **Gap 5 — identifier confusion** (`identifiers.py`). A code sent to an
+>   email/phone is matched ONLY against `User.email` / `User.phone`, never
+>   `username` (`VerifyOTPView`, `ForgotPasswordView`, `ResetPasswordView`).
+>   Password login resolves an email against `User.email` first, then exact
+>   username; it no longer uses `.get(Q|Q)` (that raised
+>   `MultipleObjectsReturned` when a username equalled someone's email). New
+>   usernames can't contain `@` or look like a phone number.
+>   Not done here: phone numbers are still compared as stored (e.g.
+>   `919876543210` vs `+919876543210` are different strings) — canonicalise
+>   together with the phone-first signup work.
+> - **Gap 6 — password-login lockout** (`login_guard.py`). Three counters:
+>   identifier+IP (5 wrong -> lock), identifier across all IPs (15), IP across all
+>   identifiers (30); lock = 15 min. Keyed on the typed identifier whether or not
+>   the account exists. A locked identifier is refused even with the right
+>   password: `429` `code: "login_locked"`, `retry_after`. Wrong password `401`
+>   now also returns `attempts_left`. A correct password clears that
+>   identifier's counters; a successful password **reset** clears its lock.
+>
+> **New settings** (all env-overridable, bottom of `settings.py`):
+> `OTP_RESEND_COOLDOWN_SECONDS`, `OTP_MAX_SENDS_PER_HOUR`,
+> `OTP_IP_MAX_SENDS_PER_HOUR`, `LOGIN_MAX_FAILURES`, `LOGIN_ACCOUNT_MAX_FAILURES`,
+> `LOGIN_IP_MAX_FAILURES`, `LOGIN_FAILURE_WINDOW_SECONDS`, `LOGIN_LOCKOUT_SECONDS`,
+> and `REST_FRAMEWORK["NUM_PROXIES"]` (env `NUM_PROXIES` — **set it in
+> production** to the number of reverse proxies, or per-IP limits can be dodged
+> with a fake `X-Forwarded-For`). Counters use the shared cache (Redis in prod).
+> No migration is needed.
+>
+> **Flutter:** `ApiException.retryAfter`; `AppError` shows the wait time in
+> English/Hindi for `otp_cooldown`, `otp_hourly_limit`/`otp_ip_limit`,
+> `login_locked`; `ApiService.login / sendOtp / forgotPassword` throw that
+> `ApiException` for coded 429s.
+>
+> **Tests (written, not run in this pass):** `tests_auth_hardening.py`.
+
 > **v9 — real drift found this pass, admin.py rewritten (TASK 39).** Ye
 > ek hi file hai jisme poore **login** (auth) Django app ka sara logic,
 > code, connections, flows aur known issues cover hain. Iske alawa
@@ -211,6 +271,25 @@ OTP-login), koi clean path nahi tha. Ab:
   suggested), `reset_password` (10/min suggested) — **abhi confirm nahi
   hue `settings.py` me**, see §11 item 5.
 - See §10.8 for the full step-by-step flow.
+
+---
+
+## 0.3 Changelog - S10 Connected accounts & devices (NOT run, no test, no migration)
+
+**Naya:** Google link / unlink, e-mail / phone add + change (OTP naye address par), phone remove, "Linked apps", QR sign-in
+(computer par QR dikhta hai, phone approve karta hai). Poori endpoint list + error codes: `ERROR_CODES.md` > "Connected accounts & devices (S10)".
+
+- Models: `LinkedIdentity` (provider, subject = Google `sub`, `revoked_at` = unlink), `QRLoginRequest` (hash kiye hue code / secret / match code, status
+  pending / approved / denied / consumed). Migration `0010_connected_accounts.py` **hand-written** - chalane se pehle `makemigrations --check` karo.
+- `connected_accounts.py` = saare rules (re-auth, Google link, contact change, QR). `connected_views.py` = patli views. `urls.py` me `connections/...` aur `qr/...`.
+- Re-auth: password / 2FA code / (kuch nahi hone par) apne hi e-mail-phone par aaya code -> `reauth_token` (session se bandha, `reauth_ttl()`).
+- `GoogleAuthView`: pehle Google `sub` se `LinkedIdentity` dhoondta hai; unlink kiya hua account sirf e-mail match se wapas nahi ghus sakta (403 `google_unlinked`).
+- QR: secret sirf computer ke paas, match code sirf computer ki screen par, phone par user 4 digit khud likhta hai; 3 galat try par request cancel.
+  `poll` approved par tokens **ek hi baar** deta hai. Hourly Celery `login.purge_old_qr_requests`.
+- Settings (optional, defaults ke saath): `QR_LOGIN_ENABLED`, `QR_LOGIN_TTL_SECONDS`, `QR_LOGIN_COLLECT_SECONDS`, `CONNECTIONS_REAUTH_TTL_SECONDS` (600), throttle scopes `connections`, `connections_write`, `qr_login`, `qr_poll`.
+- Web: `GET /qr-login?c=` landing page + AASA path `/qr-login` (`common/web_links.py`).
+- Flutter: `lib/profile/screens/connections/` (hub, contact change, linked apps, QR approve / scan, re-auth dialog) + `lib/login/qr_login_screen.dart`
+  (login screen ka "QR code se sign-in" button) + Settings > Security > "Connected accounts".
 
 ---
 
@@ -2558,3 +2637,87 @@ serializer/view-level detail.
 With the above satisfied, everything in this single document — models,
 serializers, views, urls, admin — is enough to run the full `login` app
 end to end.
+
+---
+
+## 13. Sessions, logout and devices (L1 gaps 8-11)
+
+- **Access token = 15 min** (`JWT_ACCESS_TOKEN_MINUTES`, was 1 day). **Refresh token rotates** on every
+  `POST /login/auth/token/refresh/`: the response now also carries a NEW `refresh`, and the old one is
+  blacklisted (`rest_framework_simplejwt.token_blacklist` is installed -- run `migrate`). The new refresh
+  keeps the same `session_jti`, so it is still the same `AuthToken` session / device.
+- **`POST /login/auth/logout/`** `{"refresh": "..."}` -- public + idempotent (always 200). Deletes the
+  session's `AuthToken` row and blacklists that refresh token. Works even when the access token has already
+  expired; with no body it falls back to the `Authorization` header.
+- **`AuthToken` device fields**: `device_id`, `device_name`, `platform`, `ip_address`, `user_agent`. Filled at
+  login from headers `X-Device-Id`, `X-Device-Name`, `X-Platform` (+ `User-Agent`, IP) by `login/device_info.py`.
+  Informational only. Login again on the same `device_id` replaces that device's old session; at most
+  `AUTH_MAX_SESSIONS_PER_USER` (10) live sessions per user (oldest-used ends first).
+- **`GET /login/auth/sessions/`** -> `{"status", "count", "sessions": [{id, device_name, platform, ip_address,
+  created_at, last_used_at, is_current}]}` (this device first).
+- **`DELETE /login/auth/sessions/<id>/`** -- sign one device out (404 for someone else's / already gone).
+- **`POST /login/auth/logout-all/`** `{"keep_current": true|false}` -- sign out of every device (or every OTHER one).
+- The websocket middleware (`LearnScroll/ws_auth.py`) now also refuses a token whose session row is gone.
+- Celery beat `login-cleanup-stale-sessions` (03:30) deletes dead `AuthToken` rows and runs `flushexpiredtokens`.
+- Throttle scopes added: `logout`, `session_manage` (30/min each).
+- **Rollout**: old app builds don't store the rotated `refresh` and call `getToken()` without refreshing, so
+  deploy first with `JWT_ROTATE_REFRESH_TOKENS=0` and `JWT_ACCESS_TOKEN_MINUTES=1440`, ship the new app, then
+  remove both env vars (defaults: rotation on, 15 min).
+
+---
+
+## 14. OTP attempts-left and password rules (L1 gaps 14-15)
+
+**Wrong-code answers (gap 14)** -- `POST /login/auth/verify-otp/` and `POST /login/auth/reset-password/` now
+return a machine-matchable `code` on every code failure, plus `attempts_left` for a wrong code:
+
+| situation | HTTP | `code` | extra |
+|---|---|---|---|
+| wrong code | 400 | `otp_invalid` | `attempts_left` (0-4); message "Invalid OTP. 3 attempts left." |
+| 5th wrong code | 400 | `otp_invalid` | `attempts_left: 0` -- the next call is `otp_locked` |
+| locked (5 wrong) | 429 | `otp_locked` | `attempts_left: 0`; row deleted, ask for a new code |
+| expired | 400 | `otp_expired` | |
+| no code requested | 400 | `otp_not_found` | |
+
+`POST /login/auth/send-otp/` also returns `max_attempts` (5) and `expires_in` (seconds) next to `resend_after`,
+so the OTP screen can show "5 attempts left" and a countdown straight away. `complete-profile` returns the same
+`code` / `attempts_left`. `OTPVerification.register_failed_attempt()` is an atomic `F()` update, so parallel
+wrong guesses are all counted. A fresh code (`issue_code`) resets the counter.
+
+**Password rules (gap 15)** -- `login/serializers.py::validate_strong_password()` (signup, change-password,
+reset-password) keeps the composition rules (8+, upper, lower, digit, symbol -- *any* non-alphanumeric,
+non-space character counts) and now also runs `password_problems()`: Django's `AUTH_PASSWORD_VALIDATORS`
+(common-password list, numeric-only, similarity to username/name/email, staff policy) **plus** "must not contain
+your phone number". Signup builds an unsaved `User(...)` from the form so similarity works before the account
+exists; change-password passes `context={"user": request.user}`; reset-password checks again in the view once the
+account is known and answers `400 {"code": "weak_password", "errors": {"new_password": [...]}}` *without*
+spending the code. Signup failures arrive as `{"detail", "code": "validation_error", "errors": {"password": [...]}}`.
+
+**App** -- `lib/login/password_strength.dart` holds the same rules (`PasswordRules`) and the live
+`PasswordStrengthMeter`, used by signup, forgot-password (step 3) and Settings > Change password. Keep the two
+in step. `ApiService.signup` now throws `ApiException(code: "field_<name>")` so the screen routes by field.
+
+## 15. Disposable email / phone block and captcha (L1 gap 18)
+
+New files: `disposable.py`, `captcha.py`, `tests_disposable_captcha.py`. Flutter: `services/captcha_service.dart`
+(+ the captcha retry in `api_service.dart`, new messages in `utils/app_error.dart`).
+
+**Disposable e-mail / virtual phone** (`disposable.py`, master switch `DISPOSABLE_BLOCK_ENABLED`)
+* Only NEW identifiers are judged: `send-otp` (when no account owns that email/phone), `signup`, `complete-profile`,
+  and Google *account creation*. Existing accounts, OTP login and forgot-password are never blocked.
+* E-mail: built-in list of throw-away services + `DISPOSABLE_EMAIL_EXTRA_DOMAINS` + `DISPOSABLE_EMAIL_LIST_FILE`
+  (one domain per line, re-read when the file changes). Subdomains are caught; `DISPOSABLE_EMAIL_ALLOWED_DOMAINS` wins.
+* Phone: fake patterns (last 8 digits all the same / `abababab`), `+91` numbers that are not a 10-digit 6-9 mobile,
+  `BLOCKED_PHONE_PREFIXES`, and an optional Twilio Lookup (`PHONE_LOOKUP_PROVIDER=twilio`) that refuses VoIP line
+  types. The lookup is cached 7 days, runs only after captcha, and fails open.
+* Codes: `disposable_email`, `disposable_phone`, `phone_invalid_number` (send-otp) and `email_disposable`,
+  `phone_disposable`, `phone_invalid_number` (signup `error_codes`).
+
+**Captcha** (`captcha.py`, `CAPTCHA_MODE=off|adaptive|always`, default adaptive; off under tests)
+* Endpoints: `send-otp`, `forgot-password` (from an IP's 3rd call in an hour) and `login` (after 3 wrong passwords).
+  `GET /login/auth/captcha/` returns a fresh challenge.
+* `CAPTCHA_PROVIDER=builtin` (default, no keys, image drawn with Pillow, single-use, 3 min) or
+  `turnstile` / `hcaptcha` / `recaptcha` (`CAPTCHA_SITE_KEY` + `CAPTCHA_SECRET_KEY`; the Flutter app only shows the
+  builtin one natively - a remote provider needs a WebView/web client).
+* A missing/wrong captcha is answered before the password / OTP is touched, so it never counts as a failed login.
+* Remote provider outage fails open (`CAPTCHA_FAIL_OPEN`); the OTP caps and login lockout still apply.

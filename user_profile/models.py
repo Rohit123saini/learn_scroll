@@ -147,6 +147,8 @@ WHAT CHANGED in this pass, and why:
     this model's PENDING -> PROCESSING -> SUCCESS/REJECTED lifecycle,
     which is NOT the same status set `tuitionclass.CoinWithdrawal` uses.
 """
+import datetime
+import logging
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -156,6 +158,8 @@ from django.db import IntegrityError, OperationalError, connection, models, tran
 from django.db.models import CheckConstraint, F, Q, UniqueConstraint
 from django.utils import timezone
 
+
+logger = logging.getLogger(__name__)
 
 class CoinLedgerBusy(Exception):
     """A coin/wallet row lock could not be acquired within
@@ -203,6 +207,18 @@ class AmbiguousGatewayReference(ValueError):
     """Two purchases (different gateways) share this `gateway_reference` and the
     caller didn't say which gateway it means. Subclasses ValueError so a caller
     that already maps ValueError -> 409 keeps working."""
+
+
+class SpendLimitExceeded(ValueError):
+    """S9: the user's own daily / monthly coin spend limit (or the minor safety cap) would be crossed by this spend.
+    Subclasses ValueError so every existing `except ValueError` (-> 402 "wallet can't cover it") keeps working with
+    its message; views that want a distinct 403 catch this subclass FIRST. `code` = "daily" | "monthly"."""
+
+    def __init__(self, message, code="daily", limit=None, spent=None):
+        super().__init__(message)
+        self.code = code
+        self.limit = limit
+        self.spent = spent
 
 
 class WithdrawalNotEligible(ValueError):
@@ -408,7 +424,7 @@ class CoinLedgerManager(models.Manager):
     """
 
     def record_transaction(self, *, user, transaction_type, amount,
-                            reference="", description="", metadata=None):
+                            reference="", description="", metadata=None, enforce_spend_limit=True):
         """
         Atomically apply `amount` (signed — positive credits, negative
         debits) to `user.coin` and record the matching CoinLedger row.
@@ -504,6 +520,14 @@ class CoinLedgerManager(models.Manager):
                 existing = self.filter(user=locked_user, reference=reference).first()
                 if existing is not None:
                     return existing
+
+            # S9: user-chosen daily / monthly spend limit + the minor safety cap. Runs AFTER the idempotency return
+            # above (a retried, already-applied spend must never be blocked) and only for user-initiated spends;
+            # `enforce_spend_limit=False` is for school-fee payments (not "spending money on the app").
+            if amount < 0 and enforce_spend_limit:
+                from .wallet_settings import check_spend_allowed
+
+                check_spend_allowed(locked_user.pk, -amount, transaction_type)
 
             new_balance = locked_user.coin + amount
             if new_balance < 0:
@@ -660,6 +684,13 @@ class CoinLedger(models.Model):
         # never withdrawable as "real money coins". "referral_commission" is
         # 19 chars — under this field's max_length=20.
         REFERRAL_COMMISSION = "referral_commission", "Referral Commission"
+
+        # Doubt post bounty (post/doubts.py): the asker's HOLD is a plain SPEND and a refund is a REFUND; the PAYOUT to
+        # the best answerer is this type. Its own type (not EARN: the earn rate-limit must never block a bounty the
+        # answerer already won; not GIFT_RECEIVED: that is withdrawable "real" money). Like REFERRAL_COMMISSION it is
+        # spendable but NOT in fraud.eligible_source_types(), so bounty coins can never be cashed out.
+        # "doubt_bounty" is 12 chars (< max_length 20).
+        DOUBT_BOUNTY = "doubt_bounty", "Doubt Bounty"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -859,6 +890,14 @@ class CoinPurchaseRequestManager(models.Manager):
                 purchase.gateway_signature = gateway_signature
                 update_fields.append("gateway_signature")
             purchase.save(update_fields=update_fields)
+            # R9 / N6b - receipt notification (bell row + push), once per purchase: this is the first-time path only (the
+            # already-SUCCESS retry returned above). Enqueued after commit; never raises into the payment.
+            try:
+                from core.notification_receipts import KIND_COINS, queue_receipt
+
+                queue_receipt(KIND_COINS, purchase.pk)
+            except Exception:  # noqa: BLE001 - a receipt problem must never fail a confirmed payment
+                logger.exception("coin purchase receipt could not be queued (payment itself is confirmed)")
             return purchase
 
     def mark_failed(self, *, gateway_reference, reason="", gateway=None):
@@ -1017,6 +1056,15 @@ class CoinPurchaseRequest(models.Model):
         on_delete=models.SET_NULL,
         related_name="+",
     )
+
+    # S9: how it was paid (from the gateway's payment entity, MASKED - never a full card / UPI id) and refund status
+    # (from refund.* webhook events). All blank/null by default = "unknown"; display only - they never move coins.
+    payment_method = models.CharField(max_length=20, blank=True)
+    payment_method_detail = models.CharField(max_length=60, blank=True)
+    refund_status = models.CharField(max_length=12, blank=True)  # "" | "initiated" | "processed" | "failed"
+    refund_id = models.CharField(max_length=100, blank=True)
+    refund_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    refunded_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1489,6 +1537,33 @@ class CoinWithdrawalRequest(models.Model):
         return f"{self.user.username}: {self.coins} coins withdrawal ({self.status})"
 
 
+class WalletSettings(models.Model):
+    """
+    S9: per-user wallet / payment safety settings (one row, created lazily by `wallet_settings.get_settings`).
+
+      confirm_purchases   - the app asks "Spend N coins?" before every coin spend (default ON; minors cannot turn it off).
+      daily_spend_limit   - max coins the user lets themselves spend per local day (NULL = no limit of their own).
+      monthly_spend_limit - same per calendar month.
+
+    Minors (DOB under ADULT_AGE) additionally get a server-side cap (`wallet_settings.minor_caps`): their own limit can
+    only be LOWER than the cap and can never be removed. Enforcement lives in
+    `CoinLedger.objects.record_transaction` (SPEND / GIFT_SENT / TESTSERIES_PURCHASE), so no call site can skip it.
+    """
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wallet_settings")
+    confirm_purchases = models.BooleanField(default=True)
+    daily_spend_limit = models.PositiveIntegerField(null=True, blank=True)
+    monthly_spend_limit = models.PositiveIntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Wallet settings"
+        verbose_name_plural = "Wallet settings"
+
+    def __str__(self):
+        return f"{self.user_id}: confirm={self.confirm_purchases} daily={self.daily_spend_limit} monthly={self.monthly_spend_limit}"
+
+
 class UserPreference(models.Model):
     """
     TASK 1 (this pass) — per-user UI/locale preferences: `theme` and
@@ -1599,6 +1674,43 @@ class UserPreference(models.Model):
     # inactive maana jaata hai — dekho `exam_mode_active`.
     exam_mode = models.BooleanField(default=False)
 
+    # S3 -- e-mail me when my account is signed into from a NEW device (login/login_alerts.py). On by default.
+    login_alerts = models.BooleanField(default=True)
+
+    # ---- S8 -- Learning preferences (ek jagah: feed + notifications dono ko drive karte hain) ------------------
+    # Daily goal minutes `Streak.daily_goal_minutes` me hi rehta hai (purana /profile/daily-goal/ API), yahan duplicate
+    # nahi kiya. Exam target / class / subjects / exam date / exam mode upar hain.
+    #
+    # Study reminder: har din (ya chuni hui weekdays par) user ke LOCAL time par ek push + bell row
+    # (core/study_reminders.py). `study_reminder_days` = weekdays 0=Mon .. 6=Sun, khaali list = roz.
+    study_reminder_enabled = models.BooleanField(default=False)
+    study_reminder_time = models.TimeField(default=datetime.time(18, 0))
+    study_reminder_days = models.JSONField(default=list, blank=True)
+    # Server-only: last LOCAL date jis din reminder bana (ek din me do baar nahi). API me nahi dikhta.
+    last_study_reminder_on = models.DateField(null=True, blank=True)
+
+    # Focus-mode schedule: har window {"days": [0..6], "start": "HH:MM", "end": "HH:MM"} (end < start = raat paar).
+    # Window ke dauran Exam Mode jaisa hi chalta hai: sirf urgent push + feed padhai-wale content tak (post/feed_exam.py,
+    # core/models.py NotificationPreference.focus_active). Max 3 windows (learning_prefs.MAX_FOCUS_WINDOWS).
+    focus_schedule_enabled = models.BooleanField(default=False)
+    focus_schedule = models.JSONField(default=list, blank=True)
+
+    # "Recommended content level": '' = auto (kuch nahi). Feed ke hashtag-match boost me jaata hai (post/feed_exam.py).
+    class ContentLevel(models.TextChoices):
+        BEGINNER = "beginner", "Beginner"
+        INTERMEDIATE = "intermediate", "Intermediate"
+        ADVANCED = "advanced", "Advanced"
+
+    content_level = models.CharField(max_length=12, choices=ContentLevel.choices, blank=True, default="")
+    # Language of content: ISO codes (max 3) jaise ["hi", "en"]. Khaali = koi preference nahi.
+    content_languages = models.JSONField(default=list, blank=True)
+
+    # ---- S2 / R14 -- account-level sync of Appearance + Data & storage (pehle sirf phone par the) ---------------
+    # Dono dict "sirf wahi keys jo user ne kabhi set ki" rakhte hain; schema + merge rules: user_profile/pref_sync.py.
+    # {} = kabhi sync nahi hua (client apni local values ek baar upar bhej deta hai). PATCH merge karta hai, replace nahi.
+    appearance = models.JSONField(default=dict, blank=True)
+    data_storage = models.JSONField(default=dict, blank=True)
+
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -1610,6 +1722,20 @@ class UserPreference(models.Model):
         if not self.exam_mode:
             return False
         return self.exam_date is None or self.exam_date >= timezone.localdate()
+
+    def focus_schedule_active(self, now=None, tz=None) -> bool:
+        """S8 -- kya abhi (user ke local time me) focus-schedule ki koi window chal rahi hai? Pure logic:
+        user_profile/learning_prefs.py. `tz` = tzinfo (None = Django ka current timezone)."""
+        if not self.focus_schedule_enabled:
+            return False
+        from . import learning_prefs
+
+        return learning_prefs.focus_window_active(self.focus_schedule, now=now, tz=tz)
+
+    def focus_now(self, now=None, tz=None) -> bool:
+        """Effective Focus: Exam Mode on (date nikli nahi) YA schedule ki window chal rahi. Feed + notifications
+        dono yahi poochte hain."""
+        return self.exam_mode_active or self.focus_schedule_active(now=now, tz=tz)
 
     def __str__(self):
         return f"{self.user.username} preferences ({self.theme}/{self.language})"
@@ -1650,6 +1776,17 @@ class StreakManager(models.Manager):
     """
 
     def record_activity(self, user):
+        """T2.2 - public entry: `_record_activity_once` ko transient "database is locked" par 3 baar retry karta hai.
+
+        Poora read-modify-write ek atomic block me rollback hota hai, aur milestone coins `reference` se idempotent
+        hain, isliye retry se double-credit nahi hota. Retry aakhir tak fail ho to OperationalError upar jaata hai -
+        view use best-effort me badal deta hai (T2.3).
+        """
+        from common.db_retry import DEFAULT_WRITE_RETRIES, retry_on_db_lock
+
+        return retry_on_db_lock(lambda: self._record_activity_once(user), retries=DEFAULT_WRITE_RETRIES)
+
+    def _record_activity_once(self, user):
         """
         Atomically get-or-create this user's `Streak` row and apply
         today's check-in, using `timezone.localdate()` — Django's
@@ -1784,6 +1921,28 @@ class StreakManager(models.Manager):
     # challenge"). Dono `Streak` row ke lock ke andar chalte hain — same
     # "one sanctioned write path" boundary jo record_activity() rakhta hai.
     # ------------------------------------------------------------------
+    def grant_freeze(self, user, count=1):
+        """T2.7 — cost-free freeze token (referral rewards etc.).
+
+        Same lock + cap as `buy_freeze` (`STREAK_FREEZE_MAX_TOKENS`) but NO
+        coin movement. Returns how many tokens were actually added: 0 when
+        the user is already at the cap (a reward must never push a user over
+        the holding cap, and it must never raise). Callers that need
+        exactly-once semantics (referral rewards) guard that themselves.
+        """
+        count = int(count or 0)
+        if count <= 0:
+            return 0
+        max_tokens = int(getattr(settings, "STREAK_FREEZE_MAX_TOKENS", 2))
+        with transaction.atomic():
+            streak, _created = self.select_for_update().get_or_create(user=user)
+            room = max(0, max_tokens - streak.freeze_tokens)
+            granted = min(count, room)
+            if granted:
+                streak.freeze_tokens += granted
+                streak.save(update_fields=["freeze_tokens", "updated_at"])
+            return granted
+
     def buy_freeze(self, user):
         """Ek freeze token coins se khareedo. Cost =
         `settings.STREAK_FREEZE_COST_COINS` (default 50), holding cap =
@@ -2090,6 +2249,12 @@ class Badge(models.Model):
         WEEKLY_TOP10 = "weekly_top10", "Top 10 on a weekly leaderboard"
         FIRST_TEST = "first_test", "First test completed"
         TEACHER_VERIFIED = "teacher_verified", "Teacher verified"
+        # T2.7 (Loop 7) — cost-free referral rewards: nobody pays coins for
+        # these, they are recognition only. `code` == RuleType value, same
+        # as every built-in badge above.
+        REFERRER_FIRST = "referrer_first", "Referred a first friend"
+        REFERRER_5 = "referrer_5", "Referred 5 friends"
+        FOUNDING_MEMBER = "founding_member", "Founding member"
 
     code = models.SlugField(max_length=50, unique=True)
     title = models.CharField(max_length=100)
@@ -2148,7 +2313,161 @@ class DailyUsageManager(models.Manager):
     # since its previous heartbeat (network jitter, timer skew).
     HEARTBEAT_SLACK_SECONDS = 5
 
+    # ------------------------------------------------------------------
+    # T0.1 — write-throttling. Heartbeat har ~30-60s har online user pe aata
+    # hai; har beat pe `DailyUsage` UPDATE = SQLite pe writer-lock ki sabse
+    # frequent source (chat presence/events/device-token ke saath). Ab beats
+    # cache me jama hote hain (`hb_pending`) aur DB me kam se kam
+    # `ACTIVITY_HEARTBEAT_FLUSH_SECONDS` (default 60s; 0 = purana "har beat
+    # pe write") me ek baar flush hote hain. Daily-limit / daily-goal
+    # cross hone wali beat HAMESHA turant flush hoti hai, taaki "limit
+    # reached" aur goal-complete pehle jaise hi, usi beat pe, fire hon.
+    # Cache cold ho (pehli beat, naya din, Redis flush) to seedha purana DB
+    # path chalta hai aur cache ko prime karta hai. Worst case (cache lost)
+    # <= ek flush-window ke seconds kam gine jaate hain; kabhi zyada nahi.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _hb_keys(user):
+        return f"hb_state:{user.pk}", f"hb_pending:{user.pk}"
+
+    def _prime_heartbeat_cache(self, user, usage, now, reset_pending=True):
+        from django.core.cache import cache
+
+        state_key, pending_key = self._hb_keys(user)
+        cache.set(
+            state_key,
+            {
+                "date": usage.date.isoformat(),
+                "seconds": int(usage.seconds),
+                "limit_notified": bool(usage.limit_notified),
+                "last_at": now.timestamp(),
+                "flushed_at": now.timestamp(),
+            },
+            2 * 24 * 3600,
+        )
+        if reset_pending:
+            cache.set(pending_key, 0, 2 * 24 * 3600)
+
+    def _record_heartbeat_buffered(self, user, seconds, flush_every):
+        """Fast path. Returns `(usage_like, credited, limit_reached)` ya None
+        (=> caller purane DB path pe jaaye)."""
+        from types import SimpleNamespace
+
+        from django.conf import settings as dj_settings
+        from django.core.cache import cache
+
+        state_key, pending_key = self._hb_keys(user)
+        now = timezone.now()
+        today = timezone.localdate(now)
+        state = cache.get(state_key)
+        if not state or state.get("date") != today.isoformat():
+            return None  # cold -> DB path (jo cache prime karega)
+
+        max_beat = int(getattr(dj_settings, "ACTIVITY_HEARTBEAT_MAX_SECONDS", 120))
+        claimed = max(0, min(int(seconds), max_beat))
+        if claimed == 0:
+            return None
+
+        elapsed = max(0, int(now.timestamp() - state["last_at"]))
+        credited = min(claimed, elapsed + self.HEARTBEAT_SLACK_SECONDS)
+
+        cache.add(pending_key, 0, 2 * 24 * 3600)
+        try:
+            pending = cache.incr(pending_key, credited)
+        except ValueError:
+            return None
+        total_now = min(int(state["seconds"]) + int(pending), 24 * 3600)
+
+        # Is beat se daily limit / goal cross ho sakta hai? (sirf reads)
+        limit = (
+            UserPreference.objects.filter(user=user)
+            .values_list("daily_limit_minutes", flat=True)
+            .first()
+        )
+        crosses_limit = bool(limit and not state.get("limit_notified") and total_now >= limit * 60)
+        goal_row = Streak.objects.filter(user=user).values("daily_goal_minutes", "goal_completed_date").first()
+        crosses_goal = bool(
+            goal_row
+            and goal_row["goal_completed_date"] != today
+            and total_now >= goal_row["daily_goal_minutes"] * 60
+        )
+        flush_due = (now.timestamp() - state["flushed_at"]) >= flush_every
+
+        if not (crosses_limit or crosses_goal or flush_due):
+            state["last_at"] = now.timestamp()
+            cache.set(state_key, state, 2 * 24 * 3600)
+            return SimpleNamespace(seconds=total_now), credited, False
+
+        # Flush: jama hua pura `pending` DB me likho. Fail ho to pending cache me
+        # hi rehta hai (agli beat dobara koshish karegi) — beat kabhi fail nahi hoti.
+        to_flush = int(pending)
+        try:
+            usage, limit_reached = self._flush_heartbeat_seconds(user, to_flush, now, today)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "heartbeat flush failed user=%s (kept %ss pending)", user.pk, to_flush, exc_info=True
+            )
+            state["last_at"] = now.timestamp()
+            cache.set(state_key, state, 2 * 24 * 3600)
+            return SimpleNamespace(seconds=total_now), credited, False
+        try:
+            cache.decr(pending_key, to_flush)
+        except ValueError:
+            pass
+        # pending ko reset NAHI karte: flush ke dauran aayi concurrent beat ka credit bacha rahe.
+        self._prime_heartbeat_cache(user, usage, now, reset_pending=False)
+        return usage, credited, limit_reached
+
+    def _flush_heartbeat_seconds(self, user, add_seconds, now, today):
+        """`add_seconds` ko DB me (lock ke saath) jodo. Returns (usage, limit_just_reached)."""
+        from common.db_retry import retry_on_db_lock
+
+        def _do():
+            with transaction.atomic():
+                usage, _created = self.select_for_update().get_or_create(user=user, date=today)
+                usage.seconds = min(usage.seconds + add_seconds, 24 * 3600)
+                usage.last_heartbeat_at = now
+                limit_reached = False
+                limit = (
+                    UserPreference.objects.filter(user=user)
+                    .values_list("daily_limit_minutes", flat=True)
+                    .first()
+                )
+                if limit and not usage.limit_notified and usage.seconds >= limit * 60:
+                    usage.limit_notified = True
+                    limit_reached = True
+                usage.save(update_fields=["seconds", "last_heartbeat_at", "limit_notified", "updated_at"])
+                return usage, limit_reached
+
+        from common.db_retry import DEFAULT_WRITE_RETRIES
+
+        return retry_on_db_lock(_do, retries=DEFAULT_WRITE_RETRIES)
+
     def record_heartbeat(self, user, seconds):
+        from django.conf import settings as dj_settings
+
+        flush_every = int(getattr(dj_settings, "ACTIVITY_HEARTBEAT_FLUSH_SECONDS", 60))
+        if flush_every > 0:
+            try:
+                fast = self._record_heartbeat_buffered(user, seconds, flush_every)
+            except Exception:
+                logging.getLogger(__name__).exception("heartbeat buffered path failed user=%s", user.pk)
+                fast = None
+            if fast is not None:
+                return fast
+        from common.db_retry import DEFAULT_WRITE_RETRIES, retry_on_db_lock
+
+        usage, credited, limit_reached = retry_on_db_lock(
+            lambda: self._record_heartbeat_db(user, seconds), retries=DEFAULT_WRITE_RETRIES,
+        )
+        if flush_every > 0 and credited:
+            try:
+                self._prime_heartbeat_cache(user, usage, timezone.now())
+            except Exception:
+                logging.getLogger(__name__).debug("heartbeat cache prime failed", exc_info=True)
+        return usage, credited, limit_reached
+
+    def _record_heartbeat_db(self, user, seconds):
         """Add foreground time. `seconds` = what the client says it was in the
         foreground since its last heartbeat. Three bounds keep a forged client
         from inflating the number: a per-beat cap
@@ -2240,6 +2559,15 @@ class ContentReport(models.Model):
         POST = "post", "Post"
         COMMENT = "comment", "Comment"
         STORY = "story", "Story"
+        # Audit item 16: the places that had no Report button before.
+        MESSAGE = "message", "Direct / group message"
+        CLASS_CHAT = "class_chat", "Live-class chat message"
+        LIVE_SESSION = "live_session", "Live class session"
+        PROFILE_PHOTO = "profile_photo", "Profile photo"
+
+    class Priority(models.TextChoices):
+        NORMAL = "normal", "Normal"
+        URGENT = "urgent", "Urgent"
 
     class Reason(models.TextChoices):
         SPAM = "spam", "Spam"
@@ -2252,6 +2580,9 @@ class ContentReport(models.Model):
         IMPERSONATION = "impersonation", "Pretending to be someone else"
         # Routed to the copyright flow (copyrights app) - the app shows the notice form.
         COPYRIGHT = "copyright", "Copyright / intellectual property"
+        # Audit item 18: anything involving a child (under 18). Own urgent queue,
+        # instant hold, POCSO reporting trail (see user_profile/child_safety.py).
+        CHILD_SAFETY = "child_safety", "Child safety (a child is being harmed / exploited)"
         OTHER = "other", "Something else"
 
     class Status(models.TextChoices):
@@ -2267,22 +2598,198 @@ class ContentReport(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="reports_received",
     )
-    target_type = models.CharField(max_length=10, choices=TargetType.choices)
+    target_type = models.CharField(max_length=16, choices=TargetType.choices)
     target_id = models.CharField(max_length=64)  # user id (int) or post/comment/story uuid, as text
     reason = models.CharField(max_length=20, choices=Reason.choices)
     details = models.TextField(blank=True, default="", max_length=1000)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Audit item 18: urgent reports (child safety) sort first in the staff queue.
+    priority = models.CharField(max_length=6, choices=Priority.choices, default=Priority.NORMAL, db_index=True)
+    # Audit item 16: a short copy of what was reported. DMs / chat lines can be
+    # unsent or deleted later; the moderator (and the police, for child safety)
+    # still needs to see what was actually reported. Never filled for plain posts.
+    evidence = models.CharField(max_length=500, blank=True, default="")
+    # Audit item 19: set when the brigading check (report_automation.analyse_reports)
+    # thought this target was being mass-reported by a coordinated group.
+    brigading_suspected = models.BooleanField(default=False)
+    # P-F15: review deadline (user_profile/report_sla.py). Child safety / severe reasons get a short one, the rest a long
+    # one; sorting the queue by (priority, sla_due_at) puts the most urgent first. `sla_breached_at` is stamped ONCE by
+    # the hourly sweep when the deadline passes with the report still open (it also alerts staff).
+    sla_due_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    sla_breached_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["-created_at"]
         constraints = [
             UniqueConstraint(fields=["reporter", "target_type", "target_id"], name="unique_content_report"),
         ]
-        indexes = [models.Index(fields=["reported_user", "status"], name="report_user_status_idx")]
+        indexes = [
+            models.Index(fields=["reported_user", "status"], name="report_user_status_idx"),
+            models.Index(fields=["priority", "status", "-created_at"], name="report_queue_idx"),
+            models.Index(fields=["target_type", "target_id"], name="report_target_idx"),
+        ]
+        permissions = [
+            ("handle_child_safety", "Can work the child-safety queue and file reports to the authorities"),
+        ]
 
     def __str__(self):
         return f"{self.reporter_id} reported {self.target_type}:{self.target_id} ({self.reason})"
+
+
+class ChildSafetyReport(ContentReport):
+    """Proxy: the separate urgent queue in Django admin (no extra table)."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "child-safety report"
+        verbose_name_plural = "CHILD SAFETY queue (urgent)"
+
+
+class ModerationAction(models.Model):
+    """Append-only trail of every staff / automation decision on reported content
+    (audit item 20). Copyright decisions have their own CopyrightAuditLog; this is
+    the same thing for ContentReport hide / dismiss, auto-holds, appeals and the
+    child-safety workflow. Rows are never edited or deleted (admin is read-only).
+
+    `target_owner` is the account behind the content, so ONE query answers
+    "everything that was ever done to this person's content"; `owner_visible`
+    rows are what the person sees on their \"Notices\" screen (item 17).
+    """
+
+    class Action(models.TextChoices):
+        AUTO_HOLD = "auto_hold", "Auto-hold (report threshold)"
+        AUTO_HOLD_CHILD = "auto_hold_child", "Auto-hold (child safety)"
+        BRIGADING_REVIEW = "brigading_review", "Sent to review - brigading suspected"
+        HIDE = "hide", "Staff: content hidden"
+        DISMISS = "dismiss", "Staff: reports dismissed"
+        STATUS_CHANGE = "status_change", "Staff: report status changed"
+        RESTORE = "restore", "Content restored"
+        APPEAL_FILED = "appeal_filed", "Owner appealed"
+        APPEAL_ACCEPTED = "appeal_accepted", "Appeal accepted"
+        APPEAL_REJECTED = "appeal_rejected", "Appeal rejected"
+        CHILD_CASE_OPENED = "child_case_opened", "Child-safety case opened"
+        CHILD_REPORTED_AUTHORITY = "child_reported_authority", "Child-safety: reported to authorities"
+        CHILD_CASE_CLOSED = "child_case_closed", "Child-safety case closed"
+        PHOTO_REMOVED = "photo_removed", "Profile photo removed"
+
+    action = models.CharField(max_length=30, choices=Action.choices, db_index=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )  # NULL = automation
+    actor_label = models.CharField(max_length=40, default="system")
+    target_type = models.CharField(max_length=16)
+    target_id = models.CharField(max_length=64)
+    target_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="moderation_actions_received",
+    )
+    reason = models.CharField(max_length=20, blank=True, default="")  # the report reason behind it
+    report_count = models.PositiveIntegerField(default=0)
+    note = models.CharField(max_length=500, blank=True, default="")
+    # What the owner is told on the Notices screen (empty = nothing shown).
+    owner_visible = models.BooleanField(default=False)
+    can_appeal = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["target_type", "target_id"], name="modaction_target_idx"),
+            models.Index(fields=["target_owner", "-created_at"], name="modaction_owner_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.actor_label}: {self.action} {self.target_type}:{self.target_id}"
+
+
+class ModerationAppeal(models.Model):
+    """The owner disagrees with an auto-hold / hide (audit item 17). Copyright
+    takedowns do NOT use this - they have their own counter-notice."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Waiting for review"
+        ACCEPTED = "accepted", "Accepted - content restored"
+        REJECTED = "rejected", "Rejected - decision stands"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="moderation_appeals")
+    action = models.ForeignKey(ModerationAction, null=True, blank=True, on_delete=models.SET_NULL, related_name="appeals")
+    target_type = models.CharField(max_length=16)
+    target_id = models.CharField(max_length=64)
+    message = models.TextField(max_length=1000)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+    decision_note = models.CharField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            UniqueConstraint(
+                fields=["user", "target_type", "target_id"], condition=Q(status="open"),
+                name="one_open_moderation_appeal",
+            ),
+        ]
+
+    def __str__(self):
+        return f"appeal {self.user_id} {self.target_type}:{self.target_id} ({self.status})"
+
+
+class ChildSafetyCase(models.Model):
+    """One case per reported target with reason=child_safety (audit item 18).
+
+    Why a separate table: for a POCSO-type report the platform must (a) act fast,
+    (b) KEEP the evidence even if the content is deleted, and (c) be able to show
+    when and to whom it was reported (SJPU / local police, and NCPCR / cybercrime
+    portal). Hiding the content is reversible and automatic; everything in
+    `snapshot` is frozen at report time. Handled only by staff holding the
+    `user_profile.handle_child_safety` permission (or superusers).
+    """
+
+    class Status(models.TextChoices):
+        NEW = "new", "New - needs review"
+        UNDER_REVIEW = "under_review", "Under review"
+        REPORTED = "reported", "Reported to the authorities"
+        CLOSED_NO_ACTION = "closed", "Closed - not a child-safety issue"
+
+    target_type = models.CharField(max_length=16)
+    target_id = models.CharField(max_length=64)
+    reported_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="child_safety_cases",
+    )
+    status = models.CharField(max_length=14, choices=Status.choices, default=Status.NEW, db_index=True)
+    snapshot = models.JSONField(default=dict, blank=True)  # frozen copy: text, media urls, owner, times
+    first_report_at = models.DateTimeField(default=timezone.now)
+    due_at = models.DateTimeField(db_index=True)  # SLA (settings.CHILD_SAFETY_SLA_HOURS)
+    sla_warned_at = models.DateTimeField(null=True, blank=True)
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+
+    # POCSO trail: who we told, when, and the acknowledgement / FIR number.
+    authority_name = models.CharField(max_length=200, blank=True, default="")  # e.g. "SJPU Moradabad" / "Local police station"
+    authority_reference = models.CharField(max_length=120, blank=True, default="")
+    reported_to_authority_at = models.DateTimeField(null=True, blank=True)
+    reported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+    staff_note = models.TextField(blank=True, default="")
+    # Evidence must not be purged before this date (settings.CHILD_SAFETY_PRESERVE_DAYS).
+    preserve_until = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["due_at"]
+        constraints = [
+            UniqueConstraint(fields=["target_type", "target_id"], name="one_child_safety_case_per_target"),
+        ]
+
+    def __str__(self):
+        return f"child-safety {self.target_type}:{self.target_id} ({self.status})"
 
 
 class AutoModerationFlag(models.Model):
@@ -2310,6 +2817,9 @@ class AutoModerationFlag(models.Model):
         MESSAGE = "message", "Direct message"
         FEATURE = "feature", "Feature request"
         USER = "user", "Account"
+        CLASS_CHAT = "class_chat", "Live-class chat message"
+        LIVE_SESSION = "live_session", "Live class session"
+        PROFILE_PHOTO = "profile_photo", "Profile photo"
 
     class Source(models.TextChoices):
         WORDLIST = "wordlist", "Word list / pattern"
@@ -2331,7 +2841,7 @@ class AutoModerationFlag(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="automod_flags",
     )
-    target_type = models.CharField(max_length=10, choices=TargetType.choices)
+    target_type = models.CharField(max_length=16, choices=TargetType.choices)
     target_id = models.CharField(max_length=64)
     reason = models.CharField(max_length=40)
     source = models.CharField(max_length=10, choices=Source.choices, default=Source.WORDLIST)
@@ -2354,3 +2864,243 @@ class AutoModerationFlag(models.Model):
     def __str__(self):
         return f"auto:{self.reason} on {self.target_type}:{self.target_id} ({self.status})"
 
+
+
+class PrivacySettings(models.Model):
+    """S4 -- per-user privacy controls: who may message / call / tag / mention / add me to a group, who sees my
+    online status and my followers list, and whether I show up in search.
+
+    One row per user, created lazily by `user_profile.privacy` (no row = every default below, nothing is written
+    at sign-up). All rules live in `user_profile/privacy.py`; the apps that enforce them only call its helpers.
+
+    Audience levels (same three everywhere, see `Audience`):
+        everyone     no limit (the default for every control, so nothing changes until the user opts in)
+        connections  only people I follow or who follow me (accepted follows, either direction)
+        nobody       no one else (my own account is never limited)
+
+    Already existing and NOT duplicated here: `User.is_private`, read receipts (`message.UserPresence`), block /
+    restrict / mute lists. `Privacy & Safety` in Settings shows them next to these controls.
+    """
+
+    class Audience(models.TextChoices):
+        EVERYONE = "everyone", "Everyone"
+        CONNECTIONS = "connections", "People I follow and my followers"
+        NOBODY = "nobody", "Nobody"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        related_name="privacy",
+        on_delete=models.CASCADE,
+    )
+
+    # Start a NEW chat with me (existing chats are never cut off; chat message requests still apply on top).
+    message_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+    # Start a 1-1 call with me.
+    call_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+    # Tag me in a post / mention me in a post or story / @mention me in a chat.
+    tag_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+    mention_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+    # Add me to a group (group admins / mods adding me to THEIR approved group are not exempt).
+    group_add_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+    # See when I am online / last seen.
+    online_status_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+    # Open my followers / following lists.
+    followers_list_from = models.CharField(max_length=12, choices=Audience.choices, default=Audience.EVERYONE)
+
+    # Leave me out of people-search, chat-contact search and suggestions for people I have no follow link with.
+    hide_from_search = models.BooleanField(default=False)
+    # Contact discovery (find a person by phone number / e-mail): `POST /profile/contacts/match/`
+    # (user_profile/contact_discovery.py) only returns people whose switch is on. Minors are never found. Default on.
+    find_by_phone = models.BooleanField(default=True)
+    find_by_email = models.BooleanField(default=True)
+
+    # S4b -- account-level DEFAULTS for what I publish next. They only fill in what the composer did not send:
+    # a value the app sends explicitly (or a later edit of that one post / story) always wins. Rules + the minor
+    # floor: `user_profile/privacy.py::content_defaults_for`. Existing posts / stories are never rewritten.
+    class StoryAudience(models.TextChoices):
+        EVERYONE = "everyone", "Everyone"
+        FOLLOWERS = "followers", "Followers"
+        CLOSE_FRIENDS = "close_friends", "Close friends"
+
+    class PostAudience(models.TextChoices):
+        PUBLIC = "public", "Public"
+        CONNECTIONS = "connections", "Followers"
+        CLOSE_FRIENDS = "close_friends", "Close friends"
+
+    class CommentsLimit(models.TextChoices):
+        EVERYONE = "everyone", "Everyone"
+        FOLLOWERS = "followers", "Followers only"
+
+    default_story_audience = models.CharField(max_length=20, choices=StoryAudience.choices, default=StoryAudience.EVERYONE)
+    default_post_visibility = models.CharField(max_length=20, choices=PostAudience.choices, default=PostAudience.PUBLIC)
+    default_comments_limit = models.CharField(max_length=12, choices=CommentsLimit.choices, default=CommentsLimit.EVERYONE)
+    default_allow_reshare = models.BooleanField(default=True)
+    default_allow_save = models.BooleanField(default=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "privacy settings"
+        verbose_name_plural = "privacy settings"
+
+    def __str__(self):
+        return f"{self.user_id} privacy settings"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        from . import privacy
+
+        privacy.invalidate(self.user_id)
+
+    def delete(self, *args, **kwargs):
+        uid = self.user_id
+        result = super().delete(*args, **kwargs)
+        from . import privacy
+
+        privacy.invalidate(uid)
+        return result
+
+    @classmethod
+    def for_user(cls, user):
+        obj, _created = cls.objects.get_or_create(user=user)
+        return obj
+
+
+# ---------------------------------------------------------------------------
+# S12 - role-aware settings
+# ---------------------------------------------------------------------------
+from django.core.validators import MaxValueValidator, MinValueValidator  # noqa: E402
+
+
+class TeacherLiveDefaults(models.Model):
+    """
+    S12: a teacher's own defaults for NEW classrooms / live classes (one row per user, created lazily by
+    `role_settings.get_teacher_defaults`). "Teacher" is not a fixed role in this app (anyone can open a classroom), so the
+    row is open to every signed-in user; the UI only shows it to people the capabilities endpoint calls teachers.
+
+    The first six fields pre-fill the classroom form (Flutter). `attendance_min_percent` / `attendance_edit_days` have no
+    field in that form, so `role_settings.apply_attendance_defaults` copies them onto a brand-new Classroom (post_save,
+    created only) while that classroom still has the model defaults. Existing classrooms are never touched.
+    """
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="teacher_live_defaults")
+    chat_enabled = models.BooleanField(default=True)
+    recording_enabled = models.BooleanField(default=True)
+    recording_auto = models.BooleanField(default=False)
+    whiteboard_enabled = models.BooleanField(default=True)
+    screen_share_enabled = models.BooleanField(default=True)
+    parents_enabled = models.BooleanField(default=False)
+    attendance_min_percent = models.PositiveSmallIntegerField(
+        default=50, validators=[MinValueValidator(1), MaxValueValidator(100)]
+    )
+    attendance_edit_days = models.PositiveSmallIntegerField(
+        default=7, validators=[MinValueValidator(0), MaxValueValidator(60)]
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Teacher live defaults"
+        verbose_name_plural = "Teacher live defaults"
+
+    def __str__(self):
+        return f"{self.user_id}: rec={self.recording_enabled}/{self.recording_auto} att={self.attendance_min_percent}%"
+
+
+class ParentChildLimit(models.Model):
+    """
+    S12: a daily time limit a PARENT set on a linked CHILD (campus parent link, child under 18). One row per
+    (parent, child). The child's own `UserPreference.daily_limit_minutes` is kept at or below the smallest of these rows
+    and the child cannot raise or clear it (see `ActivityView.patch`); removing the row hands control back to the child.
+    """
+
+    parent = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="child_limits_set")
+    child = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="parent_limits")
+    daily_limit_minutes = models.PositiveSmallIntegerField(validators=[MinValueValidator(5), MaxValueValidator(1440)])
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [UniqueConstraint(fields=["parent", "child"], name="unique_parent_child_limit")]
+        indexes = [models.Index(fields=["child"], name="parentchildlimit_child_idx")]
+
+    def __str__(self):
+        return f"{self.parent_id} -> {self.child_id}: {self.daily_limit_minutes} min"
+
+
+class ProfileFeatured(models.Model):
+    """
+    P6: the ONE "Featured" slot of a profile - a single test series, class or resource the owner pinned under the
+    highlights row. At most one row per user (OneToOne). `target_id` is the id of the thing as text (test series and
+    resource posts use UUIDs, classrooms an integer) and is deliberately NOT a foreign key, so one table can point at three
+    apps; the read side (user_profile/featured.py) re-checks on EVERY read that the target still exists, is still owned
+    by the user and is still public - a deleted / archived / flagged target simply makes the slot empty.
+    """
+
+    KIND_TEST = "test"
+    KIND_CLASS = "class"
+    KIND_RESOURCE = "resource"
+    KIND_CHOICES = [(KIND_TEST, "Test series"), (KIND_CLASS, "Class"), (KIND_RESOURCE, "Resource")]
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile_featured")
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES)
+    target_id = models.CharField(max_length=40)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user_id}: featured {self.kind} {self.target_id}"
+
+
+class ProfileVisit(models.Model):
+    """
+    P9: one row per (profile, viewer, day) - "somebody opened this profile today", with how many times (`visits`).
+    Only used to give the OWNER two numbers: profile visits and unique visitors. WHO visited is never shown to anyone
+    (no API returns `viewer`), rows older than PROFILE_VISIT_RETENTION_DAYS (90) are deleted by
+    `user_profile.tasks.prune_old_profile_visits`, and nothing is recorded for your own visits, blocked pairs or
+    visitors under 18 (see user_profile/profile_insights.py `record_visit`).
+    """
+
+    profile = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile_visits_received")
+    viewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile_visits_made")
+    day = models.DateField()
+    visits = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=["profile", "viewer", "day"], name="uniq_profilevisit_profile_viewer_day"),
+        ]
+        indexes = [
+            models.Index(fields=["profile", "day"], name="profilevisit_profile_day_idx"),
+            models.Index(fields=["day"], name="profilevisit_day_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.viewer_id} -> {self.profile_id} on {self.day} x{self.visits}"
+
+
+class FollowerLoss(models.Model):
+    """
+    P9b: one COUNTER row per (profile, day) = how many accepted followers left that day (they unfollowed, or the owner
+    used "Remove follower"). Only a number - WHO left is never stored, so nothing here can be turned into a list of
+    people. Used for "lost" / "net" in the owner's Profile insights. Rows older than PROFILE_VISIT_RETENTION_DAYS go
+    with the visit rows (`user_profile.tasks.prune_old_profile_visits`). Unfollows before this table existed are not
+    counted (the report says so).
+    """
+
+    profile = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="follower_losses")
+    day = models.DateField()
+    lost = models.PositiveIntegerField(default=1)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=["profile", "day"], name="uniq_followerloss_profile_day"),
+        ]
+        indexes = [
+            models.Index(fields=["day"], name="followerloss_day_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.profile_id}: -{self.lost} on {self.day}"

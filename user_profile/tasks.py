@@ -186,97 +186,19 @@ def reconcile_follow_counts():
 
 @shared_task
 def send_streak_risk_reminders():
-    """
-    TASK G1 (growth_and_feature_tasks.md — Streaks) — "don't lose your
-    streak" push, once a day, to every user who:
-      - has an active streak (`current_streak > 0`), AND
-      - has NOT already checked in today (`last_active_date` is
-        yesterday, not today — `is_active_today` would be True and
-        there'd be nothing at risk).
+    """TASK G1 — kept under its old name so existing beat entries / manual
+    calls / tests keep working, but T2.9 moved the real work to
+    `core.tasks.send_streak_at_risk_reminders`: one bell row per user per day
+    and a push that honours each user's mute list, push toggle and quiet
+    hours / DND (the old version multicast straight through
+    `send_push_to_users` and ignored all of that). Returns that task's summary
+    plus a `notified` key (rows created) for backward compatibility."""
+    from core.tasks import send_streak_at_risk_reminders
 
-    Fired at `settings.STREAK_REMINDER_HOUR` (default 22:00 / 10pm) via
-    CELERY_BEAT_SCHEDULE's "user-profile-send-streak-risk-reminders"
-    entry — "~2 hours before day-end", matching the same midnight
-    `timezone.localdate()` rollover `Streak.objects.record_activity()`
-    itself uses to decide what "today" means.
-
-    ⚠️ SIMPLIFICATION (same class of trade-off `campus.tasks`'s own
-    docstrings flag elsewhere in this codebase — note it, don't block on
-    it): this fires on ONE fixed server-time hour for every user,
-    regardless of their own timezone. A genuinely per-user "2 hours
-    before THEIR midnight" reminder needs a per-user timezone field
-    (this codebase's `login.User` doesn't have one today) plus N
-    scheduled runs instead of one. Fine for a single-timezone-market
-    launch (this app's other daily jobs — campus's 08:00/18:00/19:00
-    crontabs — make the same server-time-for-everyone assumption); flag
-    for follow-up if/when the user base spans multiple timezones.
-
-    Batches the actual push into ONE `send_push_to_users()` multicast
-    call (message/push_utils.py — already used app-wide for chat/mention
-    pushes) rather than one call per user, same reasoning
-    `create_bulk_notifications` gives for batching the bell-row INSERT.
-    The in-app bell row, by contrast, IS written one-by-one via
-    `core.services.create_notification` — each user's row needs its own
-    `data={"streak_days": ...}` (a different number per user), so a
-    single bulk row (one shared `data` dict) wouldn't carry the right
-    number per recipient.
-
-    Safe to run more than once a day for the same reason
-    `check_attendance_streak_rewards` is: no state of its own beyond
-    reading `Streak` rows, and no coins move here — this task only ever
-    notifies, never credits (that's `record_activity()`'s job, at
-    check-in time). A re-run within the same day would just re-notify
-    the same still-at-risk users, which the "safe to retry" framing
-    already accepts as harmless rather than exactly-once-critical.
-    """
-    from datetime import timedelta
-
-    from django.utils import timezone as dj_timezone
-
-    from core.models import Notification
-    from core.services import create_notification
-
-    from .models import Streak
-
-    yesterday = dj_timezone.localdate() - timedelta(days=1)
-
-    at_risk = list(
-        Streak.objects.filter(current_streak__gt=0, last_active_date=yesterday)
-        .select_related("user")
-    )
-
-    if not at_risk:
-        logger.info("send_streak_risk_reminders: no streaks at risk today.")
-        return {"notified": 0}
-
-    for streak in at_risk:
-        create_notification(
-            streak.user,
-            Notification.NotifType.STREAK_AT_RISK,
-            "Don't lose your streak! 🔥",
-            f"You're on a {streak.current_streak}-day streak — open LearnScroll "
-            "before midnight to keep it alive.",
-            data={"streak_days": streak.current_streak},
-        )
-
-    try:
-        from message.push_utils import send_push_to_users
-
-        send_push_to_users(
-            [s.user_id for s in at_risk],
-            "Don't lose your streak! \U0001F525",
-            "Open LearnScroll before midnight to keep your streak alive.",
-            data={"type": "streak_at_risk"},
-        )
-    except Exception:
-        # Same "in-app row must never be lost because the push channel
-        # is down/unconfigured" contract core.services.create_notification's
-        # own docstring documents — the bell rows above have already been
-        # written by this point regardless of what happens here.
-        logger.exception("send_streak_risk_reminders: push batch failed (bell rows still written).")
-
-    logger.info("send_streak_risk_reminders: notified %s user(s).", len(at_risk))
-    return {"notified": len(at_risk)}
+    summary = send_streak_at_risk_reminders()
+    summary = dict(summary or {})
+    summary["notified"] = summary.get("created", 0)
+    return summary
 
 
 @shared_task
@@ -335,31 +257,40 @@ def generate_weekly_recaps():
     if notified_user_ids:
         from core.models import Notification
         from core.services import create_notification
+        from core.tasks import push_for_notification_row
 
+        # N6: one push PER bell row (not a send_push_to_users multicast): the multicast ignored the per-type matrix, quiet
+        # hours / DND and the daily reminder cap. WEEKLY_RECAP_READY is a non-urgent reminder type, so
+        # send_push_for_notification applies the cap + same-type collapse and the Snooze / Turn off buttons ride along.
+        pushed = 0
         for user_id, recap in notified_user_ids:
-            create_notification(
-                user_id,
-                Notification.NotifType.WEEKLY_RECAP_READY,
-                "Your Week is ready \U0001F4CA",
-                f"{recap.tests_attempted} tests, {recap.classes_attended} classes, "
-                f"{recap.posts_liked_received} likes this week — see your recap.",
-                data={"week_start": recap.week_start.isoformat(), "recap_id": recap.id},
-            )
+            try:
+                row = create_notification(
+                    user_id,
+                    Notification.NotifType.WEEKLY_RECAP_READY,
+                    "Your Week is ready \U0001F4CA",
+                    f"{recap.tests_attempted} tests, {recap.classes_attended} classes, "
+                    f"{recap.posts_liked_received} likes this week \u2014 see your recap.",
+                    data={
+                        "type": "weekly_recap_ready",
+                        "week_start": recap.week_start.isoformat(),
+                        "recap_id": recap.id,
+                    },
+                )
+                # Bell rows must never be lost because the push channel is down / unconfigured: push_for_notification_row
+                # never raises, and a failed row creation only skips that one user.
+                if push_for_notification_row(row):
+                    pushed += 1
+                # P-F3_F4: the same week as ONE e-mail report (queued; channel_policy decides if this user gets it)
+                try:
+                    from core.tasks import send_weekly_report_email
 
-        try:
-            from message.push_utils import send_push_to_users
-
-            send_push_to_users(
-                [uid for uid, _ in notified_user_ids],
-                "Your Week is ready \U0001F4CA",
-                "See what you got done this week on LearnScroll.",
-                data={"type": "weekly_recap_ready", "week_start": week_start.isoformat()},
-            )
-        except Exception:
-            # Same "bell rows must never be lost because the push channel
-            # is down/unconfigured" contract send_streak_risk_reminders
-            # already documents above.
-            logger.exception("generate_weekly_recaps: push batch failed (bell rows still written).")
+                    send_weekly_report_email.delay(user_id, recap.id)
+                except Exception:
+                    logger.exception("generate_weekly_recaps: could not queue the report e-mail for user_id=%s", user_id)
+            except Exception:
+                logger.exception("generate_weekly_recaps: notify failed for user_id=%s", user_id)
+        logger.info("generate_weekly_recaps: push attempted for %s of %s users", pushed, len(notified_user_ids))
 
     logger.info(
         "generate_weekly_recaps: week_start=%s generated=%s notified=%s skipped_no_activity=%s",
@@ -459,3 +390,52 @@ def automod_ai_screen(target_type, target_id, user_id, text):
             text=text, reason=reason, source="ai",
         )
     return flagged
+
+
+@shared_task(name="user_profile.warn_overdue_child_safety_cases")
+def warn_overdue_child_safety_cases():
+    """Hourly: child-safety cases past their SLA -> warn staff once (user_profile/child_safety.py)."""
+    from .child_safety import warn_overdue_cases
+
+    return warn_overdue_cases()
+
+
+@shared_task(name="user_profile.sweep_report_sla")
+def sweep_report_sla():
+    """P-F15, hourly: open reports past their review deadline -> stamp once + ONE summary alert to staff (report_sla.py)."""
+    from .report_sla import sweep
+
+    return sweep()
+
+
+@shared_task(name="user_profile.tasks.prune_old_profile_visits")
+def prune_old_profile_visits():
+    """P9 - delete ProfileVisit rows older than PROFILE_VISIT_RETENTION_DAYS (default 90). Daily."""
+    from . import profile_insights
+
+    n = profile_insights.prune_old_visits()
+    logger.info("prune_old_profile_visits: deleted %s rows", n)
+    return n
+
+
+@shared_task(name="user_profile.reconcile_payments")
+def reconcile_payments():
+    """P-G2, every 15 min: PENDING online payments (coin top-ups + campus fees) whose webhook never arrived are checked
+    against Razorpay and settled through the same idempotent code the webhook uses. Mismatches are logged at ERROR."""
+    from django.conf import settings
+
+    if not getattr(settings, "PAYMENT_RECONCILE_ENABLED", True):
+        return {"skipped": "PAYMENT_RECONCILE_ENABLED is off"}
+    from common.payment_reconcile import run_all
+
+    return run_all()
+
+
+@shared_task(bind=True, name="user_profile.send_coin_receipt_email", max_retries=3, acks_late=True)
+def send_coin_receipt_email(self, purchase_id):
+    """P-G2: e-mail the coin top-up receipt (PDF attached) once. Best effort: a mail problem never touches the payment."""
+    from .receipt_email import send_coin_receipt
+
+    if not send_coin_receipt(purchase_id):
+        raise self.retry(exc=RuntimeError(f"coin receipt email {purchase_id} not sent"), countdown=60 * (self.request.retries + 1))
+    return True

@@ -280,7 +280,7 @@ def send_assigments_due_reminders():
     described above; that's the unresolved risk flagged there, not this
     one.
     """
-    from assigments.models import assigments, assigmentsSource, assigmentsSubmission
+    from assignments.models import assigments, assigmentsSource, assigmentsSubmission
 
     today = timezone.now().date()
     reminded = 0
@@ -294,11 +294,20 @@ def send_assigments_due_reminders():
         ]
         if not missing_students:
             continue
+        # push=True: "due today and you haven't submitted" must reach the phone.
+        # This task owns CAMPUS-sourced assignments; the platform-wide sweep
+        # (assignments.tasks) now skips source=campus, so nobody gets two pushes.
         bridge.notify(
             users=missing_students,
             notif_type=NotifTypes.assigments_DUE_REMINDER,
             title="assigments due today",
             body=f"{campus_item.title} is due today and you haven't submitted yet.",
+            data={
+                "type": NotifTypes.assigments_DUE_REMINDER,
+                "context_type": campus_item.context_type,
+                "context_id": str(campus_item.context_id or ""),
+            },
+            push=True,
         )
         reminded += len(missing_students)
     return {"reminded": reminded}
@@ -398,6 +407,32 @@ def check_assigments_ontime_streak_rewards():
 
 
 @shared_task
+def accrue_late_fines():
+    """FINANCE — daily (07:30, i.e. BEFORE the 08:00 reminders so they quote the fresh balance):
+    re-derive the late fine of every overdue unpaid invoice whose FeeStructure has a fine policy.
+    Idempotent — the fine is a pure function of (policy, due date, payments, today); running it
+    twice the same day changes nothing."""
+    from . import finance
+
+    changed = finance.refresh_open_invoices_for_campus()
+    logger.info("campus.accrue_late_fines: %s invoice(s) updated", changed)
+    return changed
+
+
+@shared_task
+def publish_due_notices():
+    """COMMUNICATION — every minute: publish scheduled notices whose `scheduled_for` has passed
+    (push + bell rows to their audience). Each notice is claimed with one conditional UPDATE, so
+    running this twice, or racing a manual "send now", never delivers a notice twice."""
+    from . import notices
+
+    published = notices.publish_due()
+    if published:
+        logger.info("campus.publish_due_notices: %s notice(s) published", published)
+    return published
+
+
+@shared_task
 def send_fee_due_reminders():
     """
     FEE-6: `FEE_DUE_REMINDER` / `FEE_OVERDUE_REMINDER` — for every
@@ -462,14 +497,29 @@ def send_fee_due_reminders():
         .select_related("enrollment__student", "enrollment__section__school_class", "fee_structure")
     )
 
+    from django.core.cache import cache
+
+    # P-F14: how often an OVERDUE invoice is re-reminded (days). Default 1 = daily, as before.
+    overdue_every = max(1, int(getattr(settings, "CAMPUS_FEE_OVERDUE_REMIND_EVERY_DAYS", 1) or 1))
+
     for invoice in due_invoices:
         student = invoice.enrollment.student
         campus_id = invoice.enrollment.section.school_class.campus_id
-        recipients = [student] + list(
+        parent_ids = list(
             CampusParentLink.objects.filter(student=student, campus_id=campus_id).values_list("parent", flat=True)
         )
+        recipients = [student] + parent_ids
         remaining = invoice.amount_due - invoice.amount_paid
         days_until = (invoice.fee_structure.due_date - today).days
+
+        # P-F14: at most ONE reminder per invoice per day (per `overdue_every` days once overdue), even if the
+        # task is re-run / double-scheduled. Atomic `cache.add`; a cache outage just falls back to the old behaviour.
+        bucket = today.toordinal() // overdue_every if days_until < 0 else today.toordinal()
+        try:
+            if not cache.add(f"campus:fee-reminder:{invoice.pk}:{bucket}", 1, timeout=(overdue_every + 1) * 86400):
+                continue
+        except Exception:
+            logger.exception("fee reminder marker failed (invoice=%s); sending anyway.", invoice.pk)
 
         if days_until > 0:
             notif_type = NotifTypes.FEE_DUE_REMINDER
@@ -485,17 +535,56 @@ def send_fee_due_reminders():
             title = "Fee overdue"
             body = f"{invoice.fee_structure.title} — {remaining} is overdue."
 
-        shortfall = int(remaining) - student.coin
-        if shortfall > 0:
-            body += f" Your wallet balance ({student.coin} coins) is short by {shortfall} coins."
-        bridge.notify(
-            users=recipients,
-            notif_type=notif_type,
-            title=title,
-            body=body,
-        )
+        from . import fee_gateway  # local: avoids an import cycle at load time
+
+        if fee_gateway.online_enabled():
+            # UPI / card is available (FEE-5) — a coin shortfall is no longer the blocker.
+            body += " You can pay online (UPI / card) in the app."
+        else:
+            shortfall = int(remaining) - student.coin
+            if shortfall > 0:
+                body += f" Your wallet balance ({student.coin} coins) is short by {shortfall} coins."
+        # push=True: a fee reminder that only lands in the bell is not a reminder.
+        # Honours NotificationPreference (push toggle / muted types / quiet hours).
+        data = {
+            "type": notif_type,
+            "student_id": str(student.pk),
+            "campus_id": str(campus_id),
+        }
+        if parent_ids:
+            # P-F14: a parent must not read "Your wallet balance (N coins) is short" (that is the STUDENT's wallet)
+            # and needs to know WHICH child the fee is for -> separate, parent-facing copy.
+            child = (student.get_full_name() or "").strip() or student.username
+            parent_title = f"{title}: {child}"
+            parent_body = f"{invoice.fee_structure.title} — {remaining} " + (
+                f"due in {days_until} {'day' if days_until == 1 else 'days'}." if days_until > 0
+                else "is due today." if days_until == 0 else "is overdue."
+            )
+            if fee_gateway.online_enabled():
+                parent_body += " You can pay online (UPI / card) in the app."
+            bridge.notify(
+                users=parent_ids, notif_type=notif_type, title=parent_title, body=parent_body, data=data, push=True,
+            )
+        bridge.notify(users=[student], notif_type=notif_type, title=title, body=body, data=data, push=True)
         reminded += 1
     return {"reminded": reminded}
+
+
+@shared_task
+def send_parent_weekly_summaries():
+    """
+    P-F14 — PARENT ENGAGEMENT: once a week (Sunday evening) every parent with a linked child gets "how was the
+    week" — attendance of the last 7 days, marks trend, fees due — as a bell row + push + e-mail. The same numbers
+    (plus a WhatsApp-ready text) are in the app at `GET /campus/parent-weekly/`.
+
+    Logic lives in `parent_weekly_push.send_all` (one send per parent per ISO week, so a re-run is harmless; a
+    parent with nothing to report gets nothing). Kill switch: `settings.CAMPUS_PARENT_WEEKLY_ENABLED` (default True).
+    """
+    if not getattr(settings, "CAMPUS_PARENT_WEEKLY_ENABLED", True):
+        return {"disabled": True}
+    from .parent_weekly_push import send_all
+
+    return send_all()
 
 
 @shared_task
@@ -521,7 +610,9 @@ def refresh_analytics_snapshot(campus_id, session_id):
     percentages = [compute_attendance_summary(e)["percent"] for e in enrollments]
     avg_attendance = round(sum(percentages) / len(percentages), 2) if percentages else None
 
-    avg_marks = ResultEntry.objects.filter(enrollment__session_id=session_id).aggregate(avg=Avg("marks_obtained"))["avg"]
+    avg_marks = ResultEntry.objects.filter(
+        enrollment__session_id=session_id, status=ResultEntry.Status.PUBLISHED
+    ).aggregate(avg=Avg("marks_obtained"))["avg"]
 
     total_units = SyllabusProgress.objects.filter(syllabus_unit__session_id=session_id).count()
     covered_units = SyllabusProgress.objects.filter(
@@ -536,6 +627,16 @@ def refresh_analytics_snapshot(campus_id, session_id):
         "active_enrollments": enrollments.count(),
     }
     return CampusAnalyticsSnapshot.objects.create(campus_id=campus_id, session_id=session_id, data=data).id
+
+@shared_task
+def send_fee_paid_notification(payment_id):
+    """C3 — push \"fee payment received\" to the student + linked parents after an
+    ONLINE payment settles (dispatched from fee_gateway.settle_online_payment).
+    Idempotent per payment (see fee_paid_push)."""
+    from .fee_paid_push import notify_fee_paid
+
+    return notify_fee_paid(payment_id)
+
 
 @shared_task
 def send_fee_receipt_email(payment_id):
@@ -587,8 +688,13 @@ def send_fee_receipt_email(payment_id):
     )
     recipients.update(email for email in parent_emails if email)
 
+    # N8 - transactional (no opt-out), but never re-mail an address the provider reported dead (bounce / complaint).
+    from core.channel_policy import deliverable_emails
+
+    recipients = set(deliverable_emails(sorted(recipients)))
+
     if not recipients:
-        logger.info("send_fee_receipt_email: no email on file for anyone tied to payment %s; skipping.", payment_id)
+        logger.info("send_fee_receipt_email: no deliverable email for anyone tied to payment %s; skipping.", payment_id)
         return
 
     try:
@@ -608,7 +714,9 @@ def send_fee_receipt_email(payment_id):
             recorded_by=payment.recorded_by,
             status=payment.status,
             notes=payment.notes,
-            paid_at=payment.created_at,
+            paid_at=payment.paid_at or payment.created_at,
+            transaction_id=payment.gateway_payment_id,
+            gateway_method=payment.gateway_method,
         )
     except PdfUnavailable as exc:
         logger.warning("send_fee_receipt_email: %s (payment %s); skipping email.", exc, payment_id)
@@ -659,6 +767,9 @@ def _send_class_starting(*, recipients, subject_name, section_label, starts_at, 
         title=f"{subject_name} class starts in {minutes} min",
         body=f"{subject_name} ({section_label}) starts at {local_start:%I:%M %p}.",
         data=data,
+        # T2.9: this reminder is useless as a silent bell row — push it
+        # (preferences / quiet hours are honoured by the push layer).
+        push=True,
     )
 
 
@@ -687,6 +798,7 @@ def send_class_start_reminders():
     """
     from .class_schedule import due_live_sessions, due_timetable_occurrences, has_explicit_live_session, reminder_lead
     from .models import CampusLiveSession, TimetableReminderLog
+    from .substitutes import effective_teacher_user_id
 
     now = timezone.now()
     window_end = now + reminder_lead()
@@ -726,7 +838,12 @@ def send_class_start_reminders():
             _, created = TimetableReminderLog.objects.get_or_create(entry=entry, occurrence_date=local_day)
         if not created:
             continue
-        recipients = _class_reminder_recipients(entry.section_id, entry.session_id, entry.staff.user_id)
+        # Substitute teacher: remind whoever actually takes the period today —
+        # the substitute if one is assigned, nobody on the teaching side if the
+        # timetable's teacher is absent and uncovered (the students are still told).
+        recipients = _class_reminder_recipients(
+            entry.section_id, entry.session_id, effective_teacher_user_id(entry, local_day)
+        )
         if not recipients:
             continue
         _send_class_starting(
@@ -760,3 +877,614 @@ def prune_timetable_reminder_logs(keep_days=7):
     cutoff = timezone.localdate() - timedelta(days=keep_days)
     deleted, _ = TimetableReminderLog.objects.filter(occurrence_date__lt=cutoff).delete()
     return {"deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Substitute teacher
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_substitute_notifications(assignment_id, kind="assigned"):
+    """Fan the substitute-teacher notifications out (see `campus.substitute_push`).
+
+    `kind="assigned"`  -> the substitute + the section's students/parents.
+    `kind="cancelled"` -> the former substitute only.
+
+    Dispatched by the API after commit. Skips quietly when the row's state no
+    longer matches the event (assigned-then-cancelled within the queue delay
+    must not tell students about a cover that is already off)."""
+    from .models import SubstituteAssignment
+    from .substitute_push import notify_substitute_assigned, notify_substitute_cancelled
+
+    assignment = (
+        SubstituteAssignment.objects.filter(pk=assignment_id)
+        .select_related(
+            "substitute__user",
+            "original_staff__user",
+            "entry__subject",
+            "entry__time_slot",
+            "entry__section__school_class",
+        )
+        .first()
+    )
+    if assignment is None:
+        return {"sent": 0}
+    try:
+        if kind == "assigned" and assignment.status == SubstituteAssignment.Status.ACTIVE:
+            return {"sent": notify_substitute_assigned(assignment)}
+        if kind == "cancelled" and assignment.status == SubstituteAssignment.Status.CANCELLED:
+            return {"sent": notify_substitute_cancelled(assignment)}
+    except Exception:
+        logger.exception("send_substitute_notifications failed (assignment=%s kind=%s).", assignment_id, kind)
+    return {"sent": 0}
+
+
+# ---------------------------------------------------------------------------
+# Staff leave
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_staff_leave_notifications(leave_id, kind):
+    """Fan a staff-leave notification out (see `campus.staff_leave_push`).
+
+    `kind`: `requested` | `edited` | `approved` | `rejected` | `cancelled_by_admin` |
+    `cancelled_by_staff` | `recorded_by_admin`. Dispatched by the API after commit. Skips quietly when
+    the row's state no longer matches the event (e.g. a "requested" push for a
+    leave that was already cancelled by the time the worker ran)."""
+    from .models import StaffLeave
+    from .staff_leave_push import notify_leave_decided, notify_leave_edited, notify_leave_requested
+
+    leave = StaffLeave.objects.filter(pk=leave_id).select_related("staff__user", "campus").first()
+    if leave is None:
+        return {"sent": 0}
+    expected = {
+        "requested": StaffLeave.Status.PENDING,
+        "edited": StaffLeave.Status.PENDING,
+        "recorded_by_admin": StaffLeave.Status.APPROVED,
+        "approved": StaffLeave.Status.APPROVED,
+        "rejected": StaffLeave.Status.REJECTED,
+        "cancelled_by_admin": StaffLeave.Status.CANCELLED,
+        "cancelled_by_staff": StaffLeave.Status.CANCELLED,
+    }.get(kind)
+    if expected is None or leave.status != expected:
+        return {"sent": 0}
+    try:
+        if kind == "requested":
+            return {"sent": notify_leave_requested(leave)}
+        if kind == "edited":
+            return {"sent": notify_leave_edited(leave)}
+        return {"sent": notify_leave_decided(leave, kind)}
+    except Exception:
+        logger.exception("send_staff_leave_notifications failed (leave=%s kind=%s).", leave_id, kind)
+    return {"sent": 0}
+
+
+# ---------------------------------------------------------------------------
+# Admission
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_admission_notifications(application_id, kind):
+    """Welcome push for a just-enrolled student (see `campus.admission_push`).
+
+    `kind`: `enrolled`. Dispatched by the API after commit. Skips quietly when the
+    row's state no longer matches the event."""
+    from .admission_push import notify_enrolled
+    from .models import AdmissionApplication
+
+    app = (
+        AdmissionApplication.objects.filter(pk=application_id)
+        .select_related("student", "campus", "school_class", "section")
+        .first()
+    )
+    if app is None or kind != "enrolled" or app.status != AdmissionApplication.Status.ENROLLED:
+        return {"sent": 0}
+    try:
+        return {"sent": notify_enrolled(app)}
+    except Exception:
+        logger.exception("send_admission_notifications failed (application=%s kind=%s).", application_id, kind)
+    return {"sent": 0}
+
+
+@shared_task
+def send_admission_followup_digest():
+    """Daily: tell each campus's admins how many admission follow-ups are due (beat, 09:30)."""
+    from .admission_push import notify_followup_digest
+
+    try:
+        return {"campuses": notify_followup_digest()}
+    except Exception:
+        logger.exception("send_admission_followup_digest failed.")
+    return {"campuses": 0}
+
+
+# ---------------------------------------------------------------------------
+# Homework Diary
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_homework_diary_posted(entry_id):
+    """Fan the "new homework" push out to the section's students + parents.
+
+    Dispatched by `HomeworkDiaryViewSet.perform_create` once the row is
+    committed. Skips quietly if the entry was deleted/hidden in the meantime.
+    """
+    from .homework_diary_push import notify_homework_posted
+    from .models import HomeworkDiaryEntry
+
+    entry = (
+        HomeworkDiaryEntry.objects.filter(pk=entry_id, is_active=True)
+        .select_related("subject", "posted_by")
+        .first()
+    )
+    if entry is None:
+        return {"sent": 0}
+    try:
+        return {"sent": notify_homework_posted(entry)}
+    except Exception:
+        logger.exception("send_homework_diary_posted failed (entry=%s).", entry_id)
+        return {"sent": 0}
+
+
+@shared_task
+def send_homework_diary_due_reminders():
+    """"Homework due tomorrow" push (beat: daily, 17:00).
+
+    Looks for active diary entries whose `due_date` is `today + N` days
+    (`CAMPUS_HOMEWORK_DIARY_REMINDER_DAYS_BEFORE`, default 1) and that have not
+    been reminded yet. Each entry is CLAIMED atomically
+    (`due_reminder_sent_at`) before sending, so a re-run or two overlapping
+    workers can never double-send; if the send itself blows up the claim is
+    released so the next run retries it.
+    """
+    from datetime import timedelta
+
+    from .homework_diary_push import notify_homework_due
+    from .models import HomeworkDiaryEntry
+
+    days_before = max(0, int(getattr(settings, "CAMPUS_HOMEWORK_DIARY_REMINDER_DAYS_BEFORE", 1)))
+    target = timezone.localdate() + timedelta(days=days_before)
+    entry_ids = list(
+        HomeworkDiaryEntry.objects.filter(
+            is_active=True, due_date=target, due_reminder_sent_at__isnull=True
+        ).values_list("pk", flat=True)
+    )
+    reminded = 0
+    for entry_id in entry_ids:
+        claimed = HomeworkDiaryEntry.objects.filter(
+            pk=entry_id, is_active=True, due_reminder_sent_at__isnull=True
+        ).update(due_reminder_sent_at=timezone.now())
+        if not claimed:
+            continue  # another worker got it
+        entry = HomeworkDiaryEntry.objects.select_related("subject", "posted_by").get(pk=entry_id)
+        try:
+            notify_homework_due(entry)
+            reminded += 1
+        except Exception:
+            logger.exception("send_homework_diary_due_reminders failed (entry=%s).", entry_id)
+            HomeworkDiaryEntry.objects.filter(pk=entry_id).update(due_reminder_sent_at=None)
+    return {"reminded": reminded}
+
+
+# ---------------------------------------------------------------------------
+# Class resources (content share)
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_class_resource_posted(resource_id):
+    """Fan the "new resource" push out to the section's students + parents.
+
+    Dispatched by `ClassResourceViewSet` once the row is committed (on create
+    when published, and when a draft is published later). The push is CLAIMED
+    atomically via `notified_at` first, so a retry / two workers / a repeated
+    publish can never double-send. At-most-once on purpose: if the send itself
+    blows up the claim is kept (a duplicate buzz to 60 families is worse than
+    one missed push — the resource is in the app either way).
+
+    Skips quietly for drafts / hidden / deleted resources, and stays silent
+    (but still claims) when the same poster is bursting uploads into one
+    folder — see `resource_push.is_burst`.
+    """
+    from .models import ClassResource
+    from .resource_push import is_burst, notify_resource_posted
+
+    resource = (
+        ClassResource.objects.filter(
+            pk=resource_id, is_active=True, is_published=True, folder__is_active=True, notified_at__isnull=True
+        )
+        .select_related("subject", "folder", "posted_by")
+        .first()
+    )
+    if resource is None:
+        return {"sent": 0}
+    quiet = is_burst(resource)  # must run before our own claim is stamped
+    claimed = ClassResource.objects.filter(pk=resource.pk, notified_at__isnull=True).update(
+        notified_at=timezone.now()
+    )
+    if not claimed or quiet:
+        return {"sent": 0, "skipped": "burst" if quiet else "claimed"}
+    try:
+        return {"sent": notify_resource_posted(resource)}
+    except Exception:
+        logger.exception("send_class_resource_posted failed (resource=%s).", resource_id)
+        return {"sent": 0}
+
+
+# ---------------------------------------------------------------------------
+# Recorded classes + class notes push (campus/recording_push.py)
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_recording_ready(live_id):
+    """"Class recording is ready" push to the section's students + parents.
+
+    Dispatched after commit by the LiveKit `egress_ended` handler
+    (`recordings.finish_recording`) and when a teacher un-hides a recording that was
+    never announced. CLAIMED atomically via `recording_notified_at` first, so a repeated
+    webhook / two workers can never double-send (at-most-once, like the resource push).
+    Skips quietly for a recording that is not READY or is hidden from students.
+    """
+    from .models import CampusLiveSession
+    from .recording_push import notify_recording_ready
+
+    live = (
+        CampusLiveSession.objects.filter(
+            pk=live_id,
+            recording_status=CampusLiveSession.RecordingStatus.READY,
+            recording_hidden=False,
+            recording_notified_at__isnull=True,
+        )
+        .select_related("section__school_class", "subject", "teacher__user")
+        .first()
+    )
+    if live is None:
+        return {"sent": 0}
+    claimed = CampusLiveSession.objects.filter(pk=live.pk, recording_notified_at__isnull=True).update(
+        recording_notified_at=timezone.now()
+    )
+    if not claimed:
+        return {"sent": 0, "skipped": "claimed"}
+    try:
+        return {"sent": notify_recording_ready(live)}
+    except Exception:
+        logger.exception("send_recording_ready failed (live session=%s).", live_id)
+        return {"sent": 0}
+
+
+@shared_task
+def send_class_note_posted(note_id):
+    """"New note" push to the section's students + parents.
+
+    Dispatched after commit by `ClassNoteViewSet` (on create when published, and when a
+    draft is published later). Claimed via `notified_at`; stays silent (but still
+    claims) when the same poster is bursting notes into one subject.
+    """
+    from .models import ClassNote
+    from .recording_push import is_note_burst, notify_note_posted
+
+    note = (
+        ClassNote.objects.filter(pk=note_id, is_active=True, is_published=True, notified_at__isnull=True)
+        .select_related("subject", "posted_by")
+        .first()
+    )
+    if note is None:
+        return {"sent": 0}
+    quiet = is_note_burst(note)  # must run before our own claim is stamped
+    claimed = ClassNote.objects.filter(pk=note.pk, notified_at__isnull=True).update(notified_at=timezone.now())
+    if not claimed or quiet:
+        return {"sent": 0, "skipped": "burst" if quiet else "claimed"}
+    try:
+        return {"sent": notify_note_posted(note)}
+    except Exception:
+        logger.exception("send_class_note_posted failed (note=%s).", note_id)
+        return {"sent": 0}
+
+
+# ---------------------------------------------------------------------------
+# Results publish push
+# ---------------------------------------------------------------------------
+
+@shared_task
+def send_results_published(entry_ids):
+    """One push per student for the just-published ResultEntry ids.
+
+    Dispatched after commit by `ResultEntryViewSet` (publish / bulk / import).
+    Draft or since-unpublished rows are skipped inside the notifier.
+    """
+    from .results_push import notify_results_published
+
+    try:
+        return {"students": notify_results_published(entry_ids)}
+    except Exception:
+        logger.exception("send_results_published failed.")
+        return {"students": 0}
+
+
+# ---------------------------------------------------------------------------
+# Parents se baat — PTM scheduling + teacher<->parent chat
+# (rules: campus.ptm / campus.parent_chat; notifications: campus.ptm_push /
+#  campus.parent_chat_push)
+# ---------------------------------------------------------------------------
+
+_PTM_BOOKING_RELATED = ("event", "slot", "staff__user", "student", "parent")
+
+
+@shared_task
+def send_ptm_event_notifications(event_id, kind="published"):
+    """Fan a PTM event announcement out to the invited parents (and, on cancel,
+    the teachers who had opened slots).
+
+    `kind="published"` / `"cancelled"`. Dispatched by the API after commit.
+    Skips quietly when the event's state no longer matches (published-then-
+    cancelled inside the queue delay must not announce a meeting that is off).
+    """
+    from .models import PTMEvent
+    from .ptm_push import notify_event_cancelled, notify_event_published
+
+    event = PTMEvent.objects.filter(pk=event_id).first()
+    if event is None:
+        return {"sent": 0}
+    try:
+        if kind == "published" and event.status in (PTMEvent.Status.PUBLISHED, PTMEvent.Status.CLOSED):
+            return {"sent": notify_event_published(event)}
+        if kind == "cancelled" and event.status == PTMEvent.Status.CANCELLED:
+            return {"sent": notify_event_cancelled(event)}
+    except Exception:
+        logger.exception("send_ptm_event_notifications failed (event=%s kind=%s).", event_id, kind)
+    return {"sent": 0}
+
+
+@shared_task
+def send_ptm_booking_notifications(booking_id, kind="booked", old_id=None):
+    """One booking's notification.
+
+    `booked`      -> the teacher.
+    `rescheduled` -> the other side of whoever moved it (`booking_id` = the NEW
+                     booking, `old_id` = the one it replaced).
+    `cancelled`   -> the other side of whoever cancelled.
+    `outcome`     -> the parent (only when the teacher wrote a summary for them).
+    """
+    from .models import PTMBooking
+    from .ptm_push import (
+        notify_booking_booked,
+        notify_booking_cancelled,
+        notify_booking_rescheduled,
+        notify_outcome,
+    )
+
+    booking = PTMBooking.objects.filter(pk=booking_id).select_related(*_PTM_BOOKING_RELATED).first()
+    if booking is None:
+        return {"sent": 0}
+    try:
+        if kind == "booked" and booking.status == PTMBooking.Status.BOOKED:
+            return {"sent": notify_booking_booked(booking)}
+        if kind == "rescheduled" and booking.status == PTMBooking.Status.BOOKED and old_id:
+            old = PTMBooking.objects.filter(pk=old_id).select_related(*_PTM_BOOKING_RELATED).first()
+            if old is not None:
+                return {"sent": notify_booking_rescheduled(booking, old)}
+        if kind == "cancelled" and booking.status == PTMBooking.Status.CANCELLED:
+            return {"sent": notify_booking_cancelled(booking)}
+        if kind == "outcome" and booking.status in (PTMBooking.Status.COMPLETED, PTMBooking.Status.NO_SHOW):
+            return {"sent": notify_outcome(booking)}
+    except Exception:
+        logger.exception("send_ptm_booking_notifications failed (booking=%s kind=%s).", booking_id, kind)
+    return {"sent": 0}
+
+
+@shared_task
+def send_ptm_reminders():
+    """"Your PTM is tomorrow / in an hour" push (beat: every 5 minutes).
+
+    * 1 h reminder  - a BOOKED meeting that starts in the next 60 minutes.
+    * 24 h reminder - a BOOKED meeting that starts within 24 h, but only when it
+      was booked at least 24 h ahead (a parent who books at 9 pm for 8 am next
+      day does not get a "tomorrow" reminder seconds later).
+    Each reminder is CLAIMED atomically (`reminder_*_sent_at`) before sending, so
+    overlapping workers / a re-run never double-send; a failed send releases
+    the claim so the next tick retries.
+    """
+    from datetime import timedelta
+
+    from . import ptm
+    from .models import PTMBooking, PTMEvent
+    from .ptm_push import notify_reminder
+
+    now = timezone.now()
+    today = timezone.localdate()
+    candidates = (
+        PTMBooking.objects.filter(
+            status=PTMBooking.Status.BOOKED,
+            event__status__in=(PTMEvent.Status.PUBLISHED, PTMEvent.Status.CLOSED),
+            event__date__gte=today,
+            event__date__lte=today + timedelta(days=1),
+        )
+        .select_related(*_PTM_BOOKING_RELATED)
+    )
+    sent = 0
+    for booking in candidates:
+        remaining = ptm.booking_start(booking) - now
+        if remaining <= timedelta(0):
+            continue
+        for hours, field, due in (
+            (1, "reminder_1h_sent_at", remaining <= timedelta(hours=1)),
+            (
+                24,
+                "reminder_24h_sent_at",
+                remaining <= timedelta(hours=24)
+                and remaining > timedelta(hours=1)
+                and booking.created_at <= ptm.booking_start(booking) - timedelta(hours=24),
+            ),
+        ):
+            if not due or getattr(booking, field) is not None:
+                continue
+            claimed = PTMBooking.objects.filter(
+                pk=booking.pk, status=PTMBooking.Status.BOOKED, **{f"{field}__isnull": True}
+            ).update(**{field: now})
+            if not claimed:
+                continue
+            try:
+                notify_reminder(booking, hours)
+                sent += 1
+            except Exception:
+                logger.exception("send_ptm_reminders failed (booking=%s hours=%s).", booking.pk, hours)
+                PTMBooking.objects.filter(pk=booking.pk).update(**{field: None})
+    return {"reminded": sent}
+
+
+@shared_task
+def send_parent_chat_notification(message_id):
+    """Tell the other side of a thread about one new message (see
+    `campus.parent_chat_push.notify_parent_message`). Dispatched after commit."""
+    from .models import ParentChatMessage
+    from .parent_chat_push import notify_parent_message
+
+    message = (
+        ParentChatMessage.objects.filter(pk=message_id)
+        .select_related("thread__parent", "thread__teacher__user", "thread__student")
+        .first()
+    )
+    if message is None:
+        return {"sent": 0}
+    try:
+        return {"sent": notify_parent_message(message)}
+    except Exception:
+        logger.exception("send_parent_chat_notification failed (message=%s).", message_id)
+        return {"sent": 0}
+
+
+@shared_task
+def send_parent_chat_flag_notification(thread_id):
+    """A chat was reported -> tell the campus admin/principal (no message text)."""
+    from .models import ParentChatThread
+    from .parent_chat_push import notify_thread_flagged
+
+    thread = ParentChatThread.objects.filter(pk=thread_id, flagged_at__isnull=False).first()
+    if thread is None:
+        return {"sent": 0}
+    try:
+        return {"sent": notify_thread_flagged(thread)}
+    except Exception:
+        logger.exception("send_parent_chat_flag_notification failed (thread=%s).", thread_id)
+        return {"sent": 0}
+
+
+# beat runs every 10 minutes (settings.CELERY_BEAT_SCHEDULE) - keep in sync
+PARENT_CHAT_DIGEST_TICK_MINUTES = 10
+
+
+@shared_task
+def send_parent_chat_morning_digest():
+    """ONE push per teacher for parent messages that arrived after hours (beat:
+    every 10 minutes).
+
+    Runs for a campus only on the tick in which its chat window OPENS (its
+    `chat_start_time` falls inside the last tick), so a teacher is buzzed once
+    a morning, not every 10 minutes. A campus whose window is "always open"
+    (start == end) never has after-hours messages, so it is skipped.
+    """
+    from . import parent_comms as pc
+    from .models import ParentTeacherSettings
+    from .parent_chat_push import notify_morning_digest
+
+    now = pc.local_now()
+    now_min = now.hour * 60 + now.minute
+    told = 0
+    for s in ParentTeacherSettings.objects.filter(chat_enabled=True).only(
+        "campus_id", "chat_start_time", "chat_end_time"
+    ):
+        if s.chat_start_time == s.chat_end_time:
+            continue
+        since_open = (now_min - (s.chat_start_time.hour * 60 + s.chat_start_time.minute)) % (24 * 60)
+        if since_open >= PARENT_CHAT_DIGEST_TICK_MINUTES:
+            continue
+        try:
+            told += notify_morning_digest(s.campus_id)
+        except Exception:
+            logger.exception("send_parent_chat_morning_digest failed (campus=%s).", s.campus_id)
+    return {"teachers": told}
+
+
+# ---------------------------------------------------------------------------
+# Live class — auto-end silent sessions + attendance catch-up
+# ---------------------------------------------------------------------------
+
+@shared_task
+def sweep_live_sessions():
+    """
+    Beat job, runs EVERY MINUTE (see CELERY_BEAT_SCHEDULE). Thin wrapper over
+    `campus.live_class.sweep_live_sessions`:
+
+      * a LIVE session whose teacher heartbeat went silent for
+        CAMPUS_LIVE_STALE_MINUTES (5) is auto-ended at the last heartbeat;
+      * any live session older than CAMPUS_LIVE_MAX_HOURS (6) is force-ended;
+      * ended sessions whose automatic attendance never got built (a crash
+        between "ended" and "built") are rebuilt — idempotent, never touches
+        a row a teacher edited.
+    """
+    from .live_class import sweep_live_sessions as _sweep
+
+    return _sweep()
+
+
+@shared_task
+def build_live_session_attendance(session_id):
+    """Build (or refresh) the automatic attendance of one ended live session.
+    Idempotent; kept as a task so it can be re-queued by hand or from the shell."""
+    from .live_class import build_attendance
+
+    return build_attendance(session_id)
+
+
+# ---------------------------------------------------------------------------
+# SAFETY — scheduled backups + overdue data-deletion warnings
+# (see campus/backup.py and campus/data_deletion.py; beat entries in settings.py)
+# ---------------------------------------------------------------------------
+@shared_task
+def run_scheduled_campus_backups():
+    """
+    Nightly: every campus with no READY scheduled backup in the last `CAMPUS_BACKUP_SCHEDULE_DAYS` (7) gets a
+    setup + records backup, then old / surplus backups of that campus are pruned. One campus failing never stops
+    the others (the failed attempt stays visible as a FAILED row).
+    """
+    from . import backup as backup_svc
+    from . import safety_rules as safety_rules
+
+    made = failed = removed = 0
+    for campus in backup_svc.campuses_due_for_backup():
+        try:
+            backup_svc.create_backup(
+                campus, groups=list(safety_rules.BACKUP_GROUPS), kind=safety_rules.KIND_SCHEDULED, note="Scheduled")
+            made += 1
+        except backup_svc.BackupError as exc:
+            failed += 1
+            logger.warning("scheduled campus backup failed (campus=%s): %s", campus.pk, exc.code)
+        except Exception:  # pragma: no cover - never let one campus stop the loop
+            failed += 1
+            logger.exception("scheduled campus backup crashed (campus=%s)", campus.pk)
+        try:
+            removed += backup_svc.prune_backups(campus)
+        except Exception:  # pragma: no cover
+            logger.exception("campus backup prune failed (campus=%s)", campus.pk)
+    return {"made": made, "failed": failed, "pruned": removed}
+
+
+@shared_task
+def warn_overdue_deletion_requests():
+    """
+    Daily: tell the campus admins about a data-deletion request that passed its due date. Sent on the first
+    overdue day and then once a week, so it nags without spamming.
+    """
+    from . import data_deletion as deletion_svc
+
+    now = timezone.now()
+    sent = 0
+    for req in deletion_svc.overdue_open_requests(now).select_related("requester"):
+        days_late = (now - req.due_at).days
+        if days_late % 7 != 0:
+            continue
+        try:
+            deletion_svc.notify_overdue(req)
+            sent += 1
+        except Exception:  # pragma: no cover - a notification failure must not stop the loop
+            logger.exception("overdue deletion warning failed (request=%s)", req.pk)
+    return {"warned": sent}

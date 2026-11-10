@@ -1,0 +1,45 @@
+# LiveKit server config (calls, study rooms, live classes). C4.
+# Run via deploy/livekit/docker-compose.yml. Replace every <PLACEHOLDER>.
+# Docs: https://docs.livekit.io/home/self-hosting/deployment/
+
+port: 7880                      # signalling (HTTP/WS) — put a TLS reverse proxy (Caddy) in front: wss://<LIVEKIT_DOMAIN>
+log_level: info
+
+rtc:
+  tcp_port: 7881                # ICE/TCP fallback (open in firewall)
+  port_range_start: 50000       # ICE/UDP media range (open in firewall: UDP 50000-60000)
+  port_range_end: 60000
+  use_external_ip: true         # server public IP auto-detect (STUN) — needed on cloud VMs behind NAT
+
+redis:
+  address: <REDIS_HOST>:6379    # needed for egress + multi-node; same Redis family as Django is fine (use a different DB number)
+  db: 1
+
+keys:
+  <LIVEKIT_API_KEY>: <LIVEKIT_API_SECRET>    # SAME values as LIVEKIT_API_KEY / LIVEKIT_API_SECRET in Django .env
+
+room:
+  auto_create: true
+  empty_timeout: 300            # 5 min after last participant leaves -> room_finished webhook (C2 cleans the call)
+  departure_timeout: 20         # participant considered gone 20s after connection loss (matches C3 client grace)
+  max_participants: 0           # 0 = unlimited here; enforce per-feature caps in Django (S4)
+
+# TURN relay — restrictive NAT / college & corporate WiFi / some mobile carriers cannot do direct UDP.
+# WITHOUT TURN a slice of users will see "Connecting..." forever. Keep this ON in production.
+turn:
+  enabled: true
+  domain: <TURN_DOMAIN>         # e.g. turn.learnscroll.app  (DNS A record -> this server)
+  tls_port: 5349                # TURN over TLS (needs cert below)
+  udp_port: 3478
+  cert_file: /certs/fullchain.pem
+  key_file: /certs/privkey.pem
+  relay_range_start: 30000      # open UDP 30000-40000 in firewall
+  relay_range_end: 40000
+  # If a firewall blocks 5349, terminate TLS on 443 at a load balancer and use:  external_tls: true  (and drop cert_file/key_file)
+
+webhook:
+  api_key: <LIVEKIT_API_KEY>
+  urls:
+    - https://<API_HOST>/message/livekit/webhook/        # C2 — message calls
+    # tuitionclass webhook (live classes) — keep if you use it:
+    # - https://<API_HOST>/tuitionclass/livekit-webhook/

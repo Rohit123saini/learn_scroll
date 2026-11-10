@@ -1,0 +1,48 @@
+# H18: study digest - NotifType.CONTENT_DIGEST + NotificationPreference.content_digest_* fields.
+
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ('core', '0025_funnel_cold_start_events'),
+    ]
+
+    operations = [
+        migrations.AlterField(
+            model_name='notification',
+            name='notif_type',
+            field=models.CharField(choices=[('join_request_received', 'Join Request Received'), ('join_request_accepted', 'Join Request Accepted'), ('join_request_rejected', 'Join Request Rejected'), ('pass_refunded', 'Pass Refunded'), ('session_reminder', 'Session Reminder'), ('assigments_graded', 'assigments Graded'), ('query_answered', 'Doubt Answered'), ('certificate_issued', 'Certificate Issued'), ('waitlist_promoted', 'Waitlist Promoted'), ('classroom_flagged', 'Classroom Flagged'), ('notice_posted', 'Notice Posted'), ('session_live', 'Class Started'), ('session_cancelled', 'Session Cancelled'), ('assigments_posted', 'New assigments'), ('submission_received', 'New Submission'), ('staff_added', 'Added As Staff'), ('review_posted', 'New Review'), ('report_reviewed', 'Report Reviewed'), ('withdrawal_approved', 'Withdrawal Approved'), ('withdrawal_rejected', 'Withdrawal Rejected'), ('withdrawal_paid', 'Withdrawal Paid'), ('classroom_shared', 'Classroom Shared With You'), ('pass_gift_received', 'Pass Gift Received'), ('pass_gift_claimed', 'Pass Gift Claimed'), ('pass_auto_renewed', 'Pass Auto-Renewed'), ('auto_renew_failed', 'Auto-Renewal Failed'), ('pass_gift_expired', 'Gift Expired & Refunded'), ('generic', 'Generic'), ('copyright_notice', 'Copyright complaint about your content'), ('copyright_decision', 'Copyright decision'), ('copyright_standing', 'Copyright standing changed'), ('copyright_staff', 'Copyright staff alert'), ('chat_message', 'New Message'), ('mention', 'You Were Mentioned'), ('incoming_call', 'Incoming Call'), ('parent_device_pending', 'Parent Device Pending Approval'), ('post_liked', 'Post Liked'), ('post_commented', 'Post Commented'), ('campus_session_scheduled', 'Campus Session Scheduled'), ('campus_session_live', 'Campus Session Live'), ('low_attendance_alert', 'Low Attendance Alert'), ('assigments_posted_campus', 'New Campus assigments'), ('assigments_due_reminder', 'assigments Due Reminder'), ('result_published', 'Result Published'), ('fee_due_reminder', 'Fee Due Reminder'), ('staff_assigments_approved', 'Staff assigments Approved'), ('staff_assigments_rejected', 'Staff assigments Rejected'), ('testseries_posted', 'New Test Series'), ('testseries_checked', 'Test Series Checked'), ('testseries_payout_released', 'Test Series Payout Released'), ('assigments_due_soon', 'assigments Due Soon'), ('campus_reward_earned', 'Campus Reward Earned'), ('campus_class_starting', 'Class Starting Soon'), ('campus_doubt_posted', 'New Class Doubt'), ('campus_doubt_replied', 'Class Doubt Reply'), ('testseries_review_received', 'New Test Series Review'), ('testseries_query_received', 'New Test Series Query'), ('testseries_query_answered', 'Test Series Query Answered'), ('follow_request_received', 'Follow Request Received'), ('follow_request_accepted', 'Follow Request Accepted'), ('new_post_from_followed', 'New Post From Someone You Follow'), ('classroom_created_by_followed', 'New Classroom From Someone You Follow'), ('testseries_created_by_followed', 'New Test Series From Someone You Follow'), ('streak_milestone_reached', 'Streak Milestone Reached'), ('streak_at_risk', 'Streak At Risk'), ('weekly_recap_ready', 'Your Week Is Ready'), ('fee_overdue_reminder', 'Fee Overdue'), ('story_mention', 'Story Mention'), ('post_tag', 'Tagged In Post'), ('story_reaction', 'Story Reaction'), ('post_reposted', 'Post Reposted'), ('support_reply', 'Support Reply'), ('doubt_answered', 'Doubt Answered (Doubt Queue)'), ('referral_reward', 'Referral Reward'), ('campus_student_absent', 'Student Absent'), ('homework_diary_posted', 'Homework Diary'), ('homework_diary_due', 'Homework Due'), ('campus_substitute_assigned', 'Substitute Duty'), ('campus_class_substituted', 'Class Substitute'), ('campus_substitute_cancelled', 'Substitute Duty Cancelled'), ('campus_leave_requested', 'Leave Requested'), ('campus_leave_decided', 'Leave Decision'), ('campus_ptm_scheduled', 'PTM Scheduled'), ('campus_ptm_booked', 'PTM Booking'), ('campus_ptm_cancelled', 'PTM Cancelled'), ('campus_ptm_reminder', 'PTM Reminder'), ('campus_parent_message', 'Parent-Teacher Message'), ('campus_resource_posted', 'New Class Resource'), ('campus_recording_ready', 'Class Recording Ready'), ('campus_note_posted', 'New Class Note'), ('campus_fee_paid', 'Fee Payment Received'), ('campus_emergency', 'Emergency Alert'), ('campus_safety', 'Privacy & Data Update'), ('campus_admission', 'Admission Update'), ('parent_message_received', 'Parent Message Received'), ('parent_message_replied', 'Parent Message Replied'), ('report_outcome', 'Report Outcome'), ('creator_feedback', 'Creator Feedback'), ('content_digest', 'Study Digest')], db_index=True, default='generic', max_length=30),
+        ),
+        migrations.AddField(
+            model_name='notificationpreference',
+            name='content_digest_frequency',
+            field=models.CharField(choices=[('off', 'Off'), ('daily', 'Daily'), ('weekly', 'Weekly')], default='weekly', max_length=10),
+        ),
+        migrations.AddField(
+            model_name='notificationpreference',
+            name='content_digest_hour',
+            field=models.PositiveSmallIntegerField(default=18, help_text='Local hour 0-23 to send at.'),
+        ),
+        migrations.AddField(
+            model_name='notificationpreference',
+            name='content_digest_notes',
+            field=models.BooleanField(default=True, help_text="Include 'N new notes in <subject>'."),
+        ),
+        migrations.AddField(
+            model_name='notificationpreference',
+            name='content_digest_topics',
+            field=models.BooleanField(default=True, help_text="Include 'N new posts in <followed topic>'."),
+        ),
+        migrations.AddField(
+            model_name='notificationpreference',
+            name='last_content_digest_at',
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.AddField(
+            model_name='notificationpreference',
+            name='content_digest_checked_on',
+            field=models.DateField(blank=True, null=True),
+        ),
+    ]

@@ -322,6 +322,11 @@ class Classroom(models.Model):
     # egress_ended handler (views.py), which checks this flag before
     # queueing transcribe_recording.delay().
     captions_enabled = models.BooleanField(default=False)
+    # X12 (auto-recording): opt-in. When True (and `recording_enabled` is on) the LiveKit `room_started` /
+    # `participant_joined` webhook starts the egress recording by itself the moment the HOST is in the room
+    # (see recording_auto.py). Default False - nothing is ever recorded behind the teacher's back; the live
+    # room already shows the REC badge to everyone when it starts (socket `recording.started`).
+    recording_auto = models.BooleanField(default=False)
 
     max_participants = models.PositiveIntegerField(
         default=100, validators=[MinValueValidator(1)]
@@ -470,6 +475,13 @@ class Classroom(models.Model):
     is_deleted = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)
     is_flagged = models.BooleanField(default=False)
+
+    # X12 L-C (standalone "Go Live"): the hidden "personal classroom" every creator gets the first time they go live
+    # from the "+" hub without a class. It is a normal Classroom row (so every live-room feature - LiveKit, chat,
+    # polls, recording, moderation, passes - is reused, nothing is copied), but it never shows in Explore / "my
+    # classes" lists (see ClassroomViewSet.get_queryset) and has no chat group. One per teacher
+    # (tuitionclass/standalone_live.py::personal_classroom_for).
+    is_personal = models.BooleanField(default=False, db_index=True)
 
     # ---------------------------------------------------------------------
     # 🔧 GAP FIX (Gap 2 prerequisite) — `core/classroom_chat_bridge.py`
@@ -938,6 +950,21 @@ class ClassSession(models.Model):
     # filled in once the file finishes uploading. Blank = not currently
     # recording.
     egress_id = models.CharField(max_length=64, blank=True)
+    # X12: the egress that produced / is producing `recording_url`. `egress_id` above is CLEARED the moment a teacher presses
+    # Stop (so the REC badge goes off), which left the `egress_ended` webhook with nothing to match - the file's link and
+    # length never reached the session after a manual stop. This one is never cleared; the webhook matches on either.
+    last_egress_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # X12: when the CURRENT recording began (stamped by start-recording / the auto-start / the LiveKit
+    # `egress_started` webhook). Every SessionChapter offset, replay-chat offset and the "peak viewers at" time are
+    # measured from here, so they line up with the video's own timeline. Null = no recording was ever started.
+    recording_started_at = models.DateTimeField(null=True, blank=True)
+    # X12: stamped the first time the auto-start tried (success or not) so a webhook retry / every later
+    # `participant_joined` can never start a second egress, and a teacher who stopped the recording by hand
+    # is not recorded again behind their back.
+    auto_record_attempted_at = models.DateTimeField(null=True, blank=True)
+    # X12: length of the finished file in seconds (from the egress_ended webhook; 0/null = unknown -> the save screen
+    # falls back to actual_end - recording_started_at). Used to bound the trim range of "Save as lecture/reel/post".
+    recording_duration_seconds = models.PositiveIntegerField(null=True, blank=True)
 
     # NOTE (fix — whiteboard/spotlight persistence): whiteboard_snapshot
     # already existed on this model but nothing ever read/wrote it — the
@@ -990,11 +1017,82 @@ class ClassSession(models.Model):
     # See ClassSession.compute_engagement_report() below for the shape.
     engagement_report = models.JSONField(null=True, blank=True)
 
+    # LV1 (Live in story tray) — presence + notify guard.
+    # `live_heartbeat_at`: stamped when the session goes LIVE, on every host
+    # /join/ + /token/, and by the host's app every ~20s via
+    # ClassSessionViewSet.heartbeat(). A LIVE session whose heartbeat is older
+    # than LIVE_HEARTBEAT_TTL_SECONDS (tuitionclass/live_presence.py) is
+    # treated as NOT live by the story tray / live-now row, so a crashed host
+    # app can't leave a ghost "LIVE" ring behind. NULL = never heartbeated.
+    live_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    # `live_notified_at`: set atomically by notify_session_live — the guard
+    # that makes "X is live" go out ONCE per session, however many times the
+    # host re-joins / the task is retried.
+    live_notified_at = models.DateTimeField(null=True, blank=True)
+
+    # LIVE-ROOM TOOLS (slow mode): minimum gap in seconds between two chat messages from the same
+    # NON-moderator participant. 0 = off. Set only through ClassSessionViewSet.slow_mode (moderator
+    # gate) and enforced in ChatMessageViewSet.perform_create (views/live_chat.py).
+    chat_slow_mode_seconds = models.PositiveSmallIntegerField(default=0)
+
+    # X12 SAFETY (live profanity filter): how this session's chat treats a message that trips the word filter.
+    #   "" = use settings.LIVE_CHAT_FILTER_DEFAULT ("mask"), "off" = never touch, "flag" = post as-is but queue for review
+    #   (the old behaviour), "mask" = swear words become ****, "block" = message refused. Set only through
+    #   live_moderation_views.SessionChatFilterView (host tier).
+    class ChatFilterMode(models.TextChoices):
+        DEFAULT = "", "Default"
+        OFF = "off", "Off"
+        FLAG = "flag", "Flag only"
+        MASK = "mask", "Mask bad words"
+        BLOCK = "block", "Block message"
+
+    chat_filter_mode = models.CharField(max_length=8, choices=ChatFilterMode.choices, default="", blank=True)
+
+    # LIVE-ROOM TOOLS (stage-only / listener mode): when True a plain student's LiveKit token has
+    # can_publish=False - only the host tier and guests who are ON STAGE can send mic/camera.
+    # Default False = old behaviour (every student can publish). Set only through
+    # ClassSessionViewSet.stage_only; guest accept/remove flips the live permission of that guest.
+    stage_only = models.BooleanField(default=False)
+
+    # LIVE-ROOM TOOLS (present PDF/slides): the material the host is showing the whole room right
+    # now (None = nothing presented), the page everyone should be on, and the page count the host's
+    # device measured when it started presenting. Written only through ClassSessionViewSet.present /
+    # present_page / present_stop (moderator gate) so a late joiner can read them off the session GET.
+    presented_material = models.ForeignKey(
+        "tuitionclass.ClassMaterial", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    presented_page = models.PositiveIntegerField(default=1)
+    presented_page_count = models.PositiveIntegerField(default=0)
+
+    # X12 L-C (standalone "Go Live" - tuitionclass/standalone_live.py). A normal ClassSession of the host's hidden
+    # personal classroom, plus what the go-live sheet asked for. `live_standalone=False` = an ordinary class session
+    # (every field below stays at its default and nothing reads it).
+    class LiveAudience(models.TextChoices):
+        CLASS = "class", "Class members only"
+        FOLLOWERS = "followers", "Followers"
+        PUBLIC = "public", "Public"
+        PASS = "pass", "Pass holders"
+
+    live_standalone = models.BooleanField(default=False, db_index=True)
+    # True = "Go live now" (created the moment the host opened the green room). Such a row that was never started is
+    # not an announcement: it stays out of the upcoming feed and is swept when the host starts the next one.
+    live_go_now = models.BooleanField(default=False)
+    live_audience = models.CharField(max_length=10, choices=LiveAudience.choices, default="class")
+    live_title = models.CharField(max_length=150, blank=True, default="")
+    live_topic = models.CharField(max_length=120, blank=True, default="")  # subject / topic line under the title
+    live_thumbnail = models.ImageField(upload_to="live_thumbnails/", null=True, blank=True)
+    live_timezone = models.CharField(max_length=50, default="Asia/Kolkata")  # the host's zone, for display only
+    # Set once by standalone_live.send_due_reminders (conditional UPDATE) -> "starts in N minutes" goes out once.
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["scheduled_start"]
-        indexes = [models.Index(fields=["classroom", "status", "scheduled_start"])]
+        indexes = [
+            models.Index(fields=["classroom", "status", "scheduled_start"]),
+            models.Index(fields=["status", "live_heartbeat_at"], name="cs_live_hb_idx"),
+        ]
 
     def __str__(self):
         return f"{self.classroom.title} @ {self.scheduled_start:%d-%b-%Y %H:%M}"
@@ -1069,6 +1167,148 @@ class ClassSession(models.Model):
             "hands_raised_count": hands_raised,
             "computed_at": timezone.now().isoformat(),
         }
+
+
+# ---------------------------------------------------------------------------
+# X12 L-C - "Remind me" on a scheduled standalone live (see standalone_live.py).
+# ---------------------------------------------------------------------------
+class LiveReminderSub(models.Model):
+    """One person asked to be reminded about one scheduled live. They get the "starts in N minutes" push (N9 quiet
+    hours respected) and the "is live now" push even when they do not follow the host."""
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="live_reminder_subs")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="live_reminder_subs")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["session", "user"], name="uniq_live_reminder_session_user")]
+        indexes = [models.Index(fields=["user", "-created_at"], name="tc_livereminder_user_idx")]
+
+    def __str__(self):  # pragma: no cover
+        return f"LiveReminderSub(session={self.session_id}, user={self.user_id})"
+
+
+# ---------------------------------------------------------------------------
+# X12 - AUTO RECORDING: chapters, replay watch tracking, notes on a recording, "Save as lecture / reel / post".
+# All of it hangs off ClassSession (one recording per session - recording_url); nothing here changes how a session
+# is joined, recorded or ended. See recording_auto.py / recording_tools.py / recording_save.py / recording_views.py.
+# ---------------------------------------------------------------------------
+class SessionChapter(models.Model):
+    """A marker on the recording timeline ("Class started", "Presenting: Chapter 3.pdf", "Poll: ..."). Created by the
+    server the moment a teacher presents a material / fires a poll WHILE a recording runs (recording_tools.add_chapter),
+    or by hand. `offset_seconds` is measured from ClassSession.recording_started_at, i.e. from the start of the video."""
+
+    class Kind(models.TextChoices):
+        START = "start", "Class started"
+        PRESENT = "present", "Presentation"
+        POLL = "poll", "Poll"
+        QUIZ = "quiz", "Quiz"
+        MANUAL = "manual", "Added by teacher"
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="chapters")
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.MANUAL)
+    title = models.CharField(max_length=120)
+    offset_seconds = models.PositiveIntegerField(default=0)
+    # What the marker points at ("material" / "poll") - opaque, never a hard FK, so deleting a poll keeps its marker.
+    ref_type = models.CharField(max_length=12, blank=True, default="")
+    ref_id = models.PositiveIntegerField(null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["offset_seconds", "id"]
+        indexes = [models.Index(fields=["session", "offset_seconds"], name="tc_chapter_sess_off_idx")]
+
+    def __str__(self):
+        return f"{self.offset_seconds}s {self.title} (session {self.session_id})"
+
+
+class RecordingWatch(models.Model):
+    """One row per (session, viewer): how much of the RECORDING this person has watched. Written by the replay screen's
+    ping (recording_views.RecordingWatchView). Feeds the viewer list and the insights' watch time / completion."""
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="recording_watches")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="recording_watches")
+    position_seconds = models.PositiveIntegerField(default=0)      # where they are / stopped (resume)
+    watched_seconds = models.PositiveIntegerField(default=0)       # total seconds actually played (server-clamped sum)
+    duration_seconds = models.PositiveIntegerField(null=True, blank=True)
+    completed = models.BooleanField(default=False)
+    first_watched_at = models.DateTimeField(auto_now_add=True)
+    last_watched_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        unique_together = (("session", "user"),)
+        indexes = [models.Index(fields=["session", "-last_watched_at"], name="tc_recwatch_sess_last_idx")]
+
+    def __str__(self):
+        return f"{self.user_id} watched {self.watched_seconds}s of session {self.session_id}"
+
+
+class RecordingNote(models.Model):
+    """A class material (notes PDF / slides / link) the teacher attached to a session's recording. Shown under the
+    replay player (optionally at a timestamp). Visible to exactly those who can open the recording."""
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="recording_notes")
+    material = models.ForeignKey("ClassMaterial", on_delete=models.CASCADE, related_name="recording_notes")
+    at_seconds = models.PositiveIntegerField(null=True, blank=True)   # null = whole recording
+    attached_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = (("session", "material"),)
+        ordering = ["at_seconds", "id"]
+
+    def __str__(self):
+        return f"note {self.material_id} on recording of session {self.session_id}"
+
+
+class RecordingSave(models.Model):
+    """"Save as lecture / reel / post": a trimmed copy of the recording (ffmpeg, recording_save.py) published as a post.
+    The row is the JOB (pending -> processing -> ready | failed) the Flutter save screen polls; `post_id` is the result.
+    visibility defaults to class_only so a paid class never becomes public by accident."""
+
+    class Kind(models.TextChoices):
+        LECTURE = "lecture", "Lecture"
+        REEL = "reel", "Reel"
+        POST = "post", "Post"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Queued"
+        PROCESSING = "processing", "Processing"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+
+    class Visibility(models.TextChoices):
+        CLASS_ONLY = "class_only", "This class only"
+        FOLLOWERS = "followers", "Followers"
+        PUBLIC = "public", "Public"
+
+    MAX_REEL_SECONDS = 120
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="recording_saves")
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="recording_saves")
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
+    title = models.CharField(max_length=150)
+    description = models.TextField(blank=True, default="")
+    start_seconds = models.PositiveIntegerField(default=0)
+    end_seconds = models.PositiveIntegerField()
+    visibility = models.CharField(max_length=12, choices=Visibility.choices, default=Visibility.CLASS_ONLY)
+    include_chapters = models.BooleanField(default=True)
+    # Lecture only: add the new post to this VideoSeries (opaque uuid string; ownership checked on create).
+    series_id = models.CharField(max_length=40, blank=True, default="")
+    # Result: the Post's uuid (opaque - tuitionclass never hard-links the post app).
+    post_id = models.CharField(max_length=40, blank=True, default="")
+    error = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["session", "-created_at"], name="tc_recsave_sess_idx")]
+
+    def __str__(self):
+        return f"{self.kind} save of session {self.session_id} ({self.status})"
 
 
 # ---------------------------------------------------------------------------
@@ -1943,6 +2183,29 @@ class SessionParticipant(models.Model):
     # ordering for the queue.
     hand_raised_at = models.DateTimeField(null=True, blank=True)
 
+    # LIVE GUEST / STAGE: "" = ordinary participant, "invited" = host sent an invite the person has
+    # not answered yet, "on_stage" = accepted and currently a guest. Set only through the
+    # guest/* actions on ClassSessionViewSet. It is a room state (badge, spotlight, ordering) - the
+    # LiveKit token grants are NOT changed by it (every student can already publish).
+    class GuestState(models.TextChoices):
+        NONE = "", "None"
+        INVITED = "invited", "Invited"
+        ON_STAGE = "on_stage", "On stage"
+
+    guest_state = models.CharField(max_length=10, choices=GuestState.choices, default="", blank=True)
+    guest_at = models.DateTimeField(null=True, blank=True)
+    # A guest who is ON STAGE can be made a session co-host by a real moderator (ClassSessionViewSet.guest_cohost):
+    # chat delete/pin/unpin, mute, lower hand, slow-mode exempt - see views/access.py::_can_cohost_moderate.
+    # NOT end session / kick / record / invite / breakouts. Cleared when the guest leaves the stage.
+    guest_cohost = models.BooleanField(default=False)
+
+    # X12 SAFETY: the participant saw the "this class is being recorded" notice (POST sessions/<id>/recording-notice/ack/).
+    # Stamped once; a rejoin keeps it. A MINOR who has not acknowledged cannot publish mic/camera while a recording runs
+    # (live_safety.recording_blocks_publish).
+    recording_notice_ack_at = models.DateTimeField(null=True, blank=True)
+    # X12 SAFETY: a moderator took this person's CHAT voice away until this time (they can still watch and hear).
+    # Checked in ChatMessageViewSet.perform_create. Auto-set by the strike rule in live_abuse.py as well.
+    chat_muted_until = models.DateTimeField(null=True, blank=True)
     # FEATURE: breakout rooms. Null = currently in the main room (either no
     # breakout is running at all, or this participant hasn't been assigned
     # to a sub-room yet). Set/cleared by
@@ -1959,6 +2222,58 @@ class SessionParticipant(models.Model):
 
     def __str__(self):
         return f"{self.user} in {self.session} ({self.role})"
+
+
+# ---------------------------------------------------------------------------
+# X12 SAFETY — LIVE MODERATION LOG. Append-only trail of everything safety-related that happens in ONE live session:
+# a report filed from the room, a warning, a chat mute, a kick, a classroom ban, a word-filter block, an automatic
+# strike mute, a minor-safety guard, the recording notice. It is the classroom moderators' queue (kind=report) AND the
+# audit trail (who did what to whom, when). Platform-wide reports stay in user_profile.ContentReport - a report row
+# here only points at it (`content_report_id`, a plain integer so the two apps stay decoupled).
+# ---------------------------------------------------------------------------
+class LiveModerationEvent(models.Model):
+    class Kind(models.TextChoices):
+        REPORT = "report", "Report filed"
+        WARN = "warn", "Warning"
+        CHAT_MUTE = "chat_mute", "Chat muted"
+        CHAT_UNMUTE = "chat_unmute", "Chat unmuted"
+        KICK = "kick", "Removed from session"
+        BAN = "ban", "Banned from classroom"
+        FILTER_BLOCK = "filter_block", "Message blocked by word filter"
+        FILTER_MASK = "filter_mask", "Message masked by word filter"
+        AUTO_MUTE = "auto_mute", "Automatic chat mute (strikes)"
+        MINOR_GUARD = "minor_guard", "Minor-safety rule applied"
+        DISMISS = "dismiss", "Report dismissed"
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="moderation_events")
+    kind = models.CharField(max_length=14, choices=Kind.choices, db_index=True)
+    # Who did it: the reporter (report), the moderator (warn / mute / kick / ban / dismiss), NULL = the system.
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Who it is about. NULL for a report on the session as a whole.
+    target_user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="live_moderation_events"
+    )
+    # Short machine word (a report reason like "harassment", a filter reason like "profanity", a rule like "minor_contact").
+    reason = models.CharField(max_length=40, blank=True, default="")
+    detail = models.CharField(max_length=255, blank=True, default="")
+    chat_message_id = models.PositiveIntegerField(null=True, blank=True)
+    content_report_id = models.PositiveIntegerField(null=True, blank=True)
+    # Only meaningful for kind=report: the moderators' to-do state.
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    resolution = models.CharField(max_length=14, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["session", "-created_at"], name="tc_livemod_session_idx"),
+            models.Index(fields=["session", "kind", "resolved_at"], name="tc_livemod_queue_idx"),
+            models.Index(fields=["target_user", "kind"], name="tc_livemod_target_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} @ session {self.session_id} -> {self.target_user_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -2221,6 +2536,11 @@ class ClassMaterial(models.Model):
         validators=[MaxFileSizeValidator(100), FileExtensionValidator(DOCUMENT_MEDIA_EXTENSIONS)],
     )
     external_link = models.URLField(blank=True)
+
+    # Live-room "Present" for ppt/doc: the server converts the file to PDF once (office_convert.py) and caches it here.
+    # `presentable_source_name` is the `file.name` the cached PDF was made from, so replacing the file re-converts.
+    presentable_pdf = models.FileField(upload_to="class_materials/presentable/", null=True, blank=True)
+    presentable_source_name = models.CharField(max_length=255, blank=True, default="")
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
@@ -2534,6 +2854,13 @@ class LivePoll(models.Model):
     question = models.CharField(max_length=255)
     options = models.JSONField(default=list)  # e.g. ["Option A", "Option B", "Option C"]
 
+    # QUIZ PUSH: when `correct_option_index` is set the poll is a quiz. It is NEVER sent to students
+    # (REST or socket) until the host reveals it (`revealed_at` set by LivePollViewSet.reveal) -
+    # see LivePollSerializer.to_representation. None = an ordinary opinion poll.
+    correct_option_index = models.PositiveSmallIntegerField(null=True, blank=True)
+    explanation = models.CharField(max_length=300, blank=True, default="")
+    revealed_at = models.DateTimeField(null=True, blank=True)
+
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
@@ -2573,6 +2900,9 @@ class PollTemplate(models.Model):
 
     question = models.CharField(max_length=255)
     options = models.JSONField(default=list)
+    # Quiz template: when set, quick_create makes a QUIZ poll (same fields as LivePoll). null = plain poll.
+    correct_option_index = models.PositiveSmallIntegerField(null=True, blank=True)
+    explanation = models.CharField(max_length=300, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -3009,6 +3339,11 @@ class Referral(models.Model):
     referred = models.OneToOneField(User, on_delete=models.CASCADE, related_name="referral_used")
     bonus_amount = models.PositiveIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
+    # T2.7 — set (atomically, by a conditional UPDATE) the moment the
+    # cost-free rewards (streak freeze / badges / founding member) for this
+    # referral have been handed out, so a retried Celery task can never pay
+    # them twice. NULL = not granted yet.
+    rewards_granted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -3038,6 +3373,13 @@ class ReferralAttribution(models.Model):
         CLASSROOM = "classroom", "Classroom"
         CERTIFICATE = "certificate", "Certificate share"
 
+    # COMMISSION RULE: only a link to a specific CLASSROOM or TEST SERIES can
+    # ever earn commission. Sharing the app itself ("app") or a profile /
+    # certificate ("certificate") never pays, so such a row is recorded but
+    # ignored by every payout path (see active_for(commissionable_only=True))
+    # and is overwritten by a later classroom / test-series link.
+    COMMISSION_SOURCES = ("classroom", "testseries")
+
     referee = models.OneToOneField(User, on_delete=models.CASCADE, related_name="referral_attribution")
     referrer = models.ForeignKey(User, on_delete=models.CASCADE, related_name="referral_attributions_made")
     source_type = models.CharField(max_length=20, choices=SourceType.choices, default=SourceType.APP)
@@ -3058,10 +3400,16 @@ class ReferralAttribution(models.Model):
         return self.expires_at > timezone.now()
 
     @classmethod
-    def active_for(cls, user) -> "ReferralAttribution | None":
+    def active_for(cls, user, commissionable_only: bool = False) -> "ReferralAttribution | None":
+        """`commissionable_only=True` is what every payout path must use: it
+        ignores attributions that came from an app / profile / certificate
+        share, which never earn commission."""
         if user is None or not getattr(user, "pk", None):
             return None
-        return cls.objects.filter(referee=user, expires_at__gt=timezone.now()).select_related("referrer").first()
+        qs = cls.objects.filter(referee=user, expires_at__gt=timezone.now())
+        if commissionable_only:
+            qs = qs.filter(source_type__in=cls.COMMISSION_SOURCES)
+        return qs.select_related("referrer").first()
 
     @classmethod
     def claim(cls, *, referee, referrer, source_type=SourceType.APP, source_id=""):
@@ -3083,6 +3431,19 @@ class ReferralAttribution(models.Model):
                 if row is None:
                     return cls.objects.create(referee=referee, **defaults), True
                 if row.expires_at > now:
+                    # First touch wins - EXCEPT that a non-commissionable row
+                    # (app / profile share) must not block a real class or
+                    # test-series link that arrives later.
+                    if (
+                        row.source_type not in cls.COMMISSION_SOURCES
+                        and defaults["source_type"] in cls.COMMISSION_SOURCES
+                        and row.first_purchase_at is None
+                    ):
+                        for k, v in defaults.items():
+                            setattr(row, k, v)
+                        row.created_at = now
+                        row.save()
+                        return row, True
                     return row, False
                 # Expired -> this user is up for grabs again.
                 for k, v in defaults.items():
@@ -3674,6 +4035,10 @@ class ClassQuery(models.Model):
     )
     answered_at = models.DateTimeField(null=True, blank=True)
 
+    # LIVE Q&A QUEUE: denormalised count of ClassQueryUpvote rows (kept in step by
+    # ClassQueryViewSet.upvote) so the queue sorts without a COUNT per row.
+    upvote_count = models.PositiveIntegerField(default=0)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -3682,6 +4047,20 @@ class ClassQuery(models.Model):
 
     def __str__(self):
         return f"{self.asked_by} asked: {self.question[:40]} ({self.get_status_display()})"
+
+
+class ClassQueryUpvote(models.Model):
+    """One person's +1 on a live Q&A question (a person can't vote their own question)."""
+
+    query = models.ForeignKey(ClassQuery, on_delete=models.CASCADE, related_name="upvotes")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="query_upvotes")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("query", "user")
+
+    def __str__(self):
+        return f"{self.user} +1 on query {self.query_id}"
 
 
 # ---------------------------------------------------------------------------

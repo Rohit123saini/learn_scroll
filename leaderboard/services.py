@@ -26,7 +26,7 @@ import logging
 from datetime import datetime, timedelta
 
 from django.core.cache import cache
-from django.db.models import Count, Max, Q, Sum
+from django.db.models import Count, Exists, Max, OuterRef, Q, Sum
 from django.utils import timezone
 
 from .models import LeaderboardEntry
@@ -150,7 +150,8 @@ def compute_campus_section_scores(section_id, period_type: str, period_key: str)
         )
     }
 
-    result_qs = ResultEntry.objects.filter(enrollment_id__in=enrollment_ids)
+    # Draft marks never count — a half-entered sheet must not move the board.
+    result_qs = ResultEntry.objects.filter(enrollment_id__in=enrollment_ids, status=ResultEntry.Status.PUBLISHED)
     if period_type == LeaderboardEntry.PeriodType.WEEKLY:
         start, end = week_bounds(period_key)
         # ResultEntry has no date of its own — it's dated by its exam term.
@@ -199,7 +200,7 @@ def compute_engagement_scores(period_type: str, period_key: str):
             return qs.filter(**{f"{field}__gte": start, f"{field}__lt": end})
         return qs
 
-    base_posts = Post.objects.filter(is_deleted=False, moderation_status="approved")
+    base_posts = Post.objects.filter(is_deleted=False, is_archived=False, moderation_status="approved", is_scheduled=False)
     posts_qs = _clip(base_posts)
 
     posts_by_user = dict(
@@ -262,6 +263,46 @@ def compute_engagement_scores(period_type: str, period_key: str):
             },
         })
     return rows
+
+
+def compute_study_time_scores(scope_id, period_type: str, period_key: str):
+    """S5 — study-room time board. Score = study room me guzre MINUTES (`StudyRoomAttendance.total_seconds`,
+    LiveKit webhook se; join-only purani rows me 0 seconds hote hain, isliye board par nahi aate).
+    `scope_id` = Conversation.id (us room ke members) ya None (app-wide). Weekly: us ISO week ke `attended_date`
+    wale din. 1 minute se kam wale users board par nahi. Sirf ACTIVE conversation members (left_at null) ginte hain."""
+    from message.models import ConversationParticipant, StudyRoomAttendance
+
+    qs = StudyRoomAttendance.objects.filter(total_seconds__gt=0)
+    if scope_id is not None:
+        qs = qs.filter(conversation_id=scope_id)
+    if period_type == LeaderboardEntry.PeriodType.WEEKLY:
+        start, end = week_bounds(period_key)
+        qs = qs.filter(attended_date__gte=start.date(), attended_date__lt=end.date())
+
+    # Room chhod chuke members board se hat jaate hain.
+    active = ConversationParticipant.objects.filter(
+        conversation_id=OuterRef("conversation_id"), user_id=OuterRef("user_id"), left_at__isnull=True,
+    )
+    rows = (
+        qs.filter(Exists(active))
+        .values("user_id")
+        .annotate(total=Sum("total_seconds"), days=Count("attended_date", distinct=True), sessions=Sum("join_count"))
+    )
+    result = []
+    for row in rows:
+        total = int(row["total"] or 0)
+        if total < 60:
+            continue
+        result.append({
+            "user_id": row["user_id"],
+            "score": round(total / 60.0, 1),
+            "metadata": {
+                "minutes": total // 60,
+                "days": int(row["days"] or 0),
+                "sessions": int(row["sessions"] or 0),
+            },
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------

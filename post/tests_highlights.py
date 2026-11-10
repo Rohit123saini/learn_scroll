@@ -239,7 +239,7 @@ class HighlightListTests(APITestCase):
         self.assertEqual([r["title"] for r in res.data["results"]], ["B", "A"])
         self.assertEqual(set(res.data["results"][0]), {
             "id", "title", "cover_url", "cover_story_id", "cover_x", "cover_y", "cover_zoom",
-            "items_count", "created_at", "updated_at", "user",
+            "items_count", "position", "created_at", "updated_at", "user",  # P6: + position
         })
 
     def test_public_profile_is_visible_to_followers_and_strangers(self):
@@ -687,3 +687,81 @@ class HighlightLifecycleTests(APITestCase):
         self.me.delete()
         self.assertEqual(Highlight.objects.count(), 0)
         self.assertEqual(HighlightItem.objects.count(), 0)
+
+
+class HighlightReorderTests(APITestCase):
+    """P6 - the owner's own order of the highlights row (POST /post/highlights/reorder/). Written, NOT run."""
+
+    def setUp(self):
+        self.owner = make_user("hl_p6_owner")
+        self.other = make_user("hl_p6_other")
+        self.a = make_highlight(self.owner, [make_story(self.owner)], title="A")
+        self.b = make_highlight(self.owner, [make_story(self.owner)], title="B")
+        self.c = make_highlight(self.owner, [make_story(self.owner)], title="C")
+        self.url = reverse("highlight-reorder")
+        self.client.force_authenticate(self.owner)
+
+    def _titles(self):
+        res = self.client.get(reverse("highlight-list"))
+        return [r["title"] for r in res.data["results"]]
+
+    def test_reorder_sets_the_new_order(self):
+        res = self.client.post(self.url, {"highlight_ids": [str(self.c.id), str(self.a.id), str(self.b.id)]}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual([r["title"] for r in res.data["results"]], ["C", "A", "B"])
+        self.assertEqual([r["position"] for r in res.data["results"]], [0, 1, 2])
+        self.assertEqual(self._titles(), ["C", "A", "B"])
+
+    def test_not_listed_highlights_follow_in_their_old_order(self):
+        res = self.client.post(self.url, {"highlight_ids": [str(self.b.id)]}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        titles = [r["title"] for r in res.data["results"]]
+        self.assertEqual(titles[0], "B")
+        self.assertEqual(sorted(titles), ["A", "B", "C"])
+
+    def test_duplicates_are_ignored(self):
+        res = self.client.post(self.url, {"highlight_ids": [str(self.b.id), str(self.b.id), str(self.a.id)]}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual([r["title"] for r in res.data["results"]][:2], ["B", "A"])
+
+    def test_someone_elses_or_unknown_highlight_is_400_and_changes_nothing(self):
+        theirs = make_highlight(self.other, [make_story(self.other)], title="Theirs")
+        before = self._titles()
+        for bad in (str(theirs.id), str(uuid.uuid4())):
+            with self.subTest(bad=bad):
+                res = self.client.post(self.url, {"highlight_ids": [str(self.a.id), bad]}, format="json")
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "highlight_not_found")
+        self.assertEqual(self._titles(), before)
+
+    def test_empty_list_or_missing_field_is_400(self):
+        self.assertEqual(self.client.post(self.url, {"highlight_ids": []}, format="json").status_code, 400)
+        self.assertEqual(self.client.post(self.url, {}, format="json").status_code, 400)
+
+    def test_login_needed(self):
+        self.client.force_authenticate(None)
+        self.assertIn(self.client.post(self.url, {"highlight_ids": [str(self.a.id)]}, format="json").status_code, (401, 403))
+
+    def test_reorder_does_not_bump_updated_at(self):
+        before = Highlight.objects.get(pk=self.a.pk).updated_at
+        self.client.post(self.url, {"highlight_ids": [str(self.a.id), str(self.b.id), str(self.c.id)]}, format="json")
+        self.assertEqual(Highlight.objects.get(pk=self.a.pk).updated_at, before)
+
+    def test_a_new_highlight_goes_to_the_front_after_a_reorder(self):
+        self.client.post(self.url, {"highlight_ids": [str(self.c.id), str(self.a.id), str(self.b.id)]}, format="json")
+        story = make_story(self.owner)
+        res = self.client.post(reverse("highlight-list"), {"title": "NEW", "story_ids": [str(story.id)]}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(self._titles(), ["NEW", "C", "A", "B"])
+
+    def test_other_users_order_is_not_touched(self):
+        theirs = make_highlight(self.other, [make_story(self.other)], title="Theirs")
+        self.client.post(self.url, {"highlight_ids": [str(self.c.id), str(self.b.id), str(self.a.id)]}, format="json")
+        theirs.refresh_from_db()
+        self.assertEqual(theirs.position, 0)
+
+    def test_visitor_sees_the_owners_order(self):
+        self.client.post(self.url, {"highlight_ids": [str(self.b.id), str(self.c.id), str(self.a.id)]}, format="json")
+        self.client.force_authenticate(self.other)
+        res = self.client.get(reverse("highlight-list"), {"user_id": self.owner.id})
+        self.assertEqual([r["title"] for r in res.data["results"]], ["B", "C", "A"])

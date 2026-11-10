@@ -488,6 +488,11 @@ def _finalize_purpose(upload: ChunkedUpload, final_path: str, final_size: int, r
             raise _FinalizeError("Classroom no longer exists.", code=http_status.HTTP_404_NOT_FOUND)
         if not _can_manage_classroom(classroom, user):
             raise _FinalizeError("You no longer have permission to upload materials here.", code=http_status.HTTP_403_FORBIDDEN)
+        # Refuse an exact copy of a file removed for copyright (similar copies are held after saving).
+        from copyrights.services import precheck_upload
+        _ok, _code, _why = precheck_upload(user, paths=[final_path])
+        if not _ok:
+            raise _FinalizeError(_why, code=http_status.HTTP_403_FORBIDDEN)
         django_file = File(open(final_path, "rb"), name=file_name)
         try:
             material = ClassMaterial(

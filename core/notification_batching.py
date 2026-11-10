@@ -245,6 +245,12 @@ def _create_batched(
     if NotificationMute.is_muted(recipient_id, actor_id):
         return None
 
+    # N1 - In-app chip switched off for this type: no row, no fold.
+    from .services import in_app_allowed
+
+    if not in_app_allowed(recipient_id, notif_type):
+        return None
+
     key = _batch_cache_key(recipient_id, notif_type, target_id)
 
     batch = cache.get(key)

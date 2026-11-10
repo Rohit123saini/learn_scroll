@@ -54,6 +54,8 @@ def render_pdf(
     status: str,
     notes: str,
     paid_at: datetime,
+    transaction_id: str = "",
+    gateway_method: str = "",
 ) -> bytes:
     try:
         from reportlab.lib import colors
@@ -99,14 +101,19 @@ def render_pdf(
     pdf.drawRightString(width - 60, height - 175, f"Date: {paid_at:%d %B %Y, %I:%M %p}")
 
     # Body — label/value rows
+    mode_label = payment_mode.replace("_", " ").title()
+    if payment_mode == "online":
+        mode_label = "Online" + (f" ({gateway_method.upper() if gateway_method == 'upi' else gateway_method.title()})" if gateway_method else "")
     rows = [
         ("Student", student_name),
         ("Fee", fee_title),
         ("Invoice ID", invoice_id),
         ("Paid By", f"{_display_name(paid_by)} ({payer_role.title()})" if paid_by else payer_role.title()),
-        ("Payment Mode", payment_mode.replace("_", " ").title()),
+        ("Payment Mode", mode_label),
         ("Status", status.title()),
     ]
+    if transaction_id:
+        rows.append(("Transaction ID", transaction_id))
     if recorded_by is not None:
         rows.append(("Recorded By (Office)", _display_name(recorded_by)))
     if notes:
@@ -141,6 +148,9 @@ def render_pdf(
     pdf.setFillColor(muted)
     pdf.setFont("Helvetica", 9)
     pdf.drawString(60, y, f"Total paid on invoice so far: Rs. {amount_paid_total:.2f} / Rs. {amount_due:.2f} due")
+    balance = Decimal(str(amount_due)) - Decimal(str(amount_paid_total))
+    y -= 14
+    pdf.drawString(60, y, f"Balance remaining: Rs. {max(balance, Decimal('0')):.2f}")
 
     # Footer
     pdf.setFillColor(muted)
